@@ -161,6 +161,10 @@ pub struct SettingsApp {
     login_error: Option<String>,
     perms: Option<(bool, bool)>,
     perms_at: Instant,
+    /// Mouse Without Borders status written by the running app.
+    mwb_status: Option<pm_config::MwbStatus>,
+    /// When "Search now" was clicked (shows "Searching…" until the app answers).
+    search_clicked: Option<Instant>,
 }
 
 impl SettingsApp {
@@ -192,6 +196,8 @@ impl SettingsApp {
             login_error: None,
             perms: crate::platform::permissions(),
             perms_at: now,
+            mwb_status: pm_config::MwbStatus::load_for(&config_path),
+            search_clicked: None,
             config_path,
         };
         if !s.config_path.exists() {
@@ -339,6 +345,7 @@ impl SettingsApp {
             if mtime(&self.fz_path) != self.fz_file.mtime && self.fz_file.clean() {
                 self.reload_fz();
             }
+            self.mwb_status = pm_config::MwbStatus::load_for(&self.config_path);
             if now - self.perms_at >= Duration::from_secs(2) {
                 self.perms_at = now;
                 self.perms = crate::platform::permissions();
@@ -986,6 +993,10 @@ impl SettingsApp {
         self.hero(ui, |_, _| {});
         let p = pal(ui);
         let this = self.app.this_machine();
+        let status = self.mwb_status.clone().filter(|s| s.is_fresh());
+        let mwb_on = self.app.cfg.mwb.enabled;
+        let search_clicked = self.search_clicked.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
+        let mut search = false;
         let d = &mut self.app;
         let s = &mut d.cfg.mwb.settings;
         let show_key = &mut self.show_key;
@@ -1059,6 +1070,42 @@ impl SettingsApp {
                 *confirm = false;
             }
         }
+
+        card_with(
+            ui,
+            "Other computers",
+            Some("Computers on this network with the same security key are found and connected automatically; PowerToys on Windows then adds this machine to its layout too."),
+            |ui| {
+                toggle_row(
+                    ui,
+                    "Find other computers automatically",
+                    Some("Looks for them on this Mac's local networks every minute until one is connected, then every 5 minutes."),
+                    &mut s.auto_discover,
+                );
+                let running = status.as_ref().is_some_and(|st| st.running);
+                let searching = search_clicked || status.as_ref().is_some_and(|st| st.searching);
+                let desc = if !mwb_on {
+                    "Turn on Mouse Without Borders to search."
+                } else if !running {
+                    "PowerMac isn't running, so it can't search right now."
+                } else if searching {
+                    "Searching this network for computers with the same key…"
+                } else {
+                    "Look for other computers on this network right away."
+                };
+                row(ui, "Search now", Some(desc), |ui| {
+                    ui.add_enabled_ui(mwb_on && running && !searching, |ui| {
+                        let label = if searching { "Searching…" } else { "Search now" };
+                        if icon_text_button(ui, icon::MAGNIFYING_GLASS, label).clicked() {
+                            search = true;
+                        }
+                    });
+                });
+                block(ui, |ui| {
+                    machine_list(ui, status.as_ref(), mwb_on);
+                });
+            },
+        );
 
         card_with(
             ui,
@@ -1205,6 +1252,17 @@ impl SettingsApp {
                 },
             );
         });
+        if search {
+            // Save first so a just-changed setting is in effect when it searches.
+            self.save_app();
+            match pm_config::DiscoverRequest::write_for(&self.config_path) {
+                Ok(()) => {
+                    self.search_clicked = Some(Instant::now());
+                    self.toast = Some((Instant::now(), "Searching the local network…".into()));
+                }
+                Err(e) => self.app_file.save_error = Some(format!("{e:#}")),
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2913,6 +2971,79 @@ fn list_item(
         p.text2,
     );
     resp
+}
+
+/// The machines the running app is connected to or found on the network,
+/// from `mwb-status.json`.
+fn machine_list(ui: &mut Ui, status: Option<&pm_config::MwbStatus>, mwb_on: bool) {
+    let p = pal(ui);
+    ui.label(RichText::new("Computers").font(theme::font_semibold(13.0)).color(p.text));
+    ui.add_space(4.0);
+    let Some(st) = status.filter(|s| s.running) else {
+        hint(
+            ui,
+            if mwb_on {
+                "The connection status appears here while PowerMac is running."
+            } else {
+                "Mouse Without Borders is off."
+            },
+        );
+        return;
+    };
+    if st.machines.is_empty() {
+        hint(
+            ui,
+            if st.searching {
+                "Searching… No other computers connected yet."
+            } else {
+                "No other computers connected yet. Check that they use the same security key and allow TCP 15101 through their firewall."
+            },
+        );
+    }
+    for m in &st.machines {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.set_min_height(34.0);
+            ui.label(theme::icon_text(icon::MONITOR).size(18.0).color(if m.connected { p.accent } else { p.text3 }));
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(RichText::new(&m.name).font(theme::font_semibold(13.0)).color(p.text));
+                let mut detail = if m.address.is_empty() { "Address unknown".to_string() } else { m.address.clone() };
+                if m.discovered {
+                    detail.push_str(" · found automatically");
+                }
+                ui.label(RichText::new(detail).size(11.5).color(p.text2));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if m.connected {
+                    status_pill(ui, true, "Connected");
+                } else {
+                    tag_pill(ui, p.warn, icon::ARROWS_CLOCKWISE, "Reconnecting");
+                }
+            });
+        });
+    }
+    for a in &st.other_key {
+        ui.add_space(4.0);
+        warn_label(ui, &format!("{a} runs Mouse Without Borders with a different security key."));
+    }
+}
+
+/// A small rounded label in `c`.
+fn tag_pill(ui: &mut Ui, c: Color32, glyph: &str, text: &str) {
+    let p = pal(ui);
+    egui::Frame::new()
+        .fill(c.gamma_multiply(if p.dark { 0.22 } else { 0.12 }))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(9, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(theme::icon_text(glyph).size(13.0).color(c));
+                ui.label(RichText::new(text).size(12.0).color(c));
+            });
+        });
 }
 
 fn status_pill(ui: &mut Ui, ok: bool, text: &str) {

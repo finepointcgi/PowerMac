@@ -3,12 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, Weak};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context};
 use log::{debug, info, warn};
@@ -17,7 +17,8 @@ use pm_input::{CaptureHandle, Disposition, InputBackend, InputEvent, KeyEvent, M
 use crate::clipboard;
 use crate::config::Config;
 use crate::crypto;
-use crate::matrix::{Dir, Matrix};
+use crate::discovery::{self, Backoff, BackoffReason, CandidateProvider};
+use crate::matrix::{Dir, Matrix, MAX_MACHINE};
 use crate::protocol::{llkhf, ptype, wm, Data, ID_ALL, ID_NONE, MOVE_MOUSE_RELATIVE};
 use crate::transport::{SecureReader, SecureWriter};
 
@@ -25,6 +26,17 @@ const JUMP_PIXELS: i32 = 2;
 const SKIP_PIXELS: i32 = 1;
 const JUMP_THROTTLE: Duration = Duration::from_millis(100);
 const RECENT_IDS: usize = 50;
+/// First discovery sweep this long after start (configured peers connect first).
+const FIRST_SWEEP_DELAY: Duration = Duration::from_secs(2);
+/// Shortest allowed interval between automatic sweeps.
+const MIN_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// After adding a discovered machine to the layout, our layout wins over the
+/// ones peers send for this long, so both sides end up with the new machine
+/// to the right of this one (PowerToys sends its own layout when it learns a
+/// new machine).
+const MATRIX_HOLD: Duration = Duration::from_secs(15);
+/// Delay before broadcasting the layout after (re)connecting a discovered machine.
+const MATRIX_BROADCAST_DELAY: Duration = Duration::from_millis(1500);
 
 /// Notifications emitted by the engine.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +48,14 @@ pub enum EngineEvent {
     /// Clipboard text received from a peer (the host app should put it on the clipboard).
     ClipboardText { from: String, text: String },
     MatrixChanged(Matrix),
+    /// Discovery (or an unknown machine connecting to us) found a machine with
+    /// the same key: `addr` is its message socket (`ip:port+1`). The engine
+    /// already uses this address for reconnects; the host app should persist it.
+    PeerDiscovered { name: String, id: u32, addr: SocketAddr },
+    /// A discovery sweep started.
+    DiscoveryStarted,
+    /// A discovery sweep finished: `probed` hosts, `open` of them accepted a connection.
+    DiscoveryFinished { probed: usize, open: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +64,17 @@ pub struct PeerStatus {
     pub id: u32,
     /// Number of trusted sockets (MWB normally keeps 2 per peer: one each way).
     pub connections: usize,
+    /// The peer's IP address.
+    pub ip: Option<IpAddr>,
+}
+
+/// A machine found by discovery this session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredPeer {
+    pub name: String,
+    pub id: u32,
+    /// Its message socket (`ip:port+1`).
+    pub addr: SocketAddr,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +89,15 @@ pub struct Status {
     pub peers: Vec<PeerStatus>,
     pub matrix: Matrix,
     pub capture_active: bool,
+    /// Machines found by discovery since the engine started.
+    pub discovered: Vec<DiscoveredPeer>,
+    /// A discovery sweep is running.
+    pub searching: bool,
+    pub auto_discover: bool,
+    /// When the last sweep started.
+    pub last_search: Option<SystemTime>,
+    /// Hosts that answered with a different security key (left alone for a while).
+    pub other_key: Vec<SocketAddr>,
 }
 
 struct Conn {
@@ -67,6 +107,7 @@ struct Conn {
     peer_id: AtomicU32,
     writer: Mutex<SecureWriter<TcpStream>>,
     stream: TcpStream,
+    remote: Option<SocketAddr>,
 }
 
 impl Conn {
@@ -104,6 +145,39 @@ struct State {
     recent_ids: [i32; RECENT_IDS],
     recent_idx: usize,
     last_clip_in: Option<(String, Instant)>,
+    /// Until then, layouts sent by peers are ignored (see [`MATRIX_HOLD`]).
+    matrix_hold_until: Option<Instant>,
+    /// Broadcast our layout at this time.
+    matrix_broadcast_at: Option<Instant>,
+}
+
+/// What happened on a connection (for discovery's per-host backoff).
+#[derive(Debug, Default)]
+struct ConnEnd {
+    trusted: bool,
+    /// A package failed validation before the handshake: a different key.
+    invalid_seen: bool,
+}
+
+/// How a connection came about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Client socket to a matrix machine (configured / known address or name).
+    Configured,
+    /// Client socket opened by a discovery probe.
+    Discovered(SocketAddr),
+    /// Accepted on our listener.
+    Incoming,
+}
+
+#[derive(Default)]
+struct DiscState {
+    backoff: Backoff,
+    in_flight: std::collections::HashSet<SocketAddr>,
+    found: Vec<DiscoveredPeer>,
+    searching: bool,
+    next_sweep: Option<Instant>,
+    last_search: Option<SystemTime>,
 }
 
 enum Out {
@@ -112,7 +186,12 @@ enum Out {
 }
 
 struct Shared {
-    cfg: Config,
+    cfg: RwLock<Config>,
+    /// Peer name -> address, from the config plus what discovery found.
+    peers: Mutex<HashMap<String, String>>,
+    disc: Mutex<DiscState>,
+    discover_now: AtomicBool,
+    provider: Arc<dyn CandidateProvider>,
     key: String,
     magic: u32,
     my_id: u32,
@@ -131,6 +210,25 @@ struct Shared {
 }
 
 pub struct Engine;
+
+/// A weak, cloneable view of a running engine (status and discovery requests)
+/// that doesn't keep it alive.
+#[derive(Clone)]
+pub struct EngineMonitor(Weak<Shared>);
+
+impl EngineMonitor {
+    /// `None` once the engine has stopped.
+    pub fn status(&self) -> Option<Status> {
+        self.0.upgrade().filter(|s| !s.stop.load(Ordering::SeqCst)).map(|s| s.status())
+    }
+
+    /// See [`EngineHandle::discover_now`].
+    pub fn discover_now(&self) {
+        if let Some(s) = self.0.upgrade() {
+            s.discover_now.store(true, Ordering::SeqCst);
+        }
+    }
+}
 
 /// Handle to a running engine. Dropping it stops the engine.
 pub struct EngineHandle {
@@ -188,6 +286,28 @@ fn jump_point(dir: Dir, x: i32, y: i32, r: Rect) -> (i32, i32) {
     universal(p.0, p.1, r)
 }
 
+/// The configured matrix, with this machine added to a free slot if missing.
+fn effective_matrix(config: &Config, my_name: &str) -> Matrix {
+    let mut matrix = config.matrix();
+    if !matrix.contains(my_name) {
+        if let Some(slot) = matrix.slots.iter_mut().find(|s| s.trim().is_empty()) {
+            *slot = my_name.to_string();
+        }
+    }
+    matrix
+}
+
+/// How a discovered message-socket address is written in `Config::peers`:
+/// the bare IP when the peer uses `our_port`, `ip:baseport` otherwise.
+pub fn peer_spec(addr: SocketAddr, our_port: u16) -> String {
+    let base = addr.port().wrapping_sub(1);
+    match (addr.ip(), base == our_port) {
+        (ip, true) => ip.to_string(),
+        (IpAddr::V4(v), false) => format!("{v}:{base}"),
+        (IpAddr::V6(v), false) => format!("[{v}]:{base}"),
+    }
+}
+
 fn tick_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -197,8 +317,19 @@ fn tick_ms() -> i64 {
 
 impl Engine {
     /// Start the engine: listen on `port + 1`, connect to the matrix machines and
-    /// install input capture on `backend`.
+    /// install input capture on `backend`. Discovery (when `auto_discover` is on,
+    /// or on [`EngineHandle::discover_now`]) scans the local network.
     pub fn start(config: Config, backend: Arc<dyn InputBackend>) -> anyhow::Result<EngineHandle> {
+        Self::start_with(config, backend, Arc::new(discovery::LanScanner))
+    }
+
+    /// [`Engine::start`] with discovery candidates from `provider` instead of a
+    /// scan of the local network (tests inject explicit addresses).
+    pub fn start_with(
+        config: Config,
+        backend: Arc<dyn InputBackend>,
+        provider: Arc<dyn CandidateProvider>,
+    ) -> anyhow::Result<EngineHandle> {
         let key = crypto::normalize_key(&config.key);
         if !crypto::is_key_valid(&key) {
             bail!("security key must have at least 16 characters");
@@ -214,12 +345,7 @@ impl Engine {
                 break v;
             }
         });
-        let mut matrix = config.matrix();
-        if !matrix.contains(&my_name) {
-            if let Some(slot) = matrix.slots.iter_mut().find(|s| s.trim().is_empty()) {
-                *slot = my_name.clone();
-            }
-        }
+        let matrix = effective_matrix(&config, &my_name);
         let screens = backend.screens().unwrap_or_default();
         let primary = screens.first().copied().unwrap_or(Rect { left: 0, top: 0, right: 1920, bottom: 1080 });
         let desktop = backend.desktop_bounds().unwrap_or(primary);
@@ -259,6 +385,8 @@ impl Engine {
                 recent_ids: [0; RECENT_IDS],
                 recent_idx: 0,
                 last_clip_in: None,
+                matrix_hold_until: None,
+                matrix_broadcast_at: None,
             }),
             conns: Mutex::new(Vec::new()),
             connecting: Mutex::new(HashSet::new()),
@@ -269,7 +397,11 @@ impl Engine {
             events: Mutex::new(Some(ev_tx)),
             capture_active: AtomicBool::new(false),
             threads: Mutex::new(Vec::new()),
-            cfg: config,
+            peers: Mutex::new(config.peers.clone()),
+            disc: Mutex::new(DiscState { next_sweep: Some(now + FIRST_SWEEP_DELAY), ..Default::default() }),
+            discover_now: AtomicBool::new(false),
+            provider,
+            cfg: RwLock::new(config),
         });
         info!("MWB engine '{}' id {} listening on {}", my_name, my_id, local_addr);
 
@@ -289,6 +421,12 @@ impl Engine {
         {
             let s = shared.clone();
             let h = thread::Builder::new().name("mwb-maint".into()).spawn(move || s.maintenance_loop())?;
+            shared.threads.lock().unwrap().push(h);
+        }
+        // Discovery thread.
+        {
+            let s = shared.clone();
+            let h = thread::Builder::new().name("mwb-discover".into()).spawn(move || s.discovery_loop())?;
             shared.threads.lock().unwrap().push(h);
         }
 
@@ -345,6 +483,50 @@ impl EngineHandle {
         self.status().active_machine
     }
 
+    /// A weak view for status polling from other threads.
+    pub fn monitor(&self) -> EngineMonitor {
+        EngineMonitor(Arc::downgrade(&self.shared))
+    }
+
+    /// Run a discovery sweep now (also when `auto_discover` is off).
+    pub fn discover_now(&self) {
+        self.shared.discover_now.store(true, Ordering::SeqCst);
+    }
+
+    /// Replace the peer addresses (name -> `host`, `ip` or `host:baseport`).
+    /// Addresses discovered this session that `peers` doesn't mention are kept.
+    pub fn set_peers(&self, peers: HashMap<String, String>) {
+        self.shared.set_peers(peers);
+    }
+
+    /// Replace the machine layout. When it differs from the current one it is
+    /// sent to the peers, as MWB does when the layout is edited.
+    pub fn set_matrix(&self, names: &[String], one_row: bool, wrap_around: bool) {
+        let mut c = self.shared.cfg().clone();
+        c.matrix = names.to_vec();
+        c.one_row = one_row;
+        c.wrap_around = wrap_around;
+        self.shared.apply_matrix(&c);
+    }
+
+    /// Apply `new` to the running engine: peers, layout, discovery and behavior
+    /// settings take effect immediately. Returns false (and changes nothing)
+    /// when `new` differs in something that needs a restart (see
+    /// [`Config::needs_restart`]).
+    pub fn update_config(&self, new: &Config) -> bool {
+        if self.shared.cfg().needs_restart(new) {
+            return false;
+        }
+        let was_auto = self.shared.cfg().auto_discover;
+        *self.shared.cfg.write().unwrap() = new.clone();
+        self.shared.set_peers(new.peers.clone());
+        self.shared.apply_matrix(new);
+        if new.auto_discover && !was_auto {
+            self.discover_now();
+        }
+        true
+    }
+
     /// Take the event receiver (only once).
     pub fn events(&self) -> Option<Receiver<EngineEvent>> {
         self.events_rx.lock().unwrap().take()
@@ -357,7 +539,7 @@ impl EngineHandle {
 
     /// Push clipboard text to all peers (if `share_clipboard`).
     pub fn send_clipboard_text(&self, text: &str) -> anyhow::Result<()> {
-        if !self.shared.cfg.share_clipboard {
+        if !self.shared.cfg().share_clipboard {
             return Ok(());
         }
         let payload = clipboard::encode_text(text);
@@ -412,6 +594,10 @@ impl Drop for EngineHandle {
 }
 
 impl Shared {
+    fn cfg(&self) -> RwLockReadGuard<'_, Config> {
+        self.cfg.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn emit(&self, e: EngineEvent) {
         if let Some(tx) = self.events.lock().unwrap().as_ref() {
             let _ = tx.send(e);
@@ -495,7 +681,7 @@ impl Shared {
                     let s = self.clone();
                     let _ = thread::Builder::new()
                         .name(format!("mwb-srv-{addr}"))
-                        .spawn(move || s.run_connection(stream, false, addr.ip().to_string()));
+                        .spawn(move || s.run_connection(stream, false, addr.ip().to_string(), Origin::Incoming));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(50)),
                 Err(e) => {
@@ -510,7 +696,7 @@ impl Shared {
         let mut last_hb = Instant::now();
         let mut last_connect = Instant::now() - Duration::from_secs(3600);
         while !self.stop.load(Ordering::SeqCst) {
-            if last_connect.elapsed() >= Duration::from_secs(self.cfg.reconnect_secs.max(1)) {
+            if last_connect.elapsed() >= Duration::from_secs(self.cfg().reconnect_secs.max(1)) {
                 last_connect = Instant::now();
                 self.update_tcp_clients();
                 if let Ok(screens) = self.backend.screens() {
@@ -522,10 +708,11 @@ impl Shared {
                     }
                 }
             }
-            if last_hb.elapsed() >= Duration::from_secs(self.cfg.heartbeat_secs.max(1)) {
+            if last_hb.elapsed() >= Duration::from_secs(self.cfg().heartbeat_secs.max(1)) {
                 last_hb = Instant::now();
                 self.enqueue(ID_ALL, self.package(ptype::Heartbeat));
             }
+            self.matrix_broadcast_tick();
             thread::sleep(Duration::from_millis(100));
         }
     }
@@ -563,17 +750,19 @@ impl Shared {
 
     fn resolve_peer_addrs(&self, name: &str) -> anyhow::Result<Vec<SocketAddr>> {
         let spec = self
-            .cfg
             .peers
+            .lock()
+            .unwrap()
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.trim().to_string())
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| name.to_string());
         let (host, base) = match spec.rsplit_once(':') {
             Some((h, p)) if !h.contains(':') || h.starts_with('[') => {
                 (h.trim_matches(|c| c == '[' || c == ']').to_string(), p.parse::<u16>().context("bad port")?)
             }
-            _ => (spec.clone(), self.cfg.port),
+            _ => (spec.clone(), self.cfg().port),
         };
         Ok((host.as_str(), base.wrapping_add(1)).to_socket_addrs()?.collect())
     }
@@ -585,7 +774,7 @@ impl Shared {
             match TcpStream::connect_timeout(&a, Duration::from_secs(3)) {
                 Ok(s) => {
                     debug!("connected to {name} at {a}");
-                    self.clone().run_connection(s, true, name.to_string());
+                    self.clone().run_connection(s, true, name.to_string(), Origin::Configured);
                     return Ok(());
                 }
                 Err(e) => last_err = Some(e),
@@ -598,16 +787,29 @@ impl Shared {
     }
 
     /// `SocketStuff.MainTCPRoutine`.
-    fn run_connection(self: Arc<Self>, stream: TcpStream, is_client: bool, hint_name: String) {
-        if let Err(e) = self.clone().connection_inner(stream, is_client, hint_name.clone()) {
+    fn run_connection(self: Arc<Self>, stream: TcpStream, is_client: bool, hint_name: String, origin: Origin) {
+        let mut end = ConnEnd::default();
+        let r = self.clone().connection_inner(stream, is_client, hint_name.clone(), origin, &mut end);
+        if let Origin::Discovered(addr) = origin {
+            self.discovered_connection_ended(addr, &end, &r);
+        } else if let Err(e) = r {
             debug!("connection {hint_name} ended: {e}");
         }
     }
 
-    fn connection_inner(self: Arc<Self>, stream: TcpStream, is_client: bool, hint_name: String) -> io::Result<()> {
+    fn connection_inner(
+        self: Arc<Self>,
+        stream: TcpStream,
+        is_client: bool,
+        hint_name: String,
+        origin: Origin,
+        end: &mut ConnEnd,
+    ) -> io::Result<()> {
         if self.stop.load(Ordering::SeqCst) {
             return Ok(());
         }
+        let discovered = matches!(origin, Origin::Discovered(_));
+        let remote = stream.peer_addr().ok();
         stream.set_nodelay(true)?;
         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -639,6 +841,9 @@ impl Shared {
                 Ok(p) => p,
                 Err(e) => break Err(e),
             };
+            if !pkt.valid && package_count >= 0 {
+                end.invalid_seen = true;
+            }
             let mut p = pkt.data;
             let t = p.ptype();
             if t == ptype::Handshake {
@@ -661,7 +866,11 @@ impl Shared {
             if package_count >= 0 {
                 package_count += 1;
                 if package_count >= 10 {
-                    warn!("more than 10 invalid packages from {hint_name}: wrong security key?");
+                    if discovered {
+                        debug!("more than 10 invalid packages from {hint_name}: different security key");
+                    } else {
+                        warn!("more than 10 invalid packages from {hint_name}: wrong security key?");
+                    }
                     if let Some(w) = writer.as_mut() {
                         let mut inv = p.clone();
                         inv.set_type(ptype::Invalid);
@@ -690,15 +899,41 @@ impl Shared {
                             peer_id: AtomicU32::new(remote_id),
                             writer: Mutex::new(writer.take().unwrap()),
                             stream: stream.try_clone()?,
+                            remote,
                         });
+                        end.trusted = true;
                         let _ = stream.set_read_timeout(None);
                         self.conns.lock().unwrap().push(c.clone());
                         conn = Some(c);
                         info!("trusted {} '{}' id {}", if is_client { "client" } else { "server" }, name, remote_id);
                         let first = self.peer_conn_count(remote_id) == 1;
+                        let known = self.st().pool.contains_key(&name.to_lowercase());
                         self.learn_machine(&name, remote_id);
                         if first {
                             self.emit(EngineEvent::PeerConnected { name: name.clone(), id: remote_id });
+                        }
+                        // Before the first heartbeat goes out: broadcasts only reach matrix machines.
+                        match origin {
+                            Origin::Discovered(addr) => self.on_discovered(&name, remote_id, addr, true),
+                            Origin::Incoming => {
+                                // MWB adds a machine that connects with the right key to its
+                                // layout (MachineStuff.AddToMachinePool); remember where it is.
+                                let new_machine = !known && !self.st().matrix.contains(&name);
+                                if new_machine && self.cfg().auto_discover {
+                                    if let Some(r) = remote {
+                                        let port = self.cfg().port.wrapping_add(1);
+                                        self.on_discovered(&name, remote_id, SocketAddr::new(r.ip(), port), false);
+                                    }
+                                }
+                            }
+                            Origin::Configured => {}
+                        }
+                        {
+                            let mut st = self.st();
+                            if st.matrix_hold_until.is_some_and(|t| Instant::now() < t) {
+                                // (Re)connected while our layout is pending: send it (again).
+                                st.matrix_broadcast_at = Some(Instant::now() + MATRIX_BROADCAST_DELAY);
+                            }
                         }
                         // Common.SendHeartBeat(initial: true)
                         self.enqueue(ID_ALL, self.package(ptype::Heartbeat));
@@ -763,6 +998,229 @@ impl Shared {
         result
     }
 
+    // ------------------------------------------------------------------
+    // Discovery, peers and layout updates
+    // ------------------------------------------------------------------
+
+    fn discovery_loop(self: Arc<Self>) {
+        while !self.stop.load(Ordering::SeqCst) {
+            let asked = self.discover_now.swap(false, Ordering::SeqCst);
+            let due = {
+                let cfg = self.cfg();
+                let d = self.disc.lock().unwrap();
+                !d.searching
+                    && (asked || (cfg.auto_discover && d.next_sweep.is_some_and(|t| Instant::now() >= t)))
+            };
+            if due {
+                self.sweep();
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The interval until the next automatic sweep.
+    fn sweep_interval(&self) -> Duration {
+        let connected = !self.conns.lock().unwrap().is_empty();
+        let cfg = self.cfg();
+        let secs = if connected { cfg.discovery_interval_connected_secs } else { cfg.discovery_interval_secs };
+        Duration::from_secs(secs).max(MIN_SWEEP_INTERVAL)
+    }
+
+    /// One discovery sweep: probe every candidate that isn't connected, in
+    /// flight or backed off, and run the handshake on each open socket.
+    fn sweep(self: &Arc<Self>) {
+        let msg_port = self.cfg().port.wrapping_add(1);
+        let now = Instant::now();
+        {
+            let mut d = self.disc.lock().unwrap();
+            d.searching = true;
+            d.last_search = Some(SystemTime::now());
+            d.backoff.prune(now);
+        }
+        self.emit(EngineEvent::DiscoveryStarted);
+        let connected: Vec<SocketAddr> = self.conns.lock().unwrap().iter().filter_map(|c| c.remote).collect();
+        let is_connected = |a: &SocketAddr| {
+            connected.iter().any(|c| c == a || (!a.ip().is_loopback() && c.ip() == a.ip()))
+        };
+        let own = self.listen_addr();
+        let cands: Vec<SocketAddr> = {
+            let d = self.disc.lock().unwrap();
+            self.provider
+                .candidates(msg_port)
+                .into_iter()
+                .filter(|a| Some(*a) != own && !is_connected(a))
+                .filter(|a| !d.in_flight.contains(a) && !d.backoff.is_blocked(a, now))
+                .collect()
+        };
+        debug!("discovery: probing {} hosts on port {msg_port}", cands.len());
+        let open = discovery::probe(&cands, discovery::PROBE_TIMEOUT, discovery::PROBE_CONCURRENCY, &self.stop, &|addr, stream| {
+            if !self.disc.lock().unwrap().in_flight.insert(addr) {
+                return;
+            }
+            debug!("discovery: {addr} is open, trying the handshake");
+            let s = self.clone();
+            let r = thread::Builder::new().name(format!("mwb-disc-{addr}")).spawn(move || {
+                s.clone().run_connection(stream, true, addr.to_string(), Origin::Discovered(addr));
+                s.disc.lock().unwrap().in_flight.remove(&addr);
+            });
+            if r.is_err() {
+                self.disc.lock().unwrap().in_flight.remove(&addr);
+            }
+        });
+        let next = Instant::now() + self.sweep_interval();
+        {
+            let mut d = self.disc.lock().unwrap();
+            d.searching = false;
+            d.next_sweep = Some(next);
+        }
+        if open > 0 || !cands.is_empty() {
+            info!("discovery: probed {} hosts, {open} answered", cands.len());
+        }
+        self.emit(EngineEvent::DiscoveryFinished { probed: cands.len(), open });
+    }
+
+    fn listen_addr(&self) -> Option<SocketAddr> {
+        let cfg = self.cfg();
+        let ip: IpAddr = cfg.bind_address.trim().parse().ok()?;
+        (!ip.is_unspecified()).then(|| SocketAddr::new(ip, cfg.port.wrapping_add(1)))
+    }
+
+    /// A connection opened by discovery ended: back off from hosts that didn't
+    /// complete the handshake so they aren't bothered every sweep.
+    fn discovered_connection_ended(&self, addr: SocketAddr, end: &ConnEnd, r: &io::Result<()>) {
+        if end.trusted {
+            debug!("discovered connection to {addr} ended: {r:?}");
+            return;
+        }
+        let reason = match r {
+            Ok(()) => return, // ourselves, a duplicate socket, or stopping
+            Err(e) if end.invalid_seen || matches!(e.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidData) => {
+                BackoffReason::KeyMismatch
+            }
+            Err(_) => BackoffReason::NoHandshake,
+        };
+        let mins = reason.duration().as_secs() / 60;
+        match reason {
+            BackoffReason::KeyMismatch => {
+                info!("discovery: {addr} runs Mouse Without Borders with a different security key; trying it again in {mins} min")
+            }
+            BackoffReason::NoHandshake => {
+                debug!("discovery: {addr} didn't complete the handshake ({r:?}); trying it again in {mins} min")
+            }
+        }
+        self.disc.lock().unwrap().backoff.block(addr, reason, Instant::now());
+    }
+
+    /// A machine with our key was found at `addr`: use the address from now on,
+    /// add the machine to the layout if there is room, and tell the host app.
+    /// `active`: we found it (and send it our layout, which takes precedence for
+    /// a moment); otherwise it connected to us, and its layout is adopted as usual.
+    fn on_discovered(&self, name: &str, id: u32, addr: SocketAddr, active: bool) {
+        let spec = peer_spec(addr, self.cfg().port);
+        {
+            let mut peers = self.peers.lock().unwrap();
+            peers.retain(|k, _| !k.eq_ignore_ascii_case(name));
+            peers.insert(name.to_string(), spec);
+        }
+        {
+            let mut d = self.disc.lock().unwrap();
+            d.backoff.clear(&addr);
+            d.found.retain(|p| !p.name.eq_ignore_ascii_case(name));
+            d.found.push(DiscoveredPeer { name: name.to_string(), id, addr });
+        }
+        let changed = {
+            let mut st = self.st();
+            if st.matrix.insert_new(&self.my_name, name) {
+                if active {
+                    let now = Instant::now();
+                    st.matrix_hold_until = Some(now + MATRIX_HOLD);
+                    st.matrix_broadcast_at = Some(now + MATRIX_BROADCAST_DELAY);
+                }
+                Some(st.matrix.clone())
+            } else {
+                None
+            }
+        };
+        info!("discovered '{name}' (id {id}) at {addr}");
+        self.emit(EngineEvent::PeerDiscovered { name: name.to_string(), id, addr });
+        if let Some(m) = changed {
+            info!("added '{name}' to the layout: {:?}", m.slots);
+            self.emit(EngineEvent::MatrixChanged(m));
+        }
+    }
+
+    fn set_peers(&self, new: HashMap<String, String>) {
+        let found: Vec<(String, String)> = {
+            let d = self.disc.lock().unwrap();
+            let port = self.cfg().port;
+            d.found.iter().map(|p| (p.name.clone(), peer_spec(p.addr, port))).collect()
+        };
+        let mut peers = new;
+        for (n, a) in found {
+            if !peers.keys().any(|k| k.eq_ignore_ascii_case(&n)) {
+                peers.insert(n, a);
+            }
+        }
+        *self.peers.lock().unwrap() = peers;
+    }
+
+    /// Use `cfg`'s layout; broadcast it when it changed.
+    fn apply_matrix(&self, cfg: &Config) {
+        let m = effective_matrix(cfg, &self.my_name);
+        let changed = {
+            let mut st = self.st();
+            if st.matrix != m {
+                st.matrix = m;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            info!("layout changed: {:?}", self.st().matrix.slots);
+            self.broadcast_matrix();
+        }
+    }
+
+    /// `MachineStuff.SendMachineMatrix`: one `Matrix` package per slot, `src` = slot number.
+    fn broadcast_matrix(&self) {
+        let m = self.st().matrix.clone();
+        let mut t = ptype::Matrix;
+        if m.circle {
+            t |= ptype::MatrixSwapFlag;
+        }
+        if !m.one_row {
+            t |= ptype::MatrixTwoRowFlag;
+        }
+        for (i, name) in m.slots.iter().enumerate().take(MAX_MACHINE) {
+            let mut d = Data::new(t);
+            d.set_machine_name(name.trim());
+            d.set_src(i as u32 + 1);
+            self.enqueue(ID_ALL, d);
+        }
+    }
+
+    fn matrix_broadcast_tick(&self) {
+        let now = Instant::now();
+        let send = {
+            let mut st = self.st();
+            if st.matrix_hold_until.is_some_and(|t| now >= t) {
+                st.matrix_hold_until = None;
+            }
+            match st.matrix_broadcast_at {
+                Some(t) if now >= t => {
+                    st.matrix_broadcast_at = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if send {
+            debug!("sending the layout to the peers");
+            self.broadcast_matrix();
+        }
+    }
+
     fn peer_conn_count(&self, id: u32) -> usize {
         self.conns.lock().unwrap().iter().filter(|c| c.peer_id.load(Ordering::SeqCst) == id).count()
     }
@@ -791,13 +1249,17 @@ impl Shared {
     }
 
     fn status(&self) -> Status {
+        let d = self.disc.lock().unwrap();
         let st = self.st();
         let conns = self.conns.lock().unwrap();
         let mut peers: HashMap<u32, PeerStatus> = HashMap::new();
         for c in conns.iter() {
             let id = c.peer_id.load(Ordering::SeqCst);
-            let e = peers.entry(id).or_insert_with(|| PeerStatus { name: c.name(), id, connections: 0 });
+            let e = peers.entry(id).or_insert_with(|| PeerStatus { name: c.name(), id, connections: 0, ip: None });
             e.connections += 1;
+            if e.ip.is_none() || c.is_client {
+                e.ip = c.remote.map(|a| a.ip()).or(e.ip);
+            }
         }
         let mut peers: Vec<_> = peers.into_values().collect();
         peers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -810,6 +1272,11 @@ impl Shared {
             peers,
             matrix: st.matrix.clone(),
             capture_active: self.capture_active.load(Ordering::SeqCst),
+            discovered: d.found.clone(),
+            searching: d.searching,
+            auto_discover: self.cfg().auto_discover,
+            last_search: d.last_search,
+            other_key: d.backoff.blocked(BackoffReason::KeyMismatch, Instant::now()),
         }
     }
 
@@ -834,7 +1301,7 @@ impl Shared {
     fn on_local_key(&self, st: &mut State, k: KeyEvent) -> Disposition {
         let entry = (k.vk, k.extended);
         let local = st.des == self.my_id || st.des == ID_ALL;
-        let k = if !local && self.cfg.swap_cmd_ctrl { pm_input::vk::swap_cmd_ctrl_event(k) } else { k };
+        let k = if !local && self.cfg().swap_cmd_ctrl { pm_input::vk::swap_cmd_ctrl_event(k) } else { k };
         if st.des == self.my_id || st.des == ID_ALL {
             if k.down {
                 st.keys_local_down.insert(entry);
@@ -866,7 +1333,7 @@ impl Shared {
         let local = st.des == self.my_id || st.des == ID_ALL;
         if local {
             if let MouseEvent::Move { x, y, .. } = m {
-                if self.cfg.easy_mouse && st.des == self.my_id {
+                if self.cfg().easy_mouse && st.des == self.my_id {
                     if let Some(dir) = edge_dir(x, y, st.desktop) {
                         if st.last_jump.elapsed() >= JUMP_THROTTLE {
                             if let Some(new_id) = self.neighbour(st, &self.my_name, dir) {
@@ -919,7 +1386,7 @@ impl Shared {
 
         // Event.MouseEvent: edge detection on the virtual cursor (absolute mode).
         if let MouseEvent::Move { .. } = m {
-            if self.cfg.easy_mouse && !self.cfg.move_mouse_relatively && st.last_jump.elapsed() >= JUMP_THROTTLE {
+            if self.cfg().easy_mouse && !self.cfg().move_mouse_relatively && st.last_jump.elapsed() >= JUMP_THROTTLE {
                 if let Some(dir) = edge_dir(st.virt.0, st.virt.1, p) {
                     let cur = self.name_of(st, st.des).unwrap_or_default();
                     if let Some(new_id) = self.neighbour(st, &cur, dir) {
@@ -955,7 +1422,7 @@ impl Shared {
         let mut d = Data::new(ptype::Mouse);
         d.set_md_flags(flags);
         d.set_md_wheel(wheel);
-        if self.cfg.move_mouse_relatively && relative_encoded {
+        if self.cfg().move_mouse_relatively && relative_encoded {
             let ex = if dx < 0 { dx - MOVE_MOUSE_RELATIVE } else { dx + MOVE_MOUSE_RELATIVE };
             let ey = if dy < 0 { dy - MOVE_MOUSE_RELATIVE } else { dy + MOVE_MOUSE_RELATIVE };
             d.set_md_x(ex);
@@ -1008,7 +1475,7 @@ impl Shared {
                 st.anchor = center(st.primary);
                 let _ = self.backend.set_cursor_pos(st.anchor.0, st.anchor.1);
                 let _ = self.backend.set_cursor_locked(true);
-                if self.cfg.hide_cursor_when_away && !st.cursor_hidden {
+                if self.cfg().hide_cursor_when_away && !st.cursor_hidden {
                     let _ = self.backend.set_cursor_visible(false);
                     st.cursor_hidden = true;
                 }
@@ -1078,7 +1545,7 @@ impl Shared {
             ptype::Keyboard if for_me => {
                 let flags = p.kd_flags();
                 let mut k = KeyEvent { vk: p.kd_vk() as u32 & 0xFFFF, down: flags & llkhf::UP == 0, extended: flags & llkhf::EXTENDED != 0 };
-                if self.cfg.swap_cmd_ctrl {
+                if self.cfg().swap_cmd_ctrl {
                     k = pm_input::vk::swap_cmd_ctrl_event(k);
                 }
                 if k.down {
@@ -1093,7 +1560,7 @@ impl Shared {
             }
             ptype::Mouse if for_me => self.on_remote_mouse(st, &p),
             ptype::NextMachine => {
-                if self.cfg.easy_mouse && p.des() == self.my_id {
+                if self.cfg().easy_mouse && p.des() == self.my_id {
                     let new_id = p.md_wheel() as u32;
                     self.prepare_to_switch(&mut st, new_id, (p.md_x(), p.md_y()));
                 }
@@ -1134,7 +1601,11 @@ impl Shared {
                 // Big-clipboard / file transfer over the clipboard socket: not implemented.
             }
             _ if t & ptype::Matrix == ptype::Matrix => {
-                if !self.cfg.accept_remote_matrix {
+                if !self.cfg().accept_remote_matrix {
+                    return;
+                }
+                if st.matrix_hold_until.is_some_and(|until| Instant::now() < until) {
+                    debug!("ignoring a layout from {} while ours goes to a newly found machine", conn.name());
                     return;
                 }
                 let i = p.src();
@@ -1241,7 +1712,7 @@ impl Shared {
     }
 
     fn on_clipboard_data(&self, conn: &Arc<Conn>, image: bool, data: &[u8]) {
-        if image || !self.cfg.share_clipboard {
+        if image || !self.cfg().share_clipboard {
             return; // images not supported
         }
         match clipboard::decode_text(data) {

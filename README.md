@@ -37,7 +37,7 @@ Config lives at `~/Library/Application Support/PowerMac/config.json` (`%APPDATA%
 ### Pairing with Windows PowerToys
 
 1. In PowerToys → Mouse Without Borders on the PC, copy its security key and machine name. You can also go the other way: use **Copy security key** in the PowerMac tray and paste it into PowerToys.
-2. In Settings → Mouse Without Borders, enter the key, then put both machines in the matrix in left-to-right order. If the PC's name doesn't resolve, add a peer address such as `192.168.1.20`.
+2. In Settings → Mouse Without Borders, enter the key. With **Find other computers automatically** on (the default), PowerMac probes TCP 15101 on the hosts of this Mac's private subnets (at most 1024 per network, the /24 around the Mac on larger ones) every minute until a machine is connected, then every 5 minutes, or right away with **Search now** / tray → **Find computers now**. A machine that completes the key handshake is connected, put to the right of this Mac in the layout, and its address is saved; PowerToys then adds the Mac to its own layout. A machine with a different key is left alone for 30 minutes. Otherwise put both machines in the matrix in left-to-right order, and if the PC's name doesn't resolve, add a peer address such as `192.168.1.20`.
 3. Allow TCP **15101** through the firewall on both machines.
 4. "Swap Cmd/Ctrl" (on by default on macOS) makes Cmd+C on the Mac arrive as Ctrl+C on Windows, and the other way round.
 

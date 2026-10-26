@@ -132,3 +132,8 @@ pub fn hex(s: &str) -> Vec<u8> {
 pub fn to_hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
+
+/// Discovery candidates for tests: none (tests must never scan the network).
+pub fn no_scan() -> std::sync::Arc<dyn mwb::discovery::CandidateProvider> {
+    std::sync::Arc::new(mwb::discovery::StaticCandidates(Vec::new()))
+}

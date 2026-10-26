@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use pm_config::AppConfig;
-use crate::{clipboard, Running, RUNNING};
+use crate::{clipboard, mwb_glue, Running, RUNNING};
 
 fn changed<T: serde::Serialize>(old: Option<&T>, new: &T) -> bool {
     match old {
@@ -39,12 +39,24 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
 
     clipboard::SHARE.store(new.mwb.enabled && new.mwb.settings.share_clipboard, Ordering::Relaxed);
     if changed(old.map(|o| &o.mwb), &new.mwb) {
-        if let Some(m) = running.mwb.take() {
-            m.stop();
-            log::info!("mouse without borders: stopped");
-        }
-        if new.mwb.enabled {
-            running.mwb = start_mwb(&new.mwb.settings);
+        // Peers, layout, discovery and behavior changes (including the app's own
+        // writes of discovered machines) go to the running engine; only socket,
+        // key and identity changes restart it.
+        let live = new.mwb.enabled
+            && running.mwb.as_ref().is_some_and(|m| m.update_config(&new.mwb.settings));
+        if live {
+            log::info!("mouse without borders: settings applied");
+        } else {
+            if let Some(m) = running.mwb.take() {
+                m.stop();
+                log::info!("mouse without borders: stopped");
+            }
+            if new.mwb.enabled {
+                running.mwb = start_mwb(&new.mwb.settings);
+            }
+            if running.mwb.is_none() {
+                mwb_glue::write_stopped();
+            }
         }
     }
 
@@ -282,6 +294,23 @@ fn flash_zones(path: &Path) {
     }
 }
 
+/// Handle a "Search now" request file written by the settings window
+/// (requests older than 10 s are ignored).
+fn request_discovery(path: &Path) {
+    let req: pm_config::DiscoverRequest = match std::fs::read_to_string(path).map(|s| serde_json::from_str(&s)) {
+        Ok(Ok(r)) => r,
+        _ => return,
+    };
+    if !req.is_fresh(10_000) {
+        return;
+    }
+    let guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(m) = guard.as_ref().and_then(|r| r.mwb.as_ref()) {
+        log::info!("mouse without borders: searching the network (settings)");
+        m.discover_now();
+    }
+}
+
 fn apply_scroll(running: &mut Running, cfg: &scroll_reverser::Config) {
     match (cfg.enabled, running.scroll.as_mut()) {
         (true, Some(h)) => h.update(*cfg),
@@ -322,7 +351,7 @@ fn start_mwb(settings: &mwb::Config) -> Option<mwb::EngineHandle> {
     match mwb::Engine::start(settings.clone(), backend) {
         Ok(h) => {
             log::info!("mouse without borders: {} listening on {}", h.machine_name(), h.local_addr());
-            clipboard::forward_events(h.events());
+            mwb_glue::start(&h);
             Some(h)
         }
         Err(e) => {
@@ -346,6 +375,9 @@ pub fn watch(path: &Path, mut current: AppConfig) {
         .as_ref()
         .map(|p| p.with_file_name(fancyzones::FLASH_REQUEST_FILE));
     let mut flash_last: Option<SystemTime> = flash_path.as_deref().and_then(mtime);
+    // "Search now" requests from the settings window.
+    let discover_path = path.with_file_name(pm_config::MWB_DISCOVER_REQUEST_FILE);
+    let mut discover_last: Option<SystemTime> = mtime(&discover_path);
     std::thread::Builder::new()
         .name("config-watch".into())
         .spawn(move || loop {
@@ -369,6 +401,13 @@ pub fn watch(path: &Path, mut current: AppConfig) {
                     if now.is_some() {
                         flash_zones(fp);
                     }
+                }
+            }
+            let now = mtime(&discover_path);
+            if now != discover_last {
+                discover_last = now;
+                if now.is_some() {
+                    request_discovery(&discover_path);
                 }
             }
             let now = mtime(&path);

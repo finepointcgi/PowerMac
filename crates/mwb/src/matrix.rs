@@ -58,6 +58,46 @@ impl Matrix {
         self.slots.iter().map(|s| s.trim()).filter(|s| !s.is_empty())
     }
 
+    /// Add a newly found machine `name` next to `me`: in one-row mode right
+    /// of `me` (shifting the machines after it into the nearest free slot on
+    /// the right, or `me` and the machines before it to the left when the
+    /// right side is full); in two-row mode into the first free slot. Returns
+    /// false when `name` is already there or every slot is taken.
+    pub fn insert_new(&mut self, me: &str, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || self.contains(name) {
+            return false;
+        }
+        let free = |m: &Matrix, i: usize| m.slots[i].trim().is_empty();
+        let mine = (0..MAX_MACHINE).find(|&i| eq(me, &self.slots[i]));
+        match mine {
+            Some(i) if self.one_row => {
+                if let Some(j) = (i + 1..MAX_MACHINE).find(|&j| free(self, j)) {
+                    for k in (i + 1..j).rev() {
+                        self.slots[k + 1] = std::mem::take(&mut self.slots[k]);
+                    }
+                    self.slots[i + 1] = name.to_string();
+                    true
+                } else if let Some(j) = (0..i).rev().find(|&j| free(self, j)) {
+                    for k in j..i {
+                        self.slots[k] = std::mem::take(&mut self.slots[k + 1]);
+                    }
+                    self.slots[i] = name.to_string();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => match (0..MAX_MACHINE).find(|&j| free(self, j)) {
+                Some(j) => {
+                    self.slots[j] = name.to_string();
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
     /// Find the machine id the cursor moves to when leaving `current` in `dir`.
     ///
     /// * `resolve(name)` — machine id known for that name (C# `IdFromName`, `None` = `ID.NONE`).
@@ -177,6 +217,28 @@ mod tests {
         // disconnected machines are skipped in one-row mode
         let not_b = |n: &str| n != "B";
         assert_eq!(m.neighbour("A", Dir::Right, &ids, &not_b), Some(3));
+    }
+
+    #[test]
+    fn insert_new_goes_right_of_this_machine() {
+        let ins = |slots: [&str; 4], one_row: bool| {
+            let mut m = Matrix::from_names(&slots, one_row, false);
+            let ok = m.insert_new("mac", "PC");
+            (ok, m.slots.clone())
+        };
+        assert_eq!(ins(["MAC", "", "", ""], true), (true, ["MAC", "PC", "", ""].map(String::from)));
+        assert_eq!(ins(["MAC", "A", "", ""], true), (true, ["MAC", "PC", "A", ""].map(String::from)));
+        assert_eq!(ins(["A", "MAC", "B", ""], true), (true, ["A", "MAC", "PC", "B"].map(String::from)));
+        // Right side full: this machine moves left to make room.
+        assert_eq!(ins(["", "A", "MAC", "B"], true), (true, ["A", "MAC", "PC", "B"].map(String::from)));
+        assert_eq!(ins(["", "", "", "MAC"], true), (true, ["", "", "MAC", "PC"].map(String::from)));
+        // Full, or already there.
+        assert!(!ins(["MAC", "A", "B", "C"], true).0);
+        assert!(!ins(["MAC", "pc", "", ""], true).0);
+        // This machine missing: first free slot.
+        assert_eq!(ins(["A", "", "", ""], true), (true, ["A", "PC", "", ""].map(String::from)));
+        // Two rows: first free slot.
+        assert_eq!(ins(["A", "", "MAC", ""], false), (true, ["A", "PC", "MAC", ""].map(String::from)));
     }
 
     #[test]

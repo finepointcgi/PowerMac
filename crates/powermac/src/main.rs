@@ -2,6 +2,7 @@
 
 mod clipboard;
 mod modules;
+mod mwb_glue;
 mod tray;
 
 use std::sync::{Arc, Mutex};
@@ -98,6 +99,7 @@ pub(crate) fn shutdown() {
     if let Some(mut r) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).take() {
         if let Some(m) = &r.mwb {
             m.stop();
+            mwb_glue::write_stopped();
         }
         if let Some(z) = &mut r.zones {
             z.stop();

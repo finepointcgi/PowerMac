@@ -32,6 +32,7 @@ struct Ui {
     _tray: TrayIcon,
     settings: MenuItem,
     mwb_status: MenuItem,
+    mwb_find: MenuItem,
     mwb_switch: Submenu,
     mwb_machines: Vec<String>,
     awake_status: MenuItem,
@@ -66,6 +67,7 @@ pub fn install() -> anyhow::Result<()> {
     let title = MenuItem::new("PowerMac", false, None);
 
     let mwb_status = MenuItem::new("Mouse Without Borders: off", false, None);
+    let mwb_find = MenuItem::new("Find computers now", false, None);
     let mwb_switch = Submenu::new("Switch to", false);
 
     let awake = Submenu::new("Awake", true);
@@ -112,6 +114,7 @@ pub fn install() -> anyhow::Result<()> {
         &title,
         &PredefinedMenuItem::separator(),
         &mwb_status,
+        &mwb_find,
         &mwb_switch,
         &copy_key,
         &PredefinedMenuItem::separator(),
@@ -140,6 +143,7 @@ pub fn install() -> anyhow::Result<()> {
             _tray: tray,
             settings,
             mwb_status,
+            mwb_find,
             mwb_switch,
             mwb_machines: Vec::new(),
             awake_status,
@@ -199,6 +203,12 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
             std::thread::sleep(Duration::from_millis(250));
             with_running(|r| r.keyboard.as_ref().map(|k| k.paste_plain_text()));
         });
+        return;
+    }
+    if id == ui.mwb_find.id() {
+        with_running(|r| r.mwb.as_ref().map(|m| m.discover_now()));
+        ui.mwb_find.set_text("Searching…");
+        ui.mwb_find.set_enabled(false);
         return;
     }
     if id == ui.find_mouse.id() {
@@ -346,18 +356,14 @@ fn refresh_ui(ui: &mut Ui) {
     match &mwb {
         None => {
             ui.mwb_status.set_text("Mouse Without Borders: off");
+            ui.mwb_find.set_text("Find computers now");
+            ui.mwb_find.set_enabled(false);
             ui.mwb_switch.set_enabled(false);
         }
         Some(st) => {
-            let peers: Vec<_> = st.peers.iter().filter(|p| p.connections > 0).map(|p| p.name.clone()).collect();
-            let text = if let Some(by) = &st.controlled_by {
-                format!("Controlled by {by}")
-            } else if peers.is_empty() {
-                "Mouse Without Borders: no peers".to_string()
-            } else {
-                format!("Connected: {}", peers.join(", "))
-            };
-            ui.mwb_status.set_text(text);
+            ui.mwb_status.set_text(crate::mwb_glue::status_line(st));
+            ui.mwb_find.set_text(if st.searching { "Searching…" } else { "Find computers now" });
+            ui.mwb_find.set_enabled(!st.searching);
             let machines: Vec<String> = st.matrix.names().map(str::to_string).collect();
             if machines != ui.mwb_machines {
                 for item in ui.mwb_switch.items() {

@@ -3,7 +3,8 @@
 //   decode-stream <key> <hex>                 -> decrypt + parse a Rust-produced stream
 //   decode-clip <hex>                         -> decompress Rust clipboard payload
 //   peer serve|connect <host> <baseport> <key> <name> <id> <script> <seconds> [clip]
-//        a live MWB peer (MainTCPRoutine port) printing JSON lines.
+//        a live MWB peer (MainTCPRoutine port) printing JSON lines. serve listens on
+//        <host> (an IP address to bind, e.g. 127.0.0.1), connect connects to it.
 //        script: "control" (send heartbeat/mouse/keys/clipboard/hide to the other side) or "listen".
 using System;
 using System.Collections.Generic;
@@ -281,7 +282,7 @@ internal static class Program
         Socket s;
         if (mode == "serve")
         {
-            var server = new TcpListener(IPAddress.Loopback, basePort + 1);
+            var server = new TcpListener(IPAddress.Parse(host), basePort + 1);
             server.Start();
             Emit(new { @event = "listening", port = basePort + 1 });
             s = server.AcceptSocket();

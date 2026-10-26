@@ -189,6 +189,7 @@ fn engine_cfg(name: &str, port: u16, matrix: &[&str]) -> Config {
         bind_address: "127.0.0.1".into(),
         swap_cmd_ctrl: false,
         reconnect_secs: 1,
+        auto_discover: false,
         ..Default::default()
     }
 }
@@ -203,7 +204,7 @@ fn csharp_controls_rust() {
     let mock = MockBackend::hd();
     let mut cfg = engine_cfg("RUSTBOX", port, &["CSHARP", "RUSTBOX"]);
     cfg.peers.insert("CSHARP".into(), "127.0.0.1:1".into()); // don't try DNS
-    let eng = Engine::start(cfg, mock.clone()).unwrap();
+    let eng = Engine::start_with(cfg, mock.clone(), no_scan()).unwrap();
     let events = eng.events().unwrap();
 
     let mut peer = Peer::spawn(&["peer", "connect", "127.0.0.1", &port.to_string(), KEY, "CSHARP", "4242", "control", "20", "hi from C# ✓"]).unwrap();
@@ -257,7 +258,7 @@ fn rust_controls_csharp() {
     let mock = MockBackend::hd();
     let mut cfg = engine_cfg("RUSTBOX", free_base_port(), &["RUSTBOX", "CSHARP"]);
     cfg.peers.insert("CSHARP".into(), format!("127.0.0.1:{cs_port}"));
-    let eng = Engine::start(cfg, mock.clone()).unwrap();
+    let eng = Engine::start_with(cfg, mock.clone(), no_scan()).unwrap();
     let t = peer.wait_for(Duration::from_secs(15), |v| v["event"] == "trusted");
     assert_eq!(t["remote_name"], "RUSTBOX");
     assert!(wait_until(Duration::from_secs(5), || eng.connected_peers() == vec!["CSHARP".to_string()]));
@@ -305,4 +306,64 @@ fn rust_controls_csharp() {
     peer.wait_for(Duration::from_secs(5), |v| p(v, 50) && v["p"]["des"] == 5151); // HideMouse
     eng.stop();
     peer.wait_for(Duration::from_secs(5), |v| p(v, 4)); // ByeBye
+}
+
+/// Discovery finds the C# peer (PowerToys' own handshake code) through an
+/// injected loopback candidate; the handshake succeeds and the layout is sent.
+#[test]
+fn discovers_csharp_peer() {
+    if harness().is_none() {
+        return;
+    }
+    let cs_port = free_base_port();
+    let mut peer = Peer::spawn(&["peer", "serve", "127.0.0.1", &cs_port.to_string(), KEY, "CSHARP", "5151", "listen", "25"]).unwrap();
+    peer.wait_for(Duration::from_secs(10), |v| v["event"] == "listening");
+
+    let mut cfg = engine_cfg("RUSTBOX", free_base_port(), &["RUSTBOX"]);
+    cfg.auto_discover = true;
+    let cand: std::net::SocketAddr = format!("127.0.0.1:{}", cs_port + 1).parse().unwrap();
+    let eng = Engine::start_with(cfg, MockBackend::hd(), std::sync::Arc::new(mwb::discovery::StaticCandidates(vec![cand]))).unwrap();
+    let events = eng.events().unwrap();
+
+    let t = peer.wait_for(Duration::from_secs(15), |v| v["event"] == "trusted");
+    assert_eq!(t["remote_name"], "RUSTBOX");
+    let found = loop {
+        match events.recv_timeout(Duration::from_secs(10)).expect("PeerDiscovered") {
+            EngineEvent::PeerDiscovered { name, addr, .. } => break (name, addr),
+            _ => continue,
+        }
+    };
+    assert_eq!(found, ("CSHARP".to_string(), cand));
+    assert!(wait_until(Duration::from_secs(5), || eng.status().peers.first().map(|p| p.id) == Some(5151)));
+    assert_eq!(eng.status().matrix.slots, ["RUSTBOX".to_string(), "CSHARP".into(), String::new(), String::new()]);
+    // Our heartbeat reaches it (it is in the layout now), then the layout itself
+    // (MachineStuff.SendMachineMatrix: one Matrix package per slot, src = slot).
+    let p = |v: &serde_json::Value, t: i64| v["event"] == "packet" && v["p"]["type"] == t;
+    peer.wait_for(Duration::from_secs(5), |v| p(v, 20) && v["p"]["name"] == "RUSTBOX");
+    peer.wait_for(Duration::from_secs(5), |v| p(v, 128) && v["p"]["src"] == 1 && v["p"]["name"] == "RUSTBOX");
+    peer.wait_for(Duration::from_secs(5), |v| p(v, 128) && v["p"]["src"] == 2 && v["p"]["name"] == "CSHARP");
+    peer.wait_for(Duration::from_secs(5), |v| p(v, 128) && v["p"]["src"] == 4);
+    eng.stop();
+}
+
+/// A C# peer with another key: the handshake fails on both sides and the
+/// host is backed off instead of being probed again.
+#[test]
+fn csharp_peer_with_other_key_is_backed_off() {
+    if harness().is_none() {
+        return;
+    }
+    let cs_port = free_base_port();
+    let mut peer = Peer::spawn(&["peer", "serve", "127.0.0.1", &cs_port.to_string(), "zzzzYYYY9999!!!!", "CSHARP", "5151", "listen", "25"]).unwrap();
+    peer.wait_for(Duration::from_secs(10), |v| v["event"] == "listening");
+    let mut cfg = engine_cfg("RUSTBOX", free_base_port(), &["RUSTBOX"]);
+    cfg.auto_discover = true;
+    let cand: std::net::SocketAddr = format!("127.0.0.1:{}", cs_port + 1).parse().unwrap();
+    let eng = Engine::start_with(cfg, MockBackend::hd(), std::sync::Arc::new(mwb::discovery::StaticCandidates(vec![cand]))).unwrap();
+    peer.wait_for(Duration::from_secs(15), |v| v["event"] == "invalid_key" || v["event"] == "error" || v["event"] == "closed");
+    assert!(wait_until(Duration::from_secs(10), || eng.status().other_key == vec![cand]), "{:?}", eng.status().other_key);
+    let st = eng.status();
+    assert!(st.peers.is_empty() && st.discovered.is_empty());
+    assert_eq!(st.matrix.slots[1], "");
+    eng.stop();
 }

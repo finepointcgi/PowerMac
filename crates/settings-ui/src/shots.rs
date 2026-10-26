@@ -150,6 +150,32 @@ fn shots() {
     ];
     cfg.save(&path).unwrap();
     sample_fz(&fancyzones_path(&path));
+    // What a running app reports: one machine found automatically and
+    // connected, one found but reconnecting, one with another key.
+    pm_config::MwbStatus {
+        running: true,
+        machine_name: "MacBook-Pro".into(),
+        auto_discover: true,
+        machines: vec![
+            pm_config::MwbMachine {
+                name: "living-room".into(),
+                address: "192.168.1.42".into(),
+                connected: false,
+                discovered: true,
+            },
+            pm_config::MwbMachine {
+                name: "studio-pc".into(),
+                address: "192.168.1.20".into(),
+                connected: true,
+                discovered: true,
+            },
+        ],
+        other_key: vec!["192.168.1.57".into()],
+        ..Default::default()
+    }
+    .stamp()
+    .save_for(&path)
+    .unwrap();
 
     for (theme, tn) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
         for (size, suffix) in [(win(1100.0, 780.0), ""), (win(1100.0, 3400.0), "-full")] {

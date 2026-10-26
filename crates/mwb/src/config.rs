@@ -48,6 +48,13 @@ pub struct Config {
     pub swap_cmd_ctrl: bool,
     pub heartbeat_secs: u64,
     pub reconnect_secs: u64,
+    /// Look for machines with the same key on the local network and connect to
+    /// them (see [`crate::discovery`]).
+    pub auto_discover: bool,
+    /// Seconds between discovery sweeps while no peer is connected.
+    pub discovery_interval_secs: u64,
+    /// Seconds between discovery sweeps once at least one peer is connected.
+    pub discovery_interval_connected_secs: u64,
 }
 
 impl Default for Config {
@@ -70,6 +77,9 @@ impl Default for Config {
             swap_cmd_ctrl: cfg!(target_os = "macos"),
             heartbeat_secs: 60,
             reconnect_secs: 5,
+            auto_discover: true,
+            discovery_interval_secs: 60,
+            discovery_interval_connected_secs: 300,
         }
     }
 }
@@ -77,6 +87,17 @@ impl Default for Config {
 impl Config {
     pub fn matrix(&self) -> Matrix {
         Matrix::from_names(&self.matrix, self.one_row, self.wrap_around)
+    }
+
+    /// Whether going from `self` to `new` needs a new engine (the listening
+    /// socket, the key or this machine's identity changed). Everything else can
+    /// be applied to a running engine with [`crate::EngineHandle::update_config`].
+    pub fn needs_restart(&self, new: &Config) -> bool {
+        crate::crypto::normalize_key(&self.key) != crate::crypto::normalize_key(&new.key)
+            || self.effective_machine_name() != new.effective_machine_name()
+            || self.machine_id != new.machine_id
+            || self.port != new.port
+            || self.bind_address.trim() != new.bind_address.trim()
     }
 
     /// Effective machine name (host name fallback, truncated to 32 chars like `GetMachineName`).
