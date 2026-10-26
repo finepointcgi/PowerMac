@@ -42,11 +42,13 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use pm_input::vk::*;
 
 use crate::config::{Config, RunProgram, Target};
+use crate::hyper::{HyperKeyConfig, HyperMode, TapAction};
 use crate::keys::{
     concrete, is_modifier, mod_family, ModFamily, Mods, Shortcut, Side, VK_DISABLED, VK_DUMMY,
     VK_WIN_BOTH,
@@ -93,6 +95,10 @@ pub struct EngineOptions {
     /// Honour the config's "Windows-style keys" preset (macOS; the preset
     /// is a no-op on Windows).
     pub windows_style: bool,
+    /// The physical key that acts as the Hyper key when `hyperKey` is on:
+    /// F18 on macOS (Caps Lock is mapped to it with hidutil), Caps Lock on
+    /// Windows.
+    pub hyper_vk: u32,
 }
 
 #[allow(clippy::derivable_impls)] // not derivable on Windows
@@ -101,6 +107,11 @@ impl Default for EngineOptions {
         Self {
             dummy_key: cfg!(windows),
             windows_style: cfg!(target_os = "macos"),
+            hyper_vk: if cfg!(target_os = "macos") {
+                VK_F18
+            } else {
+                VK_CAPITAL
+            },
         }
     }
 }
@@ -158,6 +169,50 @@ impl fmt::Debug for Probe {
 struct Compiled {
     keys: HashMap<u32, Target>,
     shortcuts: Vec<ShortcutEntry>,
+    hyper: HyperKeyConfig,
+}
+
+/// Monotonic time since some fixed point (injectable for tests).
+pub type ClockFn = Arc<dyn Fn() -> Duration + Send + Sync>;
+
+#[derive(Clone)]
+struct Clock(ClockFn);
+
+impl fmt::Debug for Clock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Clock")
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        static START: OnceLock<Instant> = OnceLock::new();
+        let start = *START.get_or_init(Instant::now);
+        Clock(Arc::new(move || start.elapsed()))
+    }
+}
+
+/// The Hyper key while it is held (see [`crate::hyper`]).
+#[derive(Debug, Clone)]
+struct HyperHeld {
+    /// Config at key-down (a config change mid-press doesn't affect it).
+    cfg: HyperKeyConfig,
+    since: Duration,
+    /// Another key / mouse button was used: not a tap.
+    interrupted: bool,
+    /// The modifiers were pressed (lazily, at the first other key).
+    engaged: bool,
+    /// Modifiers we made logically down (to release on key-up).
+    mods: Vec<u32>,
+}
+
+/// Modifiers a held Hyper key stands for, in press order.
+fn hyper_mods(mode: HyperMode) -> &'static [u32] {
+    match mode {
+        HyperMode::Hyper => &[VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN],
+        HyperMode::Control => &[VK_LCONTROL],
+        HyperMode::Off | HyperMode::Escape => &[],
+    }
 }
 
 /// What a held physical key is producing (layer 1).
@@ -209,6 +264,8 @@ pub struct Engine {
     /// Finder "cut" pending (Windows-style preset).
     cut_pending: bool,
     focus: Probe,
+    hyper: Option<HyperHeld>,
+    clock: Clock,
 }
 
 /// Normalize an app identifier for comparison: lower-case, file name only,
@@ -242,7 +299,10 @@ fn normalize_target(t: &Target) -> Target {
 }
 
 fn compile(cfg: &Config, opts: &EngineOptions) -> Compiled {
-    let mut c = Compiled::default();
+    let mut c = Compiled {
+        hyper: cfg.hyper_key,
+        ..Default::default()
+    };
     if cfg.enabled {
         for r in &cfg.remap_keys {
             let to = normalize_target(&r.to);
@@ -356,7 +416,36 @@ impl Engine {
             active: None,
             cut_pending: false,
             focus: Probe::default(),
+            hyper: None,
+            clock: Clock::default(),
         }
+    }
+
+    /// Replace the clock used for the Hyper key's tap timeout (tests).
+    pub fn set_clock(&mut self, clock: ClockFn) {
+        self.clock = Clock(clock);
+    }
+
+    /// The Hyper key setting in effect.
+    pub fn hyper_config(&self) -> HyperKeyConfig {
+        self.compiled.hyper
+    }
+
+    /// Whether the Hyper key is held and its modifiers are not pressed yet
+    /// (the macOS backend then calls [`engage_hyper`](Self::engage_hyper)
+    /// on mouse buttons / scrolling).
+    pub fn hyper_pending(&self) -> bool {
+        self.hyper
+            .as_ref()
+            .is_some_and(|h| !h.engaged && !hyper_mods(h.cfg.mode).is_empty())
+    }
+
+    /// Press the held Hyper key's modifiers now (used before a mouse click
+    /// or scroll, so Hyper+click works) and mark the press as "not a tap".
+    pub fn engage_hyper(&mut self) -> Vec<Action> {
+        let mut out = Vec::new();
+        self.hyper_interrupt(&mut out, &mut Vec::new);
+        out
     }
 
     /// Set the focused-element role probe used by the Windows-style preset's
@@ -409,6 +498,12 @@ impl Engine {
         app: &mut dyn FnMut() -> Vec<String>,
     ) -> Outcome {
         let vk = normalize_vk(vk);
+        if vk == self.opts.hyper_vk
+            && (self.hyper.is_some()
+                || (down && self.compiled.hyper.is_on() && !self.physical.contains(&vk)))
+        {
+            return self.hyper_event(vk, down, app);
+        }
         let first = down && !self.physical.contains(&vk);
         if down {
             self.physical.insert(vk);
@@ -421,6 +516,10 @@ impl Engine {
         }
 
         let mut out = Vec::new();
+        if first && self.hyper.is_some() {
+            // Hyper + this key: press the Hyper modifiers first.
+            self.hyper_interrupt(&mut out, app);
+        }
         let single = if first {
             let s = self.single_for(vk);
             if let Some(s) = &s {
@@ -519,9 +618,110 @@ impl Engine {
         }
         self.active = None;
         self.cut_pending = false;
+        self.hyper = None;
         self.single.clear();
         self.logical = self.physical.clone();
         out
+    }
+
+    // -- hyper key ----------------------------------------------------------
+
+    fn hyper_event(
+        &mut self,
+        vk: u32,
+        down: bool,
+        app: &mut dyn FnMut() -> Vec<String>,
+    ) -> Outcome {
+        let mut out = Vec::new();
+        if down {
+            let first = self.physical.insert(vk);
+            match &self.hyper {
+                None if first => {
+                    let cfg = self.compiled.hyper;
+                    self.hyper = Some(HyperHeld {
+                        cfg,
+                        since: (self.clock.0)(),
+                        interrupted: false,
+                        engaged: false,
+                        mods: Vec::new(),
+                    });
+                    if cfg.mode == HyperMode::Escape {
+                        self.logical_event(VK_ESCAPE, true, &mut out, app);
+                    }
+                }
+                Some(h) if h.cfg.mode == HyperMode::Escape => {
+                    // auto-repeat
+                    self.logical_event(VK_ESCAPE, true, &mut out, app);
+                }
+                _ => {} // auto-repeat of a held Hyper key
+            }
+            return Outcome::Replace(out);
+        }
+        self.physical.remove(&vk);
+        let Some(h) = self.hyper.take() else {
+            return Outcome::Replace(out);
+        };
+        if h.cfg.mode == HyperMode::Escape {
+            if self.logical.contains(&VK_ESCAPE) && !self.physical.contains(&VK_ESCAPE) {
+                self.logical_event(VK_ESCAPE, false, &mut out, app);
+            }
+            return Outcome::Replace(out);
+        }
+        if h.engaged {
+            let ours: Vec<u32> = h
+                .mods
+                .iter()
+                .rev()
+                .copied()
+                .filter(|m| self.logical.contains(m) && !self.physical.contains(m))
+                .collect();
+            if ours
+                .iter()
+                .any(|&m| is_win_or_alt(m) && self.os.contains(&m))
+            {
+                self.dummy(&mut out);
+            }
+            for m in ours {
+                self.logical_event(m, false, &mut out, app);
+            }
+        }
+        let elapsed = (self.clock.0)().saturating_sub(h.since);
+        if !h.interrupted && elapsed <= Duration::from_millis(h.cfg.tap_timeout_ms) {
+            match h.cfg.tap_action {
+                TapAction::None => {}
+                TapAction::Escape => {
+                    if !self.physical.contains(&VK_ESCAPE) {
+                        self.logical_event(VK_ESCAPE, true, &mut out, app);
+                        self.logical_event(VK_ESCAPE, false, &mut out, app);
+                    }
+                }
+                TapAction::CapsLock => {
+                    // Not through the remap layers: toggles the lock state.
+                    out.push(Action::down(VK_CAPITAL));
+                    out.push(Action::up(VK_CAPITAL));
+                }
+            }
+        }
+        Outcome::Replace(out)
+    }
+
+    /// Another key (or mouse button) while the Hyper key is held: not a tap
+    /// any more; press its modifiers if that hasn't happened yet.
+    fn hyper_interrupt(&mut self, out: &mut Vec<Action>, app: &mut dyn FnMut() -> Vec<String>) {
+        let Some(mut h) = self.hyper.take() else {
+            return;
+        };
+        h.interrupted = true;
+        if !h.engaged {
+            h.engaged = true;
+            for &m in hyper_mods(h.cfg.mode) {
+                if !self.logical.contains(&m) {
+                    self.logical_event(m, true, out, app);
+                    h.mods.push(m);
+                }
+            }
+        }
+        self.hyper = Some(h);
     }
 
     // -- layer 1 ------------------------------------------------------------

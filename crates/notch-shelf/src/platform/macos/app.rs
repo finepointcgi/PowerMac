@@ -9,18 +9,22 @@ use std::sync::Arc;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send, sel, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSBackingStoreType, NSColor, NSEvent, NSPanel, NSScreen, NSWindowCollectionBehavior, NSWindowStyleMask};
+use objc2_app_kit::{NSColor, NSEvent, NSScreen, NSView, NSWindowCollectionBehavior, NSWindowStyleMask};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::ffi::*;
 use super::gfx::{self, Layer, Symbol, SymbolCache, TextStyle};
 use super::pboard;
-use super::view::ShelfView;
+use super::view::{ShelfPanel, ShelfView};
 use crate::anim::{approach, Spring};
 use crate::geometry::{self as geo, Button, Hit, Layout, Metrics, Point, Rect, ScreenGeom, ShapeParams};
 use crate::logic::{ExpandLogic, Inputs, Mode};
 use crate::store::{ItemKind, ShelfItem};
+use crate::widgets::View;
 use crate::{Config, Request, Shared};
+
+mod home;
+use home::{HomePanel, LiveView, NoteView, SwitchView, Widgets};
 
 /// NSMainMenuWindowLevel (24) + 3: above the menu bar and status items.
 const LEVEL: isize = 27;
@@ -105,9 +109,22 @@ struct Panel {
     expanded: Rect,
     peek: Rect,
     win: Rect,
-    window: Retained<NSPanel>,
+    window: Retained<ShelfPanel>,
     view: Retained<ShelfView>,
+    /// Window content view: holds the shelf view and the note editor.
+    content_view: Retained<NSView>,
     _container: Layer,
+    /// Expanded rects of the two views (`expanded` is the current one).
+    shelf_rect: Rect,
+    home_rect: Option<Rect>,
+    /// Shelf view content (title, buttons, tiles); fades against `home`.
+    shelf_group: Layer,
+    home: Option<HomePanel>,
+    switch: Option<SwitchView>,
+    live: Option<LiveView>,
+    /// 0 = Shelf view showing, 1 = Home view.
+    view_mix: f64,
+    note_view: Option<NoteView>,
     shape: Layer,
     rim: Layer,
     content: Layer,
@@ -187,6 +204,8 @@ pub struct App {
     symbols: SymbolCache,
     accent: (f64, f64, f64),
     debug_drop_hover: bool,
+    w: Widgets,
+    rebuild_requested: bool,
 }
 
 thread_local! {
@@ -217,6 +236,7 @@ pub fn install(shared: Arc<Shared>) {
     uninstall();
     let drag_pb = pboard::drag_pasteboard();
     let drag_count = pboard::change_count(&drag_pb);
+    let data_dir = shared.lock().store.data_dir().to_path_buf();
     let mut app = App {
         shared,
         cfg: Config { enabled: false, ..Config::default() },
@@ -256,6 +276,8 @@ pub fn install(shared: Arc<Shared>) {
         symbols: SymbolCache::default(),
         accent: gfx::accent_rgb(),
         debug_drop_hover: false,
+        w: Widgets::new(&data_dir),
+        rebuild_requested: false,
     };
     unsafe {
         let t = CFRunLoopTimerCreate(std::ptr::null(), now() + 0.01, FRAME_INTERVAL, 0, 0, timer_cb, std::ptr::null_mut());
@@ -331,6 +353,8 @@ impl App {
     }
 
     fn teardown(&mut self) {
+        self.end_note_edit();
+        self.w.camera.stop();
         if !self.timer.is_null() {
             unsafe {
                 CFRunLoopTimerInvalidate(self.timer);
@@ -342,6 +366,8 @@ impl App {
     }
 
     fn close_panels(&mut self) {
+        self.end_note_edit();
+        self.w.camera.stop();
         if let Some(link) = self.link.take() {
             unsafe {
                 let _: () = msg_send![&*link, invalidate];
@@ -392,6 +418,7 @@ impl App {
                 || old.screens != self.cfg.screens
                 || old.virtual_notch_on_non_notch_screens != self.cfg.virtual_notch_on_non_notch_screens
                 || old.panel_width != self.cfg.panel_width
+                || old.widgets != self.cfg.widgets
                 || self.panels.is_empty() && self.cfg.enabled;
             if !self.cfg.show_clipboard {
                 self.clip = None;
@@ -411,9 +438,14 @@ impl App {
                 rebuild = true;
             }
         }
+        if std::mem::take(&mut self.rebuild_requested) {
+            rebuild = true;
+        }
         if rebuild {
             self.build_panels(mtm);
         }
+        self.sync_widgets();
+        self.check_note_focus();
         if self.panels.is_empty() {
             self.schedule(false);
             return;
@@ -442,6 +474,7 @@ impl App {
             let ps = power_state();
             if let (Some((was_ac, _)), Some((ac, _))) = (self.power, ps) {
                 if was_ac != ac {
+                    self.w.peek_timer = false;
                     for p in &mut self.panels {
                         p.logic.peek(t, 2.6);
                     }
@@ -469,15 +502,22 @@ impl App {
                     self.render_pngs(&dir);
                 }
                 Request::Debug(cmd) => self.debug(&cmd, t),
+                Request::SetView(v) => self.apply_view(v, true),
+                Request::RefreshWidgets => self.read_controls(),
             }
         }
 
         let animating = self.advance(mtm, cur, pressed, dt, t);
         let expanded = self.panels.iter().any(|p| p.mode != Mode::Collapsed);
+        let home_visible = self.w.view == View::Home && self.panels.iter().any(|p| p.mode == Mode::Expanded && p.home.is_some());
+        self.shared.home_visible.store(home_visible, std::sync::atomic::Ordering::Relaxed);
         self.schedule(animating || expanded);
     }
 
     fn debug(&mut self, cmd: &str, t: f64) {
+        if self.debug_widgets(cmd) {
+            return;
+        }
         match cmd {
             "dropHover" => self.debug_drop_hover = true,
             "noDropHover" => self.debug_drop_hover = false,
@@ -489,6 +529,7 @@ impl App {
                 }
             }
             "peek" => {
+                self.w.peek_timer = false;
                 self.power = power_state().or(Some((true, 80)));
                 for p in &mut self.panels {
                     p.logic.peek(t, 2.6);
@@ -507,8 +548,10 @@ impl App {
             let (new_mode, old_mode) = {
                 let drag_active = self.drag_active;
                 let pinned_global = self.menu_open || self.sharing;
+                let editing = self.w.editing.is_some();
                 let p = &mut self.panels[i];
-                let in_hover_zone = geo::hover_zone(&p.collapsed).contains(cur);
+                let hover_rect = p.live.as_ref().and_then(|l| l.rect).filter(|_| p.mode == Mode::Collapsed).unwrap_or(p.collapsed);
+                let in_hover_zone = geo::hover_zone(&hover_rect).contains(cur);
                 let in_keep_zone = geo::keep_open_zone(&p.expanded, &self.metrics).contains(cur);
                 let in_drag_zone = geo::drag_zone(&p.expanded, &p.geom.frame).contains(cur);
                 let outside_click = pressed && !in_keep_zone && p.mode == Mode::Expanded;
@@ -525,13 +568,30 @@ impl App {
                     drag_over_panel: p.drop_hover,
                     clicked_notch: pressed && in_hover_zone && p.mode != Mode::Expanded,
                     mouse_down_outside: outside_click,
-                    pinned: pinned_global || p.hold || self.debug_drop_hover,
+                    pinned: pinned_global || p.hold || self.debug_drop_hover || (editing && !outside_click),
                 };
                 let old = p.mode;
                 (p.logic.update(&settings, &inputs), old)
             };
             if new_mode != old_mode {
                 self.mode_changed(i, new_mode);
+            }
+            // A drag arriving over the Home view switches to the shelf.
+            if self.drag_active && self.w.view == View::Home && self.panels[i].mode == Mode::Expanded && geo::drag_zone(&self.panels[i].expanded, &self.panels[i].geom.frame).contains(cur) {
+                self.apply_view(View::Shelf, false);
+            }
+            // Only take clicks over the panel itself; the rest of the
+            // (larger) window lets them through.
+            {
+                let busy = self.button_down || self.menu_open || self.sharing || self.own_drag.is_some();
+                let m = self.metrics;
+                let p = &mut self.panels[i];
+                let over = p.expanded.inflate(m.shoulder + 2.0, 0.0);
+                let ignore = p.mode != Mode::Expanded || (!busy && !Rect::new(over.x, over.y, over.w, over.h + 4.0).contains(cur));
+                if ignore != p.ignoring && !(busy && p.mode == Mode::Expanded) {
+                    p.window.setIgnoresMouseEvents(ignore);
+                    p.ignoring = ignore;
+                }
             }
             animating |= self.animate(i, dt, cur);
         }
@@ -602,17 +662,16 @@ impl App {
 
     fn make_panel(&mut self, mtm: MainThreadMarker, idx: usize, geom: ScreenGeom, scale: f64, collapsed: Rect) -> Panel {
         let m = self.metrics;
-        let expanded = geo::expanded_rect(&collapsed, &geom.frame, &m);
+        let shelf_rect = geo::expanded_rect(&collapsed, &geom.frame, &m);
+        let home_rect = self.home_rect_for(&collapsed, &geom.frame);
+        let expanded = match (self.w.view, home_rect) {
+            (View::Home, Some(h)) => h,
+            _ => shelf_rect,
+        };
         let peek = geo::peek_rect(&collapsed, &m);
-        let win = geo::window_rect(&expanded, &geom.frame, &m);
+        let win = geo::window_rect(&home_rect.map(|h| h.union(&shelf_rect)).unwrap_or(shelf_rect), &geom.frame, &m);
         let cocoa = NSRect::new(NSPoint::new(win.x, self.primary_h - (win.y + win.h)), NSSize::new(win.w, win.h));
-        let window = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            cocoa,
-            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            false,
-        );
+        let window = ShelfPanel::new(mtm, cocoa, NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
         unsafe { window.setReleasedWhenClosed(false) };
         window.setOpaque(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
@@ -644,7 +703,11 @@ impl App {
             let _: () = msg_send![&*view, setLayer: &*root];
         }
         view.setWantsLayer(true);
-        window.setContentView(Some(&view));
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(win.w, win.h));
+        let content_view = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        content_view.setWantsLayer(true);
+        content_view.addSubview(&view);
+        window.setContentView(Some(&content_view));
         let rf: bool = unsafe { msg_send![&*root, isGeometryFlipped] };
         log::debug!("notch-shelf: root layer geometryFlipped={rf}");
         let container = gfx::layer();
@@ -670,6 +733,9 @@ impl App {
         gfx::set_anchor(&inner, 0.5, 1.0);
         gfx::set_frame(&inner, bounds);
         gfx::add(&content, &inner);
+        let shelf_group = gfx::layer();
+        gfx::set_frame(&shelf_group, bounds);
+        gfx::add(&inner, &shelf_group);
 
         let rim = gfx::shape_layer();
         gfx::set_frame(&rim, bounds);
@@ -688,29 +754,29 @@ impl App {
             gfx::add(parent, &l);
             l
         };
-        let title_icon = mk(&inner);
-        let title_text = mkt(&inner);
-        let count_bg = mk(&inner);
+        let title_icon = mk(&shelf_group);
+        let title_text = mkt(&shelf_group);
+        let count_bg = mk(&shelf_group);
         let count_text = mkt(&count_bg);
         let mut buttons = vec![];
         for b in geo::BUTTONS {
-            let bg = mk(&inner);
+            let bg = mk(&shelf_group);
             gfx::set_corner(&bg, 8.0);
             let icon = mk(&bg);
             buttons.push(HeaderButton { kind: b, bg, icon });
         }
-        let strip = mk(&inner);
+        let strip = mk(&shelf_group);
         gfx::set_masks_to_bounds(&strip, true);
         let strip_fade = gfx::gradient_layer();
         gfx::set_mask(&strip, &strip_fade);
-        let empty = mk(&inner);
+        let empty = mk(&shelf_group);
         let empty_border = gfx::shape_layer();
         gfx::add(&empty, &empty_border);
         gfx::set_dash(&empty_border, &[5.0, 4.0]);
         let empty_icon = mk(&empty);
         let empty_text = mkt(&empty);
         let drop_ring = gfx::shape_layer();
-        gfx::add(&inner, &drop_ring);
+        gfx::add(&shelf_group, &drop_ring);
         gfx::set_hidden(&drop_ring, true);
 
         let peek_layer = mk(&container);
@@ -720,6 +786,7 @@ impl App {
         let peek_text = mkt(&peek_layer);
 
         let cs = geo::collapsed_shape(&collapsed, &m);
+        let has_home = home_rect.is_some();
         let mut p = Panel {
             geom,
             scale,
@@ -729,7 +796,16 @@ impl App {
             win,
             window,
             view,
+            content_view,
             _container: container,
+            shelf_rect,
+            home_rect,
+            shelf_group,
+            home: None,
+            switch: None,
+            live: None,
+            view_mix: if self.w.view == View::Home && has_home { 1.0 } else { 0.0 },
+            note_view: None,
             shape,
             rim,
             content,
@@ -763,13 +839,14 @@ impl App {
             hover: Hit::Outside,
             drop_hover: false,
             hold: false,
-            layout: geo::layout(&expanded, &collapsed, 0, 0.0, &m),
+            layout: geo::layout_with(&shelf_rect, &collapsed, 0, 0.0, &m, has_home),
             ignoring: true,
             header_key: String::new(),
             button_state: vec![],
             drawn: None,
         };
         self.layout_static(&mut p);
+        self.build_home(&mut p);
         // Re-assert the frame: AppKit may have constrained it below the
         // menu bar while the level was still low.
         p.window.setFrame_display(cocoa, false);
@@ -807,6 +884,10 @@ impl App {
 
     fn mode_changed(&mut self, i: usize, mode: Mode) {
         let m = self.metrics;
+        if mode == Mode::Expanded && self.panels.iter().all(|p| p.mode != Mode::Expanded) {
+            let v = self.opening_view(self.drag_active);
+            self.apply_view(v, false);
+        }
         if mode == Mode::Expanded {
             // Fresh state on open: stale files, clipboard.
             if self.shared.edit(|s| s.prune_missing()) {
@@ -817,11 +898,12 @@ impl App {
             }
             self.refresh_display();
         }
+        let rest = self.rest_shape(&self.panels[i]);
         let p = &mut self.panels[i];
         p.mode = mode;
         let (to, k, zeta) = match mode {
             Mode::Expanded => (geo::expanded_shape(&p.expanded, &m), 340.0, 0.70),
-            Mode::Collapsed => (geo::collapsed_shape(&p.collapsed, &m), 420.0, 1.0),
+            Mode::Collapsed => (rest, 420.0, 1.0),
             Mode::Peek => (geo::peek_shape(&p.peek, &m), 380.0, 0.68),
         };
         p.from = p.shape_now;
@@ -842,6 +924,9 @@ impl App {
         if mode == Mode::Peek {
             self.draw_peek(i);
         }
+        if mode != Mode::Expanded {
+            self.home_closed();
+        }
         if mode == Mode::Expanded {
             let display = self.display.clone();
             self.sync_tiles(i, &display, false);
@@ -850,6 +935,8 @@ impl App {
 
     /// Step the spring and fades; draw. Returns true while animating.
     fn animate(&mut self, i: usize, dt: f64, cur: Point) -> bool {
+        self.update_live(i, dt);
+        let shelf_view = self.w.view == View::Shelf || self.panels[i].home.is_none();
         let p = &mut self.panels[i];
         p.spring.step(dt);
         p.shape_now = p.from.lerp(&p.to, p.spring.value);
@@ -859,9 +946,12 @@ impl App {
         p.content_alpha = approach(p.content_alpha, content_target, dt, tau);
         let peek_target = if p.mode == Mode::Peek && p.spring.value > 0.5 { 1.0 } else { 0.0 };
         p.peek_alpha = approach(p.peek_alpha, peek_target, dt, 0.06);
-        let animating = !p.spring.settled() || p.content_alpha != content_target || p.peek_alpha != peek_target;
+        let live_target = p.live.as_ref().map(|l| if l.live.is_some() && p.mode == Mode::Collapsed { 1.0 } else { 0.0 }).unwrap_or(0.0);
+        let live_moving = p.live.as_ref().is_some_and(|l| l.alpha != live_target);
+        let mix_target = if !shelf_view { 1.0 } else { 0.0 };
+        let animating = !p.spring.settled() || p.content_alpha != content_target || p.peek_alpha != peek_target || live_moving || p.view_mix != mix_target;
         // Hover tracking inside the open panel.
-        let hover = if p.mode == Mode::Expanded {
+        let hover = if p.mode == Mode::Expanded && shelf_view {
             let close_for = match p.hover {
                 Hit::Tile(k) | Hit::Close(k) => Some(k),
                 _ => None,
@@ -883,6 +973,7 @@ impl App {
         if hover_changed || animating || self.debug_drop_hover {
             self.update_states(i);
         }
+        self.update_home(i, cur, dt);
         animating
     }
 
@@ -909,6 +1000,23 @@ impl App {
     }
 
     fn draw_peek(&mut self, i: usize) {
+        if self.w.peek_timer {
+            let scale = self.panels[i].scale;
+            let red = (1.0, 0.27, 0.23, 1.0);
+            let sym = self.sym("bell.fill", 14.0, gfx::W_SEMIBOLD, red, scale);
+            let p = &self.panels[i];
+            let m = self.metrics;
+            let left = Rect::new(p.peek.x + m.shoulder, p.peek.y, m.peek_wing - m.shoulder, p.peek.h);
+            let right = Rect::new(p.collapsed.right(), p.peek.y, m.peek_wing - m.shoulder, p.peek.h);
+            let st = TextStyle { size: 13.0, weight: gfx::W_SEMIBOLD, align: "center", truncate: "end" };
+            transaction(None, || {
+                gfx::place_symbol(&p.peek_icon, sym.as_ref(), Self::local(p, left));
+                let tr = Self::local(p, right);
+                gfx::set_frame(&p.peek_text, Rect::new(tr.x, tr.center_y() - 8.5, tr.w, 17.0));
+                gfx::set_text(&p.peek_text, "Done", &st, &Color::rgba(1.0, 0.27, 0.23, 1.0));
+            });
+            return;
+        }
         let (ac, pct) = self.power.unwrap_or((true, 100));
         let scale = self.panels[i].scale;
         let bucket = match pct {
@@ -1013,7 +1121,7 @@ impl App {
         }
         let p = &mut self.panels[i];
         p.tiles = tiles;
-        p.layout = geo::layout(&p.expanded, &p.collapsed, display.len(), p.scroll, &m);
+        p.layout = geo::layout_with(&p.shelf_rect, &p.collapsed, display.len(), p.scroll, &m, p.home_rect.is_some());
         p.scroll = p.layout.scroll;
         self.place_tiles(i, animate, &fresh);
         self.update_header(i);
@@ -1143,6 +1251,7 @@ impl App {
             return;
         }
         self.panels[i].header_key = key;
+        self.refresh_switch();
         let scale = self.panels[i].scale;
         let icon = self.sym(if n > 0 { "tray.full.fill" } else { "tray.fill" }, 13.0, gfx::W_MEDIUM, (1.0, 1.0, 1.0, 0.92), scale);
         let p = &self.panels[i];
@@ -1153,9 +1262,12 @@ impl App {
         let tw = gfx::text_width(text, 13.0, gfx::W_SEMIBOLD);
         let count = n.to_string();
         let cw = gfx::text_width(&count, 11.0, gfx::W_SEMIBOLD) + 12.0;
+        // Next to the switcher (whose segment already shows a tray) the
+        // title goes without its icon.
+        let with_icon = p.home_rect.is_none();
         transaction(None, || {
-            let icon_r = Rect::new(title.x, title.y, 18.0, title.h);
-            gfx::place_symbol(&p.title_icon, icon.as_ref(), icon_r);
+            let icon_r = if with_icon { Rect::new(title.x, title.y, 18.0, title.h) } else { Rect::new(title.x - 6.0, title.y, 0.0, title.h) };
+            gfx::place_symbol(&p.title_icon, if with_icon { icon.as_ref() } else { None }, icon_r);
             gfx::set_frame(&p.title_text, Rect::new(icon_r.right() + 6.0, title.center_y() - 8.5, tw + 4.0, 17.0));
             gfx::set_text(&p.title_text, text, &st, &white(0.95));
             let cx = icon_r.right() + 6.0 + tw + 7.0;
@@ -1279,6 +1391,11 @@ impl App {
         if p.mode != Mode::Expanded {
             return;
         }
+        if self.on_home_mouse_down(i, pt) {
+            self.update_states(i);
+            return;
+        }
+        let p = &self.panels[i];
         let close_for = match p.hover {
             Hit::Tile(k) | Hit::Close(k) => Some(k),
             _ => None,
@@ -1325,6 +1442,9 @@ impl App {
     }
 
     pub fn on_mouse_dragged(&mut self, i: usize, pt: Point) -> Option<DragOut> {
+        if self.w.view == View::Home && self.panels.get(i).is_some_and(|p| p.home.is_some()) {
+            return None;
+        }
         let press = self.press.as_mut()?;
         if press.dragged || press.panel != i {
             return None;
@@ -1410,7 +1530,7 @@ impl App {
 
     pub fn on_right_down(&mut self, i: usize, pt: Point) -> Option<MenuReq> {
         let p = self.panels.get(i)?;
-        if p.mode != Mode::Expanded {
+        if p.mode != Mode::Expanded || (self.w.view == View::Home && p.home.is_some()) {
             return None;
         }
         let hit = geo::hit_test(&p.layout, pt, None, &self.metrics);
@@ -1485,21 +1605,30 @@ impl App {
 
     pub fn on_scroll(&mut self, i: usize, dx: f64, dy: f64, precise: bool) {
         let m = self.metrics;
-        let Some(p) = self.panels.get_mut(i) else { return };
+        if self.panels.get(i).is_none() {
+            return;
+        }
         let mut d = if dx.abs() > dy.abs() { dx } else { dy };
         if !precise {
             d *= 14.0;
         }
+        if self.on_home_scroll(i, d) {
+            return;
+        }
+        let p = &mut self.panels[i];
         let s = geo::clamp_scroll(p.scroll - d, p.layout.max_scroll);
         if s == p.scroll {
             return;
         }
         p.scroll = s;
-        p.layout = geo::layout(&p.expanded, &p.collapsed, p.tiles.len(), s, &m);
+        p.layout = geo::layout_with(&p.shelf_rect, &p.collapsed, p.tiles.len(), s, &m, p.home_rect.is_some());
         self.place_tiles(i, false, &[]);
     }
 
     pub fn on_drag_hover(&mut self, i: usize, on: bool) {
+        if on && self.w.view == View::Home {
+            self.apply_view(View::Shelf, false);
+        }
         let Some(p) = self.panels.get_mut(i) else { return };
         if p.drop_hover != on {
             p.drop_hover = on;

@@ -12,6 +12,8 @@ use crate::config::Config;
 use crate::newplus_ui::NewApp;
 use crate::rename::{ApplyTo, TextCase};
 use crate::rename_ui::RenameApp;
+use crate::resize::{OutputFormat, ResizeFit, ResizeUnit};
+use crate::resize_ui::ResizeApp;
 
 const MARGIN: f32 = 8.0;
 
@@ -185,6 +187,140 @@ fn shots() {
             .build_ui_state(|ui, app: &mut NewApp| app.draw(ui), app);
         save(&mut h, &dir, &format!("newplus-empty-{tn}"));
     }
+
+    // Image Resizer.
+    let pics = pictures(tmp.path());
+    for (theme, tn) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
+        let mut app = ResizeApp::new(pics.clone(), Some(cfg.clone()));
+        app.test_mode();
+        let mut h = Harness::builder()
+            .with_size(win(960.0, 760.0))
+            .with_theme(theme)
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_ui_state(|ui, app: &mut ResizeApp| app.draw(ui), app);
+        save(&mut h, &dir, &format!("resize-presets-{tn}"));
+        h.state_mut().select(4);
+        h.state_mut().set_custom(|c| {
+            c.width = 1200.0;
+            c.height = 0.0;
+            c.fit = ResizeFit::Fit;
+        });
+        h.state_mut().set_opts(|o| {
+            o.format = OutputFormat::Jpeg;
+            o.jpeg_quality = 82;
+            o.remove_gps = true;
+            o.file_name_format = "%1 (%5 × %6)".into();
+        });
+        save(&mut h, &dir, &format!("resize-custom-{tn}"));
+        h.state_mut().set_custom(|c| {
+            c.width = 0.0;
+            c.height = 0.0;
+            c.unit = ResizeUnit::Centimeter;
+        });
+        save(&mut h, &dir, &format!("resize-custom-invalid-{tn}"));
+        let n = h.state().file_count();
+        let ok = |i: usize| -> Option<crate::resize_ui::FileResult> {
+            let f = &pics[i];
+            let stem = f.file_stem().unwrap().to_string_lossy().to_string();
+            Some(Ok((
+                f.with_file_name(format!("{stem} (Small).jpg")),
+                (854, 480),
+            )))
+        };
+        let mut running: Vec<_> = (0..n).map(|_| None).collect();
+        for (i, r) in running.iter_mut().enumerate().take(3) {
+            *r = ok(i);
+        }
+        h.state_mut().set_running(3, running);
+        save(&mut h, &dir, &format!("resize-progress-{tn}"));
+        let mut done: Vec<_> = (0..n).map(ok).collect();
+        done[4] = Some(Err("not an image (or an unsupported format)".into()));
+        h.state_mut().set_finished(done);
+        save(&mut h, &dir, &format!("resize-results-{tn}"));
+        // Small window.
+        let mut app = ResizeApp::new(pics.clone(), Some(cfg.clone()));
+        app.test_mode();
+        let mut h = Harness::builder()
+            .with_size(win(820.0, 560.0))
+            .with_theme(theme)
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_ui_state(|ui, app: &mut ResizeApp| app.draw(ui), app);
+        save(&mut h, &dir, &format!("resize-small-{tn}"));
+    }
+}
+
+/// Real pictures for the Image Resizer (generated with ImageIO on macOS).
+fn pictures(root: &Path) -> Vec<PathBuf> {
+    let d = root.join("Pictures");
+    std::fs::create_dir_all(&d).unwrap();
+    let mut v = Vec::new();
+    for (i, (w, h)) in [
+        (4032, 3024),
+        (3024, 4032),
+        (1920, 1080),
+        (800, 600),
+        (640, 480),
+        (2048, 1536),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let p = d.join(format!("IMG_{:04}.jpg", 4100 + i));
+        #[cfg(target_os = "macos")]
+        crate::resize::mac::write_test_image(&p, w / 8, h / 8, OutputFormat::Jpeg, 1, i == 0, 72.0)
+            .unwrap();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (w, h);
+            std::fs::write(&p, "x").unwrap();
+        }
+        v.push(p);
+    }
+    v
+}
+
+/// Resize through the window state (no GPU needed).
+#[cfg(target_os = "macos")]
+#[test]
+fn resize_window_runs_and_remembers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pics = pictures(tmp.path());
+    let cfg = tmp.path().join("ft.json");
+    let ctx = egui::Context::default();
+    // A folder expands to its pictures.
+    let mut app = ResizeApp::new(vec![tmp.path().join("Pictures")], Some(cfg.clone()));
+    app.test_mode();
+    assert_eq!(app.file_count(), pics.len());
+    app.select(4);
+    app.set_custom(|c| {
+        c.width = 50.0;
+        c.height = 0.0;
+        c.unit = ResizeUnit::Percent;
+    });
+    app.set_opts(|o| o.format = OutputFormat::Png);
+    let r = app.run_now(&ctx);
+    assert_eq!(r.len(), pics.len());
+    for (res, f) in r.iter().zip(&pics) {
+        let (out, (w, h)) = res.clone().unwrap().unwrap();
+        let src = crate::resize::image_info(f).unwrap();
+        let half = |v: u32| (f64::from(v) / 2.0).round_ties_even() as u32;
+        assert_eq!((w, h), (half(src.width), half(src.height)));
+        assert_eq!(out.extension().unwrap(), "png");
+        assert!(out
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("(Custom)"));
+    }
+    // The choice is remembered.
+    let c = Config::load_from(&cfg);
+    assert_eq!(c.resize.selected, 4);
+    assert_eq!(c.resize.custom.unit, ResizeUnit::Percent);
+    assert_eq!(c.resize.options.format, OutputFormat::Png);
+    let app2 = ResizeApp::new(pics.clone(), Some(cfg.clone()));
+    assert_eq!(app2.file_count(), pics.len());
 }
 
 /// Apply and undo through the window state (no GPU needed).

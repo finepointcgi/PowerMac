@@ -6,10 +6,10 @@
 use std::cell::Cell;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
-use objc2_foundation::{NSArray, NSPoint, NSRect};
+use objc2_app_kit::{NSBackingStoreType, NSEvent, NSEventModifierFlags, NSPanel, NSResponder, NSView, NSWindow, NSWindowStyleMask};
+use objc2_foundation::{NSArray, NSObject, NSPoint, NSRect};
 
 use super::app::{self, Mods};
 use super::ffi::ns;
@@ -19,6 +19,43 @@ use crate::geometry::Point;
 
 pub struct Ivars {
     pub panel: Cell<usize>,
+}
+
+pub struct PanelIvars {
+    key_ok: Cell<bool>,
+}
+
+define_class!(
+    /// The shelf window: a non-activating panel that may become key only
+    /// while the note is being edited (so typing goes to it without
+    /// activating PowerMac or taking focus otherwise).
+    #[unsafe(super(NSPanel, NSWindow, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = PanelIvars]
+    pub struct ShelfPanel;
+
+    impl ShelfPanel {
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key(&self) -> bool {
+            self.ivars().key_ok.get()
+        }
+
+        #[unsafe(method(canBecomeMainWindow))]
+        fn can_become_main(&self) -> bool {
+            false
+        }
+    }
+);
+
+impl ShelfPanel {
+    pub fn new(mtm: MainThreadMarker, rect: NSRect, style: NSWindowStyleMask) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PanelIvars { key_ok: Cell::new(false) });
+        unsafe { msg_send![super(this), initWithContentRect: rect, styleMask: style, backing: NSBackingStoreType::Buffered, defer: false] }
+    }
+
+    pub fn set_key_ok(&self, on: bool) {
+        self.ivars().key_ok.set(on);
+    }
 }
 
 define_class!(
@@ -139,6 +176,22 @@ define_class!(
         #[unsafe(method(sharingServicePicker:didChooseSharingService:))]
         fn picker_chose(&self, _p: &AnyObject, _s: Option<&AnyObject>) {
             app::with(|a| a.set_sharing(false));
+        }
+
+        // Note editor (NSTextView delegate)
+
+        #[unsafe(method(textDidChange:))]
+        fn text_did_change(&self, _n: &AnyObject) {
+            app::with(|a| a.on_note_changed());
+        }
+
+        #[unsafe(method(textView:doCommandBySelector:))]
+        fn text_command(&self, _tv: &AnyObject, cmd: Sel) -> bool {
+            let cancel = cmd == sel!(cancelOperation:);
+            if cancel {
+                app::with(|a| a.end_note_edit());
+            }
+            cancel
         }
 
         #[unsafe(method(displayTick:))]

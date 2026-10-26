@@ -36,6 +36,7 @@ fn cfg(keys: &[(u32, Target)], shortcuts: &[(&str, Target, Option<&str>)]) -> Co
             ..Default::default()
         },
         windows_style: Default::default(),
+        hyper_key: Default::default(),
     }
 }
 
@@ -55,6 +56,7 @@ impl Harness {
             EngineOptions {
                 dummy_key: false,
                 windows_style: true,
+                ..Default::default()
             },
         )
     }
@@ -388,6 +390,7 @@ fn modifier_released_restores_other_held_modifiers() {
         EngineOptions {
             dummy_key: true,
             windows_style: true,
+            ..Default::default()
         },
     );
     h.down(VK_LWIN);
@@ -653,6 +656,7 @@ fn shortcut_disabled_emits_dummy_on_windows() {
         EngineOptions {
             dummy_key: true,
             windows_style: true,
+            ..Default::default()
         },
     );
     h.down(VK_LWIN);
@@ -974,6 +978,7 @@ fn fuzz_no_stuck_keys() {
                 EngineOptions {
                     dummy_key: dummy,
                     windows_style: true,
+                    ..Default::default()
                 },
             );
             h.app = if round % 2 == 0 {
@@ -1059,6 +1064,7 @@ mod windows_style {
             EngineOptions {
                 dummy_key: false,
                 windows_style: false,
+                ..Default::default()
             },
         );
         assert_eq!(h.tap(VK_HOME), (PASS, PASS));
@@ -1510,5 +1516,285 @@ mod windows_style {
             }
             h.assert_clean();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hyper key
+// ---------------------------------------------------------------------------
+
+mod hyper_key {
+    use super::*;
+    use crate::hyper::{HyperKeyConfig, HyperMode, TapAction};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    const HK: u32 = VK_F18;
+    const HYPER: [u32; 4] = [VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN];
+
+    struct H {
+        h: Harness,
+        now: Arc<AtomicU64>,
+    }
+
+    impl H {
+        fn new(mode: HyperMode, tap: TapAction, dummy: bool, extra: Config) -> H {
+            let mut c = extra;
+            c.hyper_key = HyperKeyConfig {
+                mode,
+                tap_action: tap,
+                tap_timeout_ms: 200,
+            };
+            let mut h = Harness::with_opts(
+                c,
+                EngineOptions {
+                    dummy_key: dummy,
+                    windows_style: false,
+                    hyper_vk: HK,
+                },
+            );
+            let now = Arc::new(AtomicU64::new(1_000));
+            let n = now.clone();
+            h.e.set_clock(Arc::new(move || {
+                Duration::from_millis(n.load(Ordering::SeqCst))
+            }));
+            H { h, now }
+        }
+        fn hyper(mode: HyperMode, tap: TapAction) -> H {
+            H::new(mode, tap, false, cfg(&[], &[]))
+        }
+        fn advance(&self, ms: u64) {
+            self.now.fetch_add(ms, Ordering::SeqCst);
+        }
+    }
+
+    fn downs(v: &[u32]) -> Vec<Action> {
+        v.iter().map(|&k| d(k)).collect()
+    }
+    fn ups_rev(v: &[u32]) -> Vec<Action> {
+        v.iter().rev().map(|&k| u(k)).collect()
+    }
+
+    #[test]
+    fn off_passes_the_key() {
+        let mut t = H::hyper(HyperMode::Off, TapAction::Escape);
+        assert_eq!(t.h.down(HK), PASS);
+        assert_eq!(t.h.up(HK), PASS);
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn quick_tap_sends_escape_and_no_modifiers() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        assert_eq!(t.h.down(HK), rep(vec![]));
+        t.advance(80);
+        assert_eq!(t.h.down(HK), rep(vec![]), "auto-repeat swallowed");
+        t.advance(50);
+        assert_eq!(t.h.up(HK), rep(vec![d(VK_ESCAPE), u(VK_ESCAPE)]));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn slow_tap_does_nothing() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        t.h.down(HK);
+        t.advance(201);
+        assert_eq!(t.h.up(HK), rep(vec![]));
+        // exactly at the timeout still counts
+        t.h.down(HK);
+        t.advance(200);
+        assert_eq!(t.h.up(HK), rep(vec![d(VK_ESCAPE), u(VK_ESCAPE)]));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn hold_with_key_gives_all_four_modifiers() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        t.h.down(HK);
+        let mut want = downs(&HYPER);
+        want.push(d(VK_K));
+        assert_eq!(t.h.down(VK_K), rep(want));
+        assert_eq!(t.h.down(VK_K), PASS, "repeat");
+        assert_eq!(t.h.up(VK_K), PASS);
+        assert_eq!(t.h.down(VK_J), PASS, "modifiers already down");
+        assert_eq!(t.h.up(VK_J), PASS);
+        // released quickly, but a key was used: no Escape
+        assert_eq!(t.h.up(HK), rep(ups_rev(&HYPER)));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn key_released_after_hyper() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        t.h.down(HK);
+        t.h.down(VK_K);
+        assert_eq!(t.h.up(HK), rep(ups_rev(&HYPER)));
+        assert_eq!(t.h.up(VK_K), PASS);
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn dummy_key_before_releasing_win_alt_on_windows() {
+        let mut t = H::new(HyperMode::Hyper, TapAction::Escape, true, cfg(&[], &[]));
+        t.h.down(HK);
+        t.h.tap(VK_K);
+        let mut want = vec![d(VK_DUMMY), u(VK_DUMMY)];
+        want.extend(ups_rev(&HYPER));
+        assert_eq!(t.h.up(HK), rep(want));
+        // a plain tap never touches Win/Alt, so no dummy is needed
+        t.h.down(HK);
+        assert_eq!(t.h.up(HK), rep(vec![d(VK_ESCAPE), u(VK_ESCAPE)]));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn hyper_shortcut_remaps_fire() {
+        let extra = cfg(
+            &[],
+            &[(
+                "Ctrl+Alt+Shift+Win+T",
+                Target::OpenUri("https://example.com".into()),
+                None,
+            )],
+        );
+        let mut t = H::new(HyperMode::Hyper, TapAction::Escape, false, extra);
+        t.h.down(HK);
+        let mut want = downs(&HYPER);
+        want.push(Action::OpenUri("https://example.com".into()));
+        assert_eq!(t.h.down(VK_T), rep(want));
+        assert_eq!(t.h.up(VK_T), rep(vec![]));
+        assert_eq!(t.h.up(HK), rep(ups_rev(&HYPER)));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn physically_held_modifier_is_not_released_by_hyper() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        assert_eq!(t.h.down(VK_LSHIFT), PASS);
+        t.h.down(HK);
+        assert_eq!(
+            t.h.down(VK_K),
+            rep(vec![d(VK_LCONTROL), d(VK_LMENU), d(VK_LWIN), d(VK_K)])
+        );
+        t.h.up(VK_K);
+        assert_eq!(
+            t.h.up(HK),
+            rep(vec![u(VK_LWIN), u(VK_LMENU), u(VK_LCONTROL)])
+        );
+        assert_eq!(t.h.up(VK_LSHIFT), PASS);
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn modifier_pressed_during_hold_is_not_a_tap() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        t.h.down(HK);
+        t.h.down(VK_LSHIFT);
+        t.h.up(VK_LSHIFT);
+        let out = t.h.up(HK);
+        assert!(
+            !matches!(&out, Outcome::Replace(a) if a.contains(&d(VK_ESCAPE))),
+            "{out:?}"
+        );
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn mouse_engages_modifiers() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        t.h.down(HK);
+        assert!(t.h.e.hyper_pending());
+        let acts = t.h.e.engage_hyper();
+        assert_eq!(acts, downs(&HYPER));
+        for a in &acts {
+            if let Action::Key { vk, down } = *a {
+                t.h.apply(vk, down);
+            }
+        }
+        assert!(!t.h.e.hyper_pending());
+        assert!(t.h.e.engage_hyper().is_empty());
+        assert_eq!(t.h.up(HK), rep(ups_rev(&HYPER)), "click: not a tap");
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn control_mode() {
+        let mut t = H::hyper(HyperMode::Control, TapAction::Escape);
+        t.h.down(HK);
+        assert_eq!(t.h.down(VK_A), rep(vec![d(VK_LCONTROL), d(VK_A)]));
+        t.h.up(VK_A);
+        assert_eq!(t.h.up(HK), rep(vec![u(VK_LCONTROL)]));
+        let (a, b) = t.h.tap(HK);
+        assert_eq!(a, rep(vec![]));
+        assert_eq!(b, rep(vec![d(VK_ESCAPE), u(VK_ESCAPE)]));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn escape_mode() {
+        let mut t = H::hyper(HyperMode::Escape, TapAction::None);
+        assert_eq!(t.h.down(HK), rep(vec![d(VK_ESCAPE)]));
+        assert_eq!(t.h.down(HK), rep(vec![d(VK_ESCAPE)]), "repeat");
+        t.advance(1000);
+        assert_eq!(t.h.up(HK), rep(vec![u(VK_ESCAPE)]));
+        // with another key in between, still just Escape
+        t.h.down(HK);
+        assert_eq!(t.h.down(VK_A), PASS);
+        t.h.up(VK_A);
+        assert_eq!(t.h.up(HK), rep(vec![u(VK_ESCAPE)]));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn tap_actions() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::None);
+        t.h.down(HK);
+        assert_eq!(t.h.up(HK), rep(vec![]));
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::CapsLock);
+        t.h.down(HK);
+        assert_eq!(t.h.up(HK), rep(vec![d(VK_CAPITAL), u(VK_CAPITAL)]));
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn config_change_while_held_keeps_behaviour() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        t.h.down(HK);
+        t.h.e.set_config(&Config::default()); // hyper off
+        t.h.down(VK_K);
+        assert_eq!(t.h.up(HK), rep(ups_rev(&HYPER)));
+        t.h.up(VK_K);
+        // now off: the key passes
+        assert_eq!(t.h.down(HK), PASS);
+        assert_eq!(t.h.up(HK), PASS);
+        t.h.assert_clean();
+    }
+
+    #[test]
+    fn reset_releases_engaged_modifiers() {
+        let mut t = H::hyper(HyperMode::Hyper, TapAction::Escape);
+        t.h.down(HK);
+        t.h.down(VK_K);
+        let stuck = t.h.e.reset();
+        assert!(stuck.contains(&u(VK_LWIN)) && stuck.contains(&u(VK_LCONTROL)));
+        assert!(!stuck.contains(&u(HK)));
+    }
+
+    #[test]
+    fn windows_capslock_source() {
+        let mut c = cfg(&[(VK_CAPITAL, Target::Key(VK_ESCAPE))], &[]);
+        c.hyper_key.mode = HyperMode::Hyper;
+        let mut h = Harness::with_opts(
+            c,
+            EngineOptions {
+                dummy_key: true,
+                windows_style: false,
+                hyper_vk: VK_CAPITAL,
+            },
+        );
+        // hyper wins over the CapsLock remap
+        assert_eq!(h.down(VK_CAPITAL), rep(vec![]));
+        assert_eq!(h.up(VK_CAPITAL), rep(vec![d(VK_ESCAPE), u(VK_ESCAPE)]));
+        h.assert_clean();
     }
 }

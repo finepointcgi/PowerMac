@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::hyper::{HyperKeyConfig, HyperMode, TapAction};
 use crate::keys::{key_name, parse_combo, Key, Shortcut, VK_DISABLED};
 pub use crate::windows_style::WindowsStylePreset;
 
@@ -20,6 +21,9 @@ pub struct Config {
     pub paste_plain_text: PastePlainText,
     /// The "Windows-style keys" preset (off by default; macOS only).
     pub windows_style: WindowsStylePreset,
+    /// Caps Lock → Hyper / Control / Escape (off by default). Independent of
+    /// `enabled`, like `pastePlainText`.
+    pub hyper_key: HyperKeyConfig,
 }
 
 impl Default for Config {
@@ -30,6 +34,7 @@ impl Default for Config {
             remap_shortcuts: Vec::new(),
             paste_plain_text: PastePlainText::default(),
             windows_style: WindowsStylePreset::default(),
+            hyper_key: HyperKeyConfig::default(),
         }
     }
 }
@@ -305,6 +310,15 @@ impl Config {
             }
             if r.app.as_deref().is_some_and(|a| a.trim().is_empty()) {
                 out.push(format!("remapShortcuts[{i}]: empty app name"));
+            }
+        }
+        if self.hyper_key.is_on() {
+            let caps = |k: u32| k == pm_input::vk::VK_CAPITAL;
+            if self.remap_keys.iter().any(|r| caps(r.from.0)) {
+                out.push("remapKeys: the CapsLock remap is ignored while hyperKey is on".into());
+            }
+            if self.hyper_key.tap_timeout_ms == 0 {
+                out.push("hyperKey: tapTimeoutMs is 0, so a tap never fires".into());
             }
         }
         out

@@ -224,9 +224,17 @@ name = "audio-control"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
+ "core-foundation",
+ "core-foundation-sys",
+ "env_logger",
  "log",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]
@@ -253,9 +261,11 @@ name = "battery-limit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "log",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -911,9 +921,12 @@ name = "display-scaling"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "display-control",
  "log",
+ "objc2 0.6.5",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -941,7 +954,13 @@ name = "dock-previews"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
+ "env_logger",
  "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "pm-input",
  "serde",
  "serde_json",
 ]
@@ -1292,12 +1311,14 @@ dependencies = [
  "log",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "pm-ui",
  "rand",
  "serde",
  "serde_json",
  "tempfile",
  "unicode-normalization",
+ "windows",
  "windows-sys 0.59.0",
 ]
 
@@ -2419,7 +2440,11 @@ name = "menubar-manager"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "env_logger",
  "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
 ]
@@ -4052,9 +4077,18 @@ name = "text-expander"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
+ "chrono",
+ "env_logger",
+ "fastrand",
+ "keyboard-manager",
  "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

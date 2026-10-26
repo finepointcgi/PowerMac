@@ -712,6 +712,8 @@ struct TapCtx {
     /// Set after we switched caps lock back off; the resulting flagsChanged
     /// (if any) is swallowed.
     caps_echo: Cell<Option<Instant>>,
+    /// Last time a hidutil re-apply was requested (rate limit).
+    hid_reapply: Cell<Option<Instant>>,
 }
 
 pub struct Hook {
@@ -754,6 +756,7 @@ pub fn start(shared: Arc<Shared>) -> Result<Hook> {
             shared,
             tap: Cell::new(std::ptr::null_mut()),
             caps_echo: Cell::new(None),
+            hid_reapply: Cell::new(None),
         }));
         let mut tap = std::ptr::null_mut();
         for loc in [kCGHIDEventTap, kCGSessionEventTap] {
@@ -823,7 +826,8 @@ unsafe extern "C" fn tap_callback(
         return event;
     }
     let tag = CGEventGetIntegerValueField(event, kCGEventSourceUserData);
-    if tag == INJECTED_TAG as i64 || tag == MWB_TAG as i64 {
+    if tag == INJECTED_TAG as i64 || tag == MWB_TAG as i64 || tag == crate::TEXT_EXPANDER_TAG as i64
+    {
         return event;
     }
     let keep = objc2::rc::autoreleasepool(|_| {
@@ -877,6 +881,29 @@ unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRe
             // that don't set device bits.
             let down = flags & dev != 0 || (flags & generic != 0 && flags & family == 0);
             key_event(ctx, &mut eng, proxy, event, k, down)
+        }
+        kCGEventLeftMouseDown
+        | kCGEventRightMouseDown
+        | kCGEventOtherMouseDown
+        | kCGEventScrollWheel
+            if eng.hyper_pending() =>
+        {
+            // Hyper + click / scroll: press the Hyper modifiers first.
+            let os_before = eng.os_keys().clone();
+            let acts = eng.engage_hyper();
+            let flags_in = CGEventGetFlags(event);
+            let physical = eng.physical_keys().clone();
+            perform(
+                Some(&ctx.shared),
+                proxy,
+                &acts,
+                flags_in,
+                flags_in & kCGEventFlagMaskAlphaShift,
+                &physical,
+                os_before,
+            );
+            fix_flags(&eng, event);
+            true
         }
         _ => {
             fix_flags(&eng, event);
@@ -983,6 +1010,23 @@ unsafe fn caps_event(
 ) -> bool {
     let flags_in = CGEventGetFlags(event);
     let caps_on = flags_in & kCGEventFlagMaskAlphaShift != 0;
+    if eng.hyper_config().is_on() {
+        // While the Hyper key is on, Caps Lock arrives as F18. A Caps Lock
+        // flagsChanged is either the lock state we toggled (tap action) or a
+        // keyboard that doesn't have the hidutil mapping yet (plugged in
+        // later): map it, and let this one through.
+        if CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID) == 0
+            && ctx
+                .hid_reapply
+                .get()
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(2))
+        {
+            ctx.hid_reapply.set(Some(Instant::now()));
+            ctx.shared.submit_job(crate::Job::ReapplyHid);
+        }
+        fix_flags(eng, event);
+        return true;
+    }
     if let Some(t) = ctx.caps_echo.take() {
         if t.elapsed() < Duration::from_millis(500) && !caps_on {
             return false; // the flagsChanged caused by switching caps lock back off

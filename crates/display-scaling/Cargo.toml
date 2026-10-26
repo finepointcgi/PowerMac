@@ -8,3 +8,22 @@ anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Only the pure `identity` module is used (stable display ids, EDID parsing),
+# so ids match the ones the Displays (brightness) module shows.
+display-control = { path = "../display-control" }
+
+# macOS: CoreGraphics / CoreFoundation are bound by hand in
+# src/platform/macos/ffi.rs; the private CGVirtualDisplay classes are looked
+# up through the Objective-C runtime and CoreDisplay's info dictionary with
+# dlsym, so a missing one only disables HiDPI.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Devices_Display",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Registry",
+    "Win32_UI_HiDpi",
+] }

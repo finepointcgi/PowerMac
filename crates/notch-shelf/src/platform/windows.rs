@@ -328,7 +328,8 @@ impl Ui {
             match r {
                 Request::Expand => self.logic.expand(),
                 Request::Collapse => self.logic.collapse(false),
-                Request::RenderPng(_) | Request::Debug(_) => {}
+                // No Home view (widgets) on Windows yet: the shelf only.
+                Request::RenderPng(_) | Request::Debug(_) | Request::SetView(_) | Request::RefreshWidgets => {}
             }
         }
         let mut pt = POINT::default();

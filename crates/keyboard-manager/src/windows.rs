@@ -275,7 +275,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     }
     let info = &*(lparam as *const KBDLLHOOKSTRUCT);
     if info.flags & LLKHF_INJECTED != 0
-        && (info.dwExtraInfo == INJECTED_TAG || info.dwExtraInfo == MWB_TAG)
+        && (info.dwExtraInfo == INJECTED_TAG
+            || info.dwExtraInfo == MWB_TAG
+            || info.dwExtraInfo == crate::TEXT_EXPANDER_TAG)
     {
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }

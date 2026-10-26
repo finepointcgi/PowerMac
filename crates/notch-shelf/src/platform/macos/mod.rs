@@ -1,9 +1,16 @@
 //! macOS backend (AppKit + Core Animation, main thread).
 
 mod app;
+mod calendar;
+mod camera;
 mod ffi;
 mod gfx;
+mod media;
+mod paint;
 mod pboard;
+mod providers;
+mod rt;
+mod sysinfo;
 mod view;
 
 use std::sync::Arc;
@@ -36,6 +43,7 @@ fn on_main(f: impl FnOnce() + Send + 'static) {
 
 impl Backend {
     pub fn start(shared: Arc<Shared>) -> Result<Backend> {
+        providers::spawn(shared.clone());
         on_main(move || app::install(shared));
         Ok(Backend)
     }

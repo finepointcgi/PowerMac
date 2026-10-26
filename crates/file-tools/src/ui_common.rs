@@ -35,6 +35,20 @@ pub mod icon {
     pub const BRACKETS: &str = "\u{E860}";
     pub const NOTEPAD: &str = "\u{E63E}";
     pub const X_CIRCLE: &str = "\u{E4F8}";
+    pub const IMAGE: &str = "\u{E2CA}";
+    pub const IMAGES: &str = "\u{E836}";
+    pub const DEVICE_MOBILE: &str = "\u{E1E0}";
+    pub const TELEVISION_SIMPLE: &str = "\u{EAE6}";
+    pub const RULER: &str = "\u{E6B8}";
+    pub const ARROWS_OUT: &str = "\u{E0A2}";
+    pub const ARROWS_IN_SIMPLE: &str = "\u{E09E}";
+    pub const CROP: &str = "\u{E1D4}";
+    pub const MAP_PIN: &str = "\u{E316}";
+    pub const EJECT: &str = "\u{E212}";
+    pub const HARD_DRIVE: &str = "\u{E29E}";
+    pub const SPINNER_GAP: &str = "\u{E66C}";
+    pub const FRAME_CORNERS: &str = "\u{E626}";
+    pub const PERCENT: &str = "\u{E3B6}";
 }
 
 /// Tile colors (macOS system colors).
@@ -68,6 +82,8 @@ pub fn file_icon(ext: &str, is_dir: bool) -> (&'static str, Color32) {
         "rs" | "py" | "js" | "ts" | "c" | "h" | "cpp" | "swift" | "go" | "java" | "css"
         | "json" | "toml" | "yaml" | "yml" | "xml" => (icon::FILE_CODE, tint::PURPLE),
         "csv" | "xls" | "xlsx" | "numbers" => (icon::LIST_NUMBERS, tint::GREEN),
+        "jpg" | "jpeg" | "png" | "heic" | "heif" | "gif" | "webp" | "tif" | "tiff" | "bmp"
+        | "dng" | "avif" => (icon::IMAGE, tint::TEAL),
         _ => (icon::FILE, tint::GRAY),
     }
 }
@@ -91,6 +107,20 @@ pub fn become_foreground_app() {
 /// A 64x64 window icon: a rounded tile in `color` with a white glyph-like
 /// mark (two lines for rename, a plus for New+).
 pub fn app_icon(color: [u8; 3], plus: bool) -> egui::IconData {
+    app_icon_with(color, if plus { Mark::Plus } else { Mark::Lines })
+}
+
+/// The white mark on an [`app_icon_with`] tile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Lines,
+    Plus,
+    /// Two nested frames (Image Resizer).
+    Frames,
+}
+
+/// [`app_icon`] with any [`Mark`].
+pub fn app_icon_with(color: [u8; 3], mark: Mark) -> egui::IconData {
     const N: usize = 64;
     let mut px = vec![0u8; N * N * 4];
     for y in 0..N {
@@ -102,13 +132,22 @@ pub fn app_icon(color: [u8; 3], plus: bool) -> egui::IconData {
             if d > 12.0 {
                 continue;
             }
-            let white = if plus {
-                ((29.0..35.0).contains(&fx) && (18.0..46.0).contains(&fy))
-                    || ((18.0..46.0).contains(&fx) && (29.0..35.0).contains(&fy))
-            } else {
-                ((16.0..48.0).contains(&fx) && (20.0..26.0).contains(&fy))
-                    || ((16.0..38.0).contains(&fx) && (38.0..44.0).contains(&fy))
-                    || ((42.0..46.0).contains(&fx) && (34.0..48.0).contains(&fy))
+            let frame = |x0: f32, y0: f32, x1: f32, y1: f32| {
+                (x0..x1).contains(&fx)
+                    && (y0..y1).contains(&fy)
+                    && !((x0 + 4.0..x1 - 4.0).contains(&fx) && (y0 + 4.0..y1 - 4.0).contains(&fy))
+            };
+            let white = match mark {
+                Mark::Plus => {
+                    ((29.0..35.0).contains(&fx) && (18.0..46.0).contains(&fy))
+                        || ((18.0..46.0).contains(&fx) && (29.0..35.0).contains(&fy))
+                }
+                Mark::Lines => {
+                    ((16.0..48.0).contains(&fx) && (20.0..26.0).contains(&fy))
+                        || ((16.0..38.0).contains(&fx) && (38.0..44.0).contains(&fy))
+                        || ((42.0..46.0).contains(&fx) && (34.0..48.0).contains(&fy))
+                }
+                Mark::Frames => frame(14.0, 14.0, 50.0, 50.0) || frame(14.0, 30.0, 34.0, 50.0),
             };
             let i = (y * N + x) * 4;
             let c = if white { [255, 255, 255] } else { color };

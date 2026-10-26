@@ -57,6 +57,10 @@ impl Rect {
         let l = |a: f64, b: f64| a + (b - a) * t;
         Rect::new(l(self.x, o.x), l(self.y, o.y), l(self.w, o.w), l(self.h, o.h))
     }
+    pub fn union(&self, o: &Rect) -> Rect {
+        let (x0, y0) = (self.x.min(o.x), self.y.min(o.y));
+        Rect::new(x0, y0, self.right().max(o.right()) - x0, self.bottom().max(o.bottom()) - y0)
+    }
 }
 
 /// A screen as the platform layer reports it.
@@ -139,12 +143,23 @@ pub fn header_height(collapsed: &Rect, m: &Metrics) -> f64 {
     collapsed.h.max(m.header_min_h)
 }
 
-/// The fully expanded panel, growing out of `collapsed` and kept on screen.
+/// The fully expanded panel (Shelf view), growing out of `collapsed` and
+/// kept on screen.
 pub fn expanded_rect(collapsed: &Rect, screen: &Rect, m: &Metrics) -> Rect {
-    let h = header_height(collapsed, m) + m.strip_gap + m.tile_h + m.bottom_pad;
+    expanded_with(collapsed, screen, m, m.panel_width, m.tile_h)
+}
+
+/// The expanded panel of the Home view: `width` wide (see
+/// [`crate::widgets::layout::home_width`]), a row of widget cards high.
+pub fn home_rect(collapsed: &Rect, screen: &Rect, m: &Metrics, width: f64) -> Rect {
+    expanded_with(collapsed, screen, m, width, crate::widgets::layout::CARD_H)
+}
+
+fn expanded_with(collapsed: &Rect, screen: &Rect, m: &Metrics, width: f64, body_h: f64) -> Rect {
+    let h = header_height(collapsed, m) + m.strip_gap + body_h + m.bottom_pad;
     // Room for the title and the buttons on either side of the notch.
     let min_w = collapsed.w + 2.0 * 150.0;
-    let w = m.panel_width.max(min_w).min(screen.w - 2.0 * (m.shoulder + 4.0));
+    let w = width.max(min_w).min(screen.w - 2.0 * (m.shoulder + 4.0));
     let lo = screen.x + m.shoulder + 4.0;
     let hi = screen.right() - m.shoulder - 4.0 - w;
     let x = (collapsed.center_x() - w / 2.0).clamp(lo, hi.max(lo));
@@ -259,11 +274,40 @@ pub enum Button {
 
 pub const BUTTONS: [Button; 3] = [Button::DragAll, Button::Share, Button::Clear];
 
+/// The Home / Shelf segmented control at the left of the header.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Switcher {
+    pub frame: Rect,
+    pub home: Rect,
+    pub shelf: Rect,
+}
+
+pub const SWITCH_SEG_W: f64 = 32.0;
+pub const SWITCH_H: f64 = 24.0;
+
+/// Place the switcher at the left of a header.
+pub fn switcher(header: &Rect, m: &Metrics) -> Switcher {
+    let x = header.x + m.side_pad + 2.0;
+    let frame = Rect::new(x, header.center_y() - SWITCH_H / 2.0, 2.0 * SWITCH_SEG_W + 4.0, SWITCH_H);
+    let seg = |i: f64| Rect::new(frame.x + 2.0 + i * SWITCH_SEG_W, frame.y + 2.0, SWITCH_SEG_W, SWITCH_H - 4.0);
+    Switcher { frame, home: seg(0.0), shelf: seg(1.0) }
+}
+
+impl Switcher {
+    pub fn hit(&self, p: Point) -> Option<crate::widgets::View> {
+        if !self.frame.inflate(2.0, 3.0).contains(p) {
+            return None;
+        }
+        Some(if p.x < self.home.right() { crate::widgets::View::Home } else { crate::widgets::View::Shelf })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
     pub panel: Rect,
     pub notch: Rect,
     pub header: Rect,
+    pub switcher: Option<Switcher>,
     /// Left of the notch: icon + title + count.
     pub title: Rect,
     pub buttons: Vec<(Button, Rect)>,
@@ -296,9 +340,19 @@ pub fn clamp_scroll(scroll: f64, max: f64) -> f64 {
 }
 
 pub fn layout(expanded: &Rect, notch: &Rect, n_tiles: usize, scroll: f64, m: &Metrics) -> Layout {
+    layout_with(expanded, notch, n_tiles, scroll, m, false)
+}
+
+/// [`layout`], with the Home / Shelf switcher in the header when
+/// `with_switcher`.
+pub fn layout_with(expanded: &Rect, notch: &Rect, n_tiles: usize, scroll: f64, m: &Metrics, with_switcher: bool) -> Layout {
     let hh = header_height(notch, m);
     let header = Rect::new(expanded.x, expanded.y, expanded.w, hh);
-    let left0 = expanded.x + m.side_pad + 4.0;
+    let sw = with_switcher.then(|| switcher(&header, m));
+    let left0 = match sw {
+        Some(s) => s.frame.right() + 12.0,
+        None => expanded.x + m.side_pad + 4.0,
+    };
     let left1 = (notch.x - 12.0).max(left0);
     let title = Rect::new(left0, header.y, left1 - left0, hh);
     let right1 = expanded.right() - m.side_pad - 2.0;
@@ -318,13 +372,40 @@ pub fn layout(expanded: &Rect, notch: &Rect, n_tiles: usize, scroll: f64, m: &Me
     // Few tiles: centered; many: start at the left edge and scroll.
     let start = if content_w <= strip.w { strip.center_x() - content_w / 2.0 } else { strip.x - scroll };
     let tiles = (0..n_tiles).map(|i| Rect::new(start + i as f64 * (m.tile_w + m.tile_gap), strip.y, m.tile_w, m.tile_h)).collect();
-    Layout { panel: *expanded, notch: *notch, header, title, buttons, strip, content_w, max_scroll, scroll, tiles }
+    Layout { panel: *expanded, notch: *notch, header, switcher: sw, title, buttons, strip, content_w, max_scroll, scroll, tiles }
+}
+
+/// Home view frames.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HomeLayout {
+    pub panel: Rect,
+    pub header: Rect,
+    pub switcher: Switcher,
+    /// Left of the notch, after the switcher.
+    pub title: Rect,
+    /// Visible card row (clips cards).
+    pub row: Rect,
+    pub cards: crate::widgets::layout::CardsLayout,
+}
+
+pub fn home_layout(expanded: &Rect, notch: &Rect, specs: &[crate::widgets::layout::CardSpec], scroll: f64, m: &Metrics) -> HomeLayout {
+    let hh = header_height(notch, m);
+    let header = Rect::new(expanded.x, expanded.y, expanded.w, hh);
+    let sw = switcher(&header, m);
+    let left0 = sw.frame.right() + 12.0;
+    let left1 = (notch.x - 12.0).max(left0);
+    let title = Rect::new(left0, header.y, left1 - left0, hh);
+    let inset = m.side_pad - 4.0;
+    let row = Rect::new(expanded.x + inset, header.bottom() + m.strip_gap, expanded.w - 2.0 * inset, crate::widgets::layout::CARD_H);
+    let cards = crate::widgets::layout::layout_cards(row, specs, scroll);
+    HomeLayout { panel: *expanded, header, switcher: sw, title, row, cards }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Hit {
     Outside,
     Panel,
+    Switch(crate::widgets::View),
     Title,
     Button(Button),
     Strip,
@@ -350,6 +431,9 @@ pub fn hit_test(l: &Layout, p: Point, close_for: Option<usize>, m: &Metrics) -> 
             return Hit::Tile(i);
         }
         return Hit::Strip;
+    }
+    if let Some(v) = l.switcher.and_then(|s| s.hit(p)) {
+        return Hit::Switch(v);
     }
     if let Some((b, _)) = l.buttons.iter().find(|(_, r)| r.inflate(2.0, 2.0).contains(p)) {
         return Hit::Button(*b);
@@ -516,6 +600,38 @@ mod tests {
         // Rubber band.
         let band = Rect::new(l.tiles[0].x + 5.0, l.strip.y, l.tiles[1].x - l.tiles[0].x, 10.0);
         assert_eq!(tiles_in(&l, &band), vec![0, 1]);
+    }
+
+    #[test]
+    fn switcher_and_home_layout() {
+        use crate::widgets::layout::{spec, CARD_H};
+        use crate::widgets::{View, WidgetKind};
+        let m = Metrics::default();
+        let s = mbp14();
+        let n = s.notch.unwrap();
+        let e = expanded_rect(&n, &s.frame, &m);
+        let l = layout_with(&e, &n, 2, 0.0, &m, true);
+        let sw = l.switcher.unwrap();
+        assert!(sw.frame.right() < l.title.x && l.title.right() <= n.x);
+        assert!((sw.frame.center_y() - l.header.center_y()).abs() < 1e-9);
+        let c = |r: Rect| Point::new(r.center_x(), r.center_y());
+        assert_eq!(hit_test(&l, c(sw.home), None, &m), Hit::Switch(View::Home));
+        assert_eq!(hit_test(&l, c(sw.shelf), None, &m), Hit::Switch(View::Shelf));
+        assert_eq!(layout(&e, &n, 2, 0.0, &m).switcher, None);
+        // Home: taller, at least as wide, same top and center.
+        let h = home_rect(&n, &s.frame, &m, 760.0);
+        assert_eq!(h.w, 760.0);
+        assert_eq!(h.h, header_height(&n, &m) + m.strip_gap + CARD_H + m.bottom_pad);
+        assert!((h.center_x() - n.center_x()).abs() < 1e-9 && h.y == 0.0);
+        let specs: Vec<_> = [WidgetKind::NowPlaying, WidgetKind::Timer].iter().map(|k| spec(*k, 0)).collect();
+        let hl = home_layout(&h, &n, &specs, 0.0, &m);
+        assert_eq!(hl.cards.cards.len(), 2);
+        assert!(hl.cards.cards.iter().all(|r| r.y == hl.row.y && r.x >= hl.row.x - 1e-9 && r.right() <= hl.row.right() + 1e-9));
+        assert!(hl.row.bottom() + m.bottom_pad <= h.bottom() + 1e-9);
+        assert!(hl.row.y >= hl.header.bottom());
+        // The window covers both views.
+        let w = window_rect(&e.union(&h), &s.frame, &m);
+        assert!(w.x <= h.x - m.shoulder && w.right() >= h.right() + m.shoulder && w.bottom() >= h.bottom() + 20.0);
     }
 
     #[test]

@@ -11,6 +11,9 @@
 //!   for people used to Windows: Home/End, Ctrl+Arrow word jumps, Ctrl+
 //!   Backspace, optional Ctrl+C/V/... → Cmd, and Finder cut/paste, Enter to
 //!   open, Delete to trash, Backspace to go up. See [`windows_style`].
+//! - **Hyper key** (`"hyperKey"`, off by default): Caps Lock held =
+//!   Ctrl+Option+Shift+Cmd (or Control), tapped alone = Escape / nothing /
+//!   Caps Lock; or Caps Lock = Escape. See [`hyper`].
 //! - **Paste as plain text**: a hotkey (Cmd+Option+Shift+V on macOS,
 //!   Win+Ctrl+Alt+V on Windows, as in PowerToys) that strips the clipboard
 //!   down to plain text and pastes it, optionally putting the original rich
@@ -58,7 +61,8 @@
 //!     "restoreClipboard": false,
 //!     "restoreDelayMs": 500
 //!   },
-//!   "windowsStyle": { "enabled": true, "ctrlShortcutsToCmd": false }
+//!   "windowsStyle": { "enabled": true, "ctrlShortcutsToCmd": false },
+//!   "hyperKey": { "mode": "hyper", "tapAction": "escape", "tapTimeoutMs": 200 }
 //! }
 //! ```
 //!
@@ -123,6 +127,7 @@ use anyhow::{anyhow, Result};
 pub mod clipboard;
 pub mod config;
 pub mod engine;
+pub mod hyper;
 pub mod keys;
 pub mod launch;
 mod powertoys;
@@ -162,6 +167,7 @@ mod platform {
 
 pub use config::{Config, KeyRemap, PastePlainText, RunProgram, ShortcutRemap, Target};
 pub use engine::{Action, Engine, EngineOptions, Outcome};
+pub use hyper::{HyperKeyConfig, HyperMode, TapAction};
 pub use keys::{Key, Shortcut};
 pub use windows_style::WindowsStylePreset;
 
@@ -170,11 +176,46 @@ pub use windows_style::WindowsStylePreset;
 pub const INJECTED_TAG: usize = 0x504D_4B4D;
 /// Mouse Without Borders' tag; its injected (remote) input is not remapped.
 pub const MWB_TAG: usize = pm_input::INJECTED_TAG;
+/// Tag of the text expander's injected events ("PMTE"); not remapped
+/// either (its unicode text events carry keycode 0, i.e. "A").
+pub const TEXT_EXPANDER_TAG: usize = 0x504D_5445;
 
 pub(crate) enum Job {
     Paste,
     Run(RunProgram),
     Open(String),
+    /// A Caps Lock flagsChanged arrived while the Hyper key is on: a
+    /// keyboard without the hidutil mapping (plugged in later).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    ReapplyHid,
+}
+
+/// The macOS Caps Lock → F18 hidutil session (nothing elsewhere).
+#[cfg(target_os = "macos")]
+type HidSession = hyper::session::Session;
+#[cfg(not(target_os = "macos"))]
+struct HidSession;
+
+#[cfg(target_os = "macos")]
+fn hid_session_start() -> Result<HidSession> {
+    HidSession::start()
+}
+#[cfg(not(target_os = "macos"))]
+fn hid_session_start() -> Result<HidSession> {
+    Ok(HidSession)
+}
+
+/// Start / stop the hidutil mapping to match `cfg`.
+fn sync_hid(slot: &Mutex<Option<HidSession>>, cfg: &Config) -> Result<()> {
+    let Ok(mut g) = slot.lock() else {
+        return Ok(());
+    };
+    match (cfg.hyper_key.is_on(), g.is_some()) {
+        (true, false) => *g = Some(hid_session_start()?),
+        (false, true) => *g = None, // Drop restores the previous mapping
+        _ => {}
+    }
+    Ok(())
 }
 
 /// State shared between the handle, the hook thread and the worker.
@@ -182,10 +223,20 @@ pub(crate) struct Shared {
     pub(crate) engine: Mutex<Engine>,
     pub(crate) config: Mutex<Config>,
     jobs: Mutex<Option<mpsc::Sender<Job>>>,
+    hid: Mutex<Option<HidSession>>,
 }
 
 impl Shared {
     /// Queue a side action (never blocks the hook).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn submit_job(&self, job: Job) {
+        if let Ok(g) = self.jobs.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(job);
+            }
+        }
+    }
+
     pub(crate) fn submit(&self, a: &Action) {
         let job = match a {
             Action::PastePlainText => Job::Paste,
@@ -245,8 +296,18 @@ impl KeyboardManager {
             engine: Mutex::new(engine),
             config: Mutex::new(config),
             jobs: Mutex::new(Some(tx)),
+            hid: Mutex::new(None),
         });
         let hook = platform::start(shared.clone())?;
+        // Undo a Caps Lock mapping left behind by a crashed run.
+        #[cfg(target_os = "macos")]
+        hyper::session::recover();
+        {
+            let cfg = shared.config.lock().map(|c| c.clone()).unwrap_or_default();
+            if let Err(e) = sync_hid(&shared.hid, &cfg) {
+                log::warn!("keyboard-manager: hyper key unavailable: {e:#}");
+            }
+        }
         let s2 = shared.clone();
         let worker = std::thread::Builder::new()
             .name("km-actions".into())
@@ -263,6 +324,15 @@ impl KeyboardManager {
                         }
                         Job::Run(r) => launch::run_program(&r),
                         Job::Open(u) => launch::open_uri(&u),
+                        Job::ReapplyHid => {
+                            #[cfg(target_os = "macos")]
+                            if let Ok(mut g) = s2.hid.lock() {
+                                if let Some(h) = g.as_mut() {
+                                    h.reapply();
+                                }
+                            }
+                            Ok(())
+                        }
                     };
                     if let Err(e) = r {
                         log::warn!("keyboard-manager: {e:#}");
@@ -296,12 +366,13 @@ impl Handle {
             .lock()
             .map_err(|_| anyhow!("engine poisoned"))?
             .set_config(&config);
+        let hid = sync_hid(&self.shared.hid, &config);
         *self
             .shared
             .config
             .lock()
             .map_err(|_| anyhow!("config poisoned"))? = config;
-        Ok(())
+        hid.map_err(|e| anyhow!("hyper key: {e:#}"))
     }
 
     /// The current configuration.
@@ -346,6 +417,10 @@ impl Handle {
         }
         if let Some(w) = self.worker.take() {
             let _ = w.join();
+        }
+        // Put the previous Caps Lock mapping back (macOS).
+        if let Ok(mut g) = self.shared.hid.lock() {
+            g.take();
         }
     }
 }

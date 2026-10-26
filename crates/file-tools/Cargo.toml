@@ -20,9 +20,27 @@ dirs = "5"
 libc = "0.2"
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_Memory",
+    "Win32_System_RestartManager",
+] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
 
 [dev-dependencies]
 tempfile = "3"

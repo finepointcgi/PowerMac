@@ -1,4 +1,4 @@
-//! Settings of PowerRename and New+, stored as camelCase JSON in
+//! Settings of PowerRename, New+, Image Resizer and the Finder basics, stored as camelCase JSON in
 //! `<config dir>/PowerMac/file-tools.json` (next to `config.json`). Every
 //! field is optional; missing fields take their defaults.
 
@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::finder::CopyStyle;
 use crate::rename::RenameOptions;
+use crate::resize::{ResizeOptions, ResizeSize};
 
 /// Top-level file-tools settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -14,6 +16,90 @@ use crate::rename::RenameOptions;
 pub struct Config {
     pub rename: RenameConfig,
     pub new_plus: NewPlusConfig,
+    pub resize: ResizeConfig,
+    pub finder: FinderConfig,
+}
+
+/// Image Resizer settings: the size presets and the last used options.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ResizeConfig {
+    /// The presets shown in the window (PowerToys: Small, Medium, Large, Phone).
+    pub presets: Vec<ResizeSize>,
+    /// The custom size (the last entry in the window's list).
+    pub custom: ResizeSize,
+    /// Index into `presets`; `presets.len()` selects the custom size.
+    pub selected: usize,
+    /// The last used options (`size` is filled from the selection).
+    pub options: ResizeOptions,
+}
+
+impl Default for ResizeConfig {
+    fn default() -> Self {
+        Self {
+            presets: ResizeSize::default_presets(),
+            custom: ResizeSize::default_custom(),
+            selected: 0,
+            options: ResizeOptions::default(),
+        }
+    }
+}
+
+impl ResizeConfig {
+    /// The selected size (a preset or the custom size).
+    pub fn selected_size(&self) -> ResizeSize {
+        self.presets
+            .get(self.selected)
+            .cloned()
+            .unwrap_or_else(|| self.custom.clone())
+    }
+
+    /// The remembered options with the selected size.
+    pub fn current_options(&self) -> ResizeOptions {
+        ResizeOptions {
+            size: self.selected_size(),
+            ..self.options.clone()
+        }
+    }
+}
+
+/// Settings of the Finder basics (Open in Terminal / editor, Copy path,
+/// hidden files, Eject all).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FinderConfig {
+    /// The terminal: a bundle id (`com.googlecode.iterm2`), an app path
+    /// (`/Applications/Foo.app`), or empty for the default (Terminal on
+    /// macOS, Windows Terminal / PowerShell on Windows). On Windows also
+    /// `wt`, `powershell`, `pwsh` or `cmd`.
+    pub terminal_app: String,
+    /// The editor, same forms as `terminal_app`; empty picks the first
+    /// installed of VS Code, Cursor, Zed, Sublime Text, … On Windows also a
+    /// command such as `code`.
+    pub editor_app: String,
+    /// What "Copy path" copies.
+    pub path_style: CopyStyle,
+    /// Without a selection (a hotkey or the tray), act on the folder of the
+    /// front Finder window. Asks Finder via AppleScript, which needs the
+    /// Automation permission for Finder (macOS asks the first time).
+    pub use_front_finder_window: bool,
+    /// "Eject all" also detaches mounted disk images.
+    pub eject_disk_images: bool,
+    /// "Eject all" also unmounts network shares.
+    pub eject_network_volumes: bool,
+}
+
+impl Default for FinderConfig {
+    fn default() -> Self {
+        Self {
+            terminal_app: String::new(),
+            editor_app: String::new(),
+            path_style: CopyStyle::Posix,
+            use_front_finder_window: false,
+            eject_disk_images: true,
+            eject_network_volumes: false,
+        }
+    }
 }
 
 /// PowerRename settings and remembered state.
@@ -147,6 +233,38 @@ mod tests {
         assert_eq!(c.new_plus.templates_dir.as_deref(), Some(Path::new("/x")));
         let s = serde_json::to_string(&c).unwrap();
         assert!(s.contains("\"newPlus\"") && s.contains("\"showOnlyChanged\""));
+    }
+
+    #[test]
+    fn old_file_loads_with_new_sections() {
+        // A file-tools.json from before Image Resizer / Finder basics.
+        let c: Config = serde_json::from_str(
+            r#"{"rename":{"rememberOptions":false,"mruSize":5},
+                "newPlus":{"hideExtensions":false}}"#,
+        )
+        .unwrap();
+        assert!(!c.rename.remember_options);
+        assert_eq!(c.resize, ResizeConfig::default());
+        assert_eq!(c.finder, FinderConfig::default());
+        assert_eq!(c.resize.presets.len(), 4);
+        assert_eq!(c.resize.selected_size().name, "Small");
+        // Partial new sections fill in the rest.
+        let c: Config = serde_json::from_str(
+            r#"{"resize":{"selected":4,"custom":{"width":50,"height":0,"unit":"percent"},
+                "options":{"jpegQuality":70}},
+                "finder":{"editorApp":"dev.zed.Zed","pathStyle":"tilde"}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.resize.selected_size().width, 50.0);
+        assert_eq!(c.resize.selected_size().name, "Custom");
+        assert_eq!(c.resize.current_options().jpeg_quality, 70);
+        assert!(c.resize.current_options().keep_metadata);
+        assert_eq!(c.finder.editor_app, "dev.zed.Zed");
+        assert_eq!(c.finder.path_style, CopyStyle::Tilde);
+        assert!(c.finder.eject_disk_images);
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"useFrontFinderWindow\":false"), "{s}");
+        assert!(s.contains("\"fileNameFormat\":\"%1 (%2)\""), "{s}");
     }
 
     #[test]
