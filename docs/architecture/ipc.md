@@ -10,7 +10,6 @@
 | `powermac clipboard` | hotkey / tray | Clipboard history picker |
 | `powermac color-picker --editor` | after a pick | Color editor |
 | `powermac rename` / `new` / `resize` / `finder` | Finder Quick Actions | File tools |
-| `com.powermac.battery-helper` | launchd (root) | SMC writes for the battery limit |
 
 Helper windows are separate processes because each egui event loop needs a main thread and the tray app's main thread runs AppKit. The app keeps at most one process per kind; asking again brings the existing window to the front.
 
@@ -29,8 +28,6 @@ All files live next to `config.json` and are written atomically (temp file + ren
 | `display-scaling-request.json` | settings → app | apply / confirm / revert | polled |
 | `audio-status.json` | app → settings | devices, apps playing, permission | every 2 s |
 | `audio-request.json` | settings → app | default device, levels | polled every 150 ms |
-| `battery-status.json` | app → settings | controller status | every 5 s |
-| `battery-request.json` | settings → app | charge to 100 % now, refresh | polled |
 | `menubar-status.json` | app → settings | permissions, items and their sections | on request |
 | `menubar-request.json` | settings → app | list / move / show / hide | polled |
 
@@ -39,5 +36,4 @@ Status files carry a timestamp (`at`, ms since the epoch); the settings window t
 ## Other channels
 
 - **Clipboard picker ↔ app:** loopback TCP (`clipboard-history::ipc`). Without a running app the picker reads the history files directly.
-- **App ↔ battery helper:** a Unix socket at `/var/run/com.powermac.battery-helper.sock`, accepted only from the user who installed it.
 - **Mouse Without Borders:** TCP 15100/15101 between machines, encrypted with AES-256-CBC.

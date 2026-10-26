@@ -80,7 +80,6 @@ nav:
           - Displays (brightness and volume): features/displays.md
           - Display Scaling (HiDPI): features/display-scaling.md
           - Sound: features/sound.md
-          - Battery charge limit: features/battery.md
           - Awake: features/awake.md
       - Tools:
           - Clipboard History: features/clipboard-history.md

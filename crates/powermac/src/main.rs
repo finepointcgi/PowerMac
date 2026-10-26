@@ -2,7 +2,6 @@
 //! Awake, Keyboard Manager, Color Picker, ...) in one cross-platform app.
 
 mod audio_glue;
-mod battery_glue;
 mod children;
 mod clipboard;
 mod display_glue;
@@ -146,7 +145,6 @@ pub(crate) struct Running {
     pub(crate) switcher: Option<window_switcher::Handle>,
     pub(crate) scaling: Option<display_scaling::Handle>,
     pub(crate) audio: Option<audio_control::Handle>,
-    pub(crate) battery: Option<battery_limit::Handle>,
     pub(crate) dock: Option<dock_previews::Handle>,
     pub(crate) expander: Option<text_expander::Handle>,
     /// Shared so that listing / moving items (which wait for the main
@@ -247,9 +245,6 @@ pub(crate) fn shutdown() {
         if let Some(a) = r.audio.take() {
             a.stop(); // removes the per-app volume taps
             audio_glue::write_stopped();
-        }
-        if let Some(b) = r.battery.take() {
-            b.stop(); // gives charging back to the firmware
         }
         drop(r.color.take());
         drop(r.ocr.take());
@@ -511,12 +506,12 @@ fn doctor(path: &std::path::Path, prompt: bool) -> Result<()> {
     let cfg = AppConfig::load_or_default(path)?;
     println!("modules: mwb={} fancyzones={} awake={} scroll={} mouse-tuning={} keyboard={} displays={} \
               clipboard={} shelf={} color-picker={} text-extractor={} window-switcher={} display-scaling={} \
-              sound={} battery-limit={} dock-previews={} text-expander={} menu-bar={}",
+              sound={} dock-previews={} text-expander={} menu-bar={}",
         cfg.mwb.enabled, cfg.fancyzones.enabled, cfg.awake.enabled, cfg.scroll_reverser.enabled,
         cfg.mouse_tuning.enabled, cfg.keyboard_manager.enabled, cfg.display_control.enabled,
         cfg.clipboard_history.enabled, cfg.notch_shelf.enabled, cfg.color_picker.enabled,
         cfg.text_extractor.enabled, cfg.window_switcher.enabled, cfg.display_scaling.enabled,
-        cfg.audio.enabled, cfg.battery_limit.enabled, cfg.dock_previews.enabled, cfg.text_expander.enabled, cfg.menu_bar.enabled);
+        cfg.audio.enabled, cfg.dock_previews.enabled, cfg.text_expander.enabled, cfg.menu_bar.enabled);
     println!("caps lock: {:?}", cfg.keyboard_manager.hyper_key.mode);
     println!("machine name: {}", cfg.mwb.settings.effective_machine_name());
     println!("mwb key valid: {}", mwb::crypto::is_key_valid(&cfg.mwb.settings.key));
@@ -528,10 +523,6 @@ fn doctor(path: &std::path::Path, prompt: bool) -> Result<()> {
     println!("hidpi (virtual displays) supported: {}", display_scaling::hidpi_supported());
     println!("per-app volume supported: {} (audio capture permission: {:?})",
         audio_control::per_app_volume_supported(), audio_control::capture_permission());
-    let b = battery_limit::read_battery();
-    if b.has_battery {
-        println!("battery: {}% (helper installed: {})", b.percent.unwrap_or(0), battery_limit::helper_installed());
-    }
     for (i, s) in backend.screens()?.iter().enumerate() {
         println!("screen {i}: {}x{} at ({}, {})", s.width(), s.height(), s.left, s.top);
     }

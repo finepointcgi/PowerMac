@@ -18,7 +18,7 @@ Get `PowerMac-<version>.dmg` from the [Releases page](https://github.com/finepoi
 ./scripts/bundle-macos.sh
 ```
 
-The script builds `powermac` and the battery helper (`powermac-battery-helper`) in release mode and wraps them in `target/release/PowerMac.app` (it honours `CARGO_TARGET_DIR`). The app is menu-bar only: `LSUIElement` is set, so it has no Dock icon. Move it to `/Applications` and open it:
+The script builds `powermac` in release mode and wraps it in `target/release/PowerMac.app` (it honours `CARGO_TARGET_DIR`). The app is menu-bar only: `LSUIElement` is set, so it has no Dock icon. Move it to `/Applications` and open it:
 
 ```bash
 mv target/release/PowerMac.app /Applications/
@@ -71,6 +71,5 @@ The log rotates to `powermac.log.old` at 5 MB. Set `RUST_LOG=debug` for more det
 
 1. Quit PowerMac from its menu.
 2. If you installed the Finder Quick Actions, remove them in **Settings → File Tools** (or delete the `PowerMac — …` workflows in `~/Library/Services`).
-3. If you installed the battery helper, uninstall it from **Settings → Battery** (it removes the LaunchDaemon `com.powermac.battery-helper`).
-4. Delete the app and, to remove all settings and history, `~/Library/Application Support/PowerMac/`.
-5. Remove PowerMac from the Privacy & Security lists in System Settings.
+3. Delete the app and, to remove all settings and history, `~/Library/Application Support/PowerMac/`.
+4. Remove PowerMac from the Privacy & Security lists in System Settings.

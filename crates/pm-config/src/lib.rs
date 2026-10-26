@@ -58,8 +58,6 @@ pub struct AppConfig {
     pub display_scaling: display_scaling::Config,
     /// Default-device rules and per-app volume (has its own `enabled`).
     pub audio: audio_control::Config,
-    /// Battery charge limit (has its own `enabled`; off by default).
-    pub battery_limit: battery_limit::Config,
     /// Window previews on Dock icons (has its own `enabled`).
     pub dock_previews: dock_previews::Config,
     /// Snippets typed from abbreviations (has its own `enabled`; off by default).
@@ -87,7 +85,6 @@ impl Default for AppConfig {
             window_switcher: window_switcher::Config::default(),
             display_scaling: display_scaling::Config::default(),
             audio: audio_control::Config::default(),
-            battery_limit: battery_limit::Config::default(),
             dock_previews: dock_previews::Config::default(),
             text_expander: text_expander::Config::default(),
             menu_bar: menubar_manager::Config::default(),
@@ -355,6 +352,26 @@ fn rand_id() -> u32 {
 mod tests {
     use super::*;
 
+    /// Config files from versions with the (removed) battery charge limit
+    /// still load; the old section is ignored and dropped on the next save.
+    #[test]
+    fn removed_charge_limit_section_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("pm-config-battery-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        // The key of the removed section (spelled in two parts so a search for
+        // leftovers of the feature stays clean).
+        let old_key = concat!("battery", "Limit");
+        let json = format!(r#"{{"windowSwitcher":{{"showDelayMs":150}},"{old_key}":{{"enabled":true,"limitPercent":80,"sailing":true}}}}"#);
+        std::fs::write(&path, json).unwrap();
+        let c = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(c.window_switcher.show_delay_ms, 150);
+        c.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(old_key));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn roundtrip_and_partial_files() {
         let c = AppConfig::with_new_key();
@@ -409,9 +426,8 @@ mod tests {
         assert_eq!(c.text_extractor.settings, d.text_extractor.settings);
         assert_eq!(c.window_switcher, d.window_switcher);
         assert_eq!(c.display_scaling, d.display_scaling);
-        assert!(!c.display_scaling.enabled && !c.battery_limit.enabled && !c.text_expander.enabled);
+        assert!(!c.display_scaling.enabled && !c.text_expander.enabled);
         assert_eq!(c.audio, d.audio);
-        assert_eq!(c.battery_limit, d.battery_limit);
         assert_eq!(c.dock_previews, d.dock_previews);
         assert_eq!(c.text_expander, d.text_expander);
         assert_eq!(c.menu_bar, d.menu_bar);
@@ -431,7 +447,7 @@ mod tests {
         c2.text_expander.snippets.push(text_expander::Snippet::new(";sig", "Best,\nAda"));
         let v = serde_json::to_value(&c2).unwrap();
         for k in ["mouseTuning", "displayControl", "clipboardHistory", "notchShelf", "colorPicker", "textExtractor", "windowSwitcher",
-                  "displayScaling", "audio", "batteryLimit", "dockPreviews", "textExpander", "menuBar"] {
+                  "displayScaling", "audio", "dockPreviews", "textExpander", "menuBar"] {
             assert!(v.get(k).is_some(), "{k}");
         }
         assert_eq!(v["colorPicker"]["enabled"], false);

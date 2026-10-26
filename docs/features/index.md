@@ -19,7 +19,6 @@ Every module can be turned on or off on its own in **Settings** or in `config.js
 | [Displays](displays.md) | on | brightness / volume keys | Accessibility (keys only) | yes |
 | [Display Scaling](display-scaling.md) | off | — | none (admin for override plists) | modes only |
 | [Sound](sound.md) | on | — | Audio capture (per-app volume) | yes |
-| [Battery](battery.md) | off | — | admin once (helper) | status only |
 | [Awake](awake.md) | off | tray menu | none | yes |
 | [Clipboard History](clipboard-history.md) | off | Cmd+Shift+V | Accessibility (hotkey) | Win+Shift+V |
 | [Color Picker](color-picker.md) | on | Ctrl+Option+C | none | Win+Shift+C |
@@ -30,5 +29,5 @@ Every module can be turned on or off on its own in **Settings** or in `config.js
 
 - **Hot reload.** Every module reconfigures live when its config changes; there is no restart.
 - **Graceful failure.** A module that can't start (missing permission, unsupported hardware) logs the reason and the rest of PowerMac keeps running.
-- **Clean shutdown.** Modules that change system state put it back when they stop: pointer settings, gamma tables, virtual HiDPI displays, Caps Lock mappings, per-app audio taps and battery charging are all restored.
+- **Clean shutdown.** Modules that change system state put it back when they stop: pointer settings, gamma tables, virtual HiDPI displays, Caps Lock mappings, and per-app audio taps are all restored.
 - **No double handling.** Events injected by PowerMac's own modules are tagged, and every event tap skips tagged events, so modules never react to each other's synthetic input.

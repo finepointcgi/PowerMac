@@ -21,7 +21,6 @@ What is still open after 1.0.0, the first public release. See [CI and releases](
 ### Distribution (macOS)
 
 - [ ] Developer ID Application certificate added as release secrets (the release workflow already signs with the hardened runtime and notarizes once they exist).
-- [x] Embed the battery helper in the bundle and sign it separately (`bundle-macos.sh` does this; switch it to the Developer ID).
 - [x] Ship as a universal `.dmg` and `.zip` from a tagged release.
 - [ ] A real bundle identifier you own instead of `com.powermac.app`, plus an app icon.
 - [x] Usage-description strings in `Info.plist` for Calendars, Camera, Automation (Apple Events), Audio capture.
@@ -43,7 +42,6 @@ What is still open after 1.0.0, the first public release. See [CI and releases](
 ### Safety
 
 - [ ] Review every module's `stop` path once more: pointer settings, gamma, virtual displays, `hidutil` mappings, audio taps, SMC state.
-- [ ] Security review of the battery helper's socket protocol and installer.
 - [ ] Security review of MWB: listen address, discovery scope, key handling.
 - [ ] Clipboard history: confirm excluded apps and concealed types on current macOS.
 

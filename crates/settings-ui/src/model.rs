@@ -38,8 +38,6 @@ pub enum Page {
     WindowSwitcher,
     /// Default-device rules and per-app volume.
     Sound,
-    /// Battery status and charge limit.
-    Battery,
     DockPreviews,
     TextExpander,
     MenuBar,
@@ -47,7 +45,7 @@ pub enum Page {
 
 impl Page {
     /// Sidebar order (grouped by [`Page::section`]).
-    pub const ALL: [Page; 20] = [
+    pub const ALL: [Page; 19] = [
         Page::General,
         Page::FancyZones,
         Page::WindowSwitcher,
@@ -61,7 +59,6 @@ impl Page {
         Page::TextExpander,
         Page::Displays,
         Page::Sound,
-        Page::Battery,
         Page::Awake,
         Page::ClipboardHistory,
         Page::ColorPicker,
@@ -88,7 +85,6 @@ impl Page {
             Page::FileTools => "File Tools",
             Page::WindowSwitcher => "Window Switcher",
             Page::Sound => "Sound",
-            Page::Battery => "Battery",
             Page::DockPreviews => "Dock Previews",
             Page::TextExpander => "Text Expansion",
             Page::MenuBar => "Menu Bar",
@@ -105,7 +101,7 @@ impl Page {
             | Page::MouseUtils
             | Page::KeyboardManager
             | Page::TextExpander => "Mouse & Keyboard",
-            Page::Displays | Page::Sound | Page::Battery | Page::Awake => "Displays & Power",
+            Page::Displays | Page::Sound | Page::Awake => "Displays & Power",
             Page::ClipboardHistory | Page::ColorPicker | Page::TextExtractor | Page::FileTools => {
                 "Productivity"
             }
@@ -1595,7 +1591,6 @@ mod tests {
         );
         c.audio.rules.outputs.push(audio_control::DeviceMatch::name("Studio Display"));
         c.audio.block_auto_switch_to.push(audio_control::DeviceMatch::name("AirPods"));
-        c.battery_limit.limit_percent = 75;
         c.dock_previews.preview_size = dock_previews::PreviewSize::Large;
         c.text_expander.enabled = true;
         c.text_expander.snippets.push(text_expander::Snippet::new(";addr", "1 Infinite Loop"));
@@ -1604,7 +1599,6 @@ mod tests {
         assert_eq!(back.keyboard_manager.hyper_key, c.keyboard_manager.hyper_key);
         assert_eq!(back.display_scaling, c.display_scaling);
         assert_eq!(back.audio, c.audio);
-        assert_eq!(back.battery_limit, c.battery_limit);
         assert_eq!(back.dock_previews, c.dock_previews);
         assert_eq!(back.text_expander, c.text_expander);
     }

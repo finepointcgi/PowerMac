@@ -46,7 +46,6 @@ All settings are plain JSON files that you can edit with the settings window, th
 | `windowSwitcher` | [Window Switcher](../features/window-switcher.md) | on |
 | `displayScaling` | [Display Scaling](../features/display-scaling.md) | off |
 | `audio` | [Sound](../features/sound.md) | on |
-| `batteryLimit` | [Battery](../features/battery.md) | off |
 | `dockPreviews` | [Dock Previews](../features/dock-previews.md) | on |
 | `textExpander` | [Text Expander](../features/text-expander.md) | off |
 | `menuBar` | [Menu Bar Manager](../features/menu-bar.md) | off |

@@ -20,6 +20,8 @@ impl Runtime {
     pub(crate) fn is_shown(&self) -> bool {
         false
     }
+    pub(crate) fn debug_break_input(&self, _broken: bool) {}
+
     pub(crate) fn is_input_active(&self) -> bool {
         false
     }

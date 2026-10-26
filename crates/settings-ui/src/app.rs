@@ -161,17 +161,12 @@ fn meta(p: Page) -> Meta {
         Page::WindowSwitcher => (
             icon::CARDS,
             Color32::from_rgb(0x58, 0x56, 0xD6),
-            "Switch between windows, not apps, with Option+Tab.",
+            "Switch between windows, not apps, with Option+Tab — or let it take over Cmd+Tab.",
         ),
         Page::Sound => (
             icon::SPEAKER_HIGH,
             Color32::from_rgb(0xFF, 0x37, 0x5F),
             "Choose which speakers and microphone win, keep AirPods from taking over, and set a volume per app.",
-        ),
-        Page::Battery => (
-            icon::LIGHTNING,
-            Color32::from_rgb(0x30, 0xB0, 0x50),
-            "Battery health at a glance, and a charge limit that keeps it from sitting at 100 %.",
         ),
         Page::DockPreviews => (
             icon::APP_WINDOW,
@@ -260,6 +255,10 @@ pub struct SettingsApp {
     screen_recording: bool,
     /// AltTab (com.lwouis.alt-tab-macos) is running.
     alt_tab_running: bool,
+    /// AltTab's shortcuts (read from its defaults while it runs).
+    alt_tab_hotkeys: Vec<window_switcher::Hotkey>,
+    /// Tests pin the AltTab state (no periodic refresh).
+    alt_tab_pinned: bool,
     finder_installed: Option<bool>,
     finder_error: Option<String>,
     /// Items in the running clipboard history (asked over its local socket).
@@ -280,10 +279,6 @@ pub struct SettingsApp {
     /// A level request not written yet (writes are spaced out while dragging).
     audio_pending: Option<pm_config::bridge::AudioRequest>,
     audio_written: Instant,
-    /// Battery status written by the running app.
-    battery_status: Option<battery_limit::BatteryStatus>,
-    /// Battery read here while the app isn't running (with when).
-    battery_local: Option<(battery_limit::BatteryStatus, Instant)>,
     /// Installed terminals and editors (File Tools).
     finder_apps: Option<(Vec<file_tools::finder::apps::InstalledApp>, Vec<file_tools::finder::apps::InstalledApp>)>,
     finder_needs_update: Option<bool>,
@@ -350,6 +345,8 @@ impl SettingsApp {
             new_app: Default::default(),
             screen_recording: text_extractor::screen_recording_permission() == text_extractor::Permission::Granted,
             alt_tab_running: alt_tab_running(),
+            alt_tab_hotkeys: alt_tab_hotkeys(),
+            alt_tab_pinned: false,
             finder_installed: None,
             finder_error: None,
             clip_count: None,
@@ -361,8 +358,6 @@ impl SettingsApp {
             audio_app_local: Default::default(),
             audio_pending: None,
             audio_written: now,
-            battery_status: pm_config::bridge::read_fresh(&config_path, pm_config::bridge::BATTERY_STATUS_FILE, pm_config::bridge::STATUS_FRESH_MS),
-            battery_local: None,
             finder_apps: None,
             finder_needs_update: None,
             espanso_path: String::new(),
@@ -587,7 +582,12 @@ impl SettingsApp {
                 self.accent = fancyzones::platform::system_accent_color();
                 self.screen_recording =
                     text_extractor::screen_recording_permission() == text_extractor::Permission::Granted;
-                self.alt_tab_running = alt_tab_running();
+                if !self.alt_tab_pinned {
+                    self.alt_tab_running = alt_tab_running();
+                    if self.alt_tab_running && self.page == Page::WindowSwitcher {
+                        self.alt_tab_hotkeys = alt_tab_hotkeys();
+                    }
+                }
                 if self.page == Page::ClipboardHistory {
                     self.clip_count = clipboard_count(&self.config_path);
                 }
@@ -636,7 +636,6 @@ impl SettingsApp {
             Page::FileTools => None,
             Page::WindowSwitcher => Some(c.window_switcher.enabled),
             Page::Sound => Some(c.audio.enabled),
-            Page::Battery => None,
             Page::DockPreviews => Some(c.dock_previews.enabled),
             Page::TextExpander => Some(c.text_expander.enabled),
             Page::MenuBar => Some(c.menu_bar.enabled),
@@ -668,7 +667,7 @@ impl SettingsApp {
             Page::DockPreviews => c.dock_previews.enabled = on,
             Page::TextExpander => c.text_expander.enabled = on,
             Page::MenuBar => c.menu_bar.enabled = on,
-            Page::General | Page::FileTools | Page::Battery => {}
+            Page::General | Page::FileTools => {}
         }
     }
 
@@ -1102,7 +1101,7 @@ impl SettingsApp {
         let m = meta(page);
         let p = pal(ui);
         ui.add_space(30.0);
-        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools | Page::Battery);
+        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools);
         let mut on = self.module_on(page).unwrap_or(false);
         card_frame(&p)
             .inner_margin(egui::Margin::same(20))
@@ -1167,7 +1166,6 @@ impl SettingsApp {
             Page::FileTools => self.file_tools(ui),
             Page::WindowSwitcher => self.window_switcher(ui),
             Page::Sound => self.sound(ui),
-            Page::Battery => self.battery(ui),
             Page::DockPreviews => self.dock_previews(ui),
             Page::TextExpander => self.text_expander(ui),
             Page::MenuBar => self.menu_bar(ui),
@@ -3093,6 +3091,15 @@ impl SettingsApp {
     pub fn set_devices_for_test(&mut self, d: Vec<mouse_tuning::DeviceInfo>) {
         self.devices = Some(d);
     }
+    /// Pretend AltTab is (not) running with these shortcuts.
+    pub fn set_alt_tab_for_test(&mut self, running: bool, hotkeys: Vec<window_switcher::Hotkey>) {
+        self.alt_tab_running = running;
+        self.alt_tab_hotkeys = hotkeys;
+        self.alt_tab_pinned = true;
+    }
+    pub fn window_switcher_for_test(&mut self) -> &mut window_switcher::Config {
+        &mut self.app.cfg.window_switcher
+    }
 }
 
 impl eframe::App for SettingsApp {
@@ -4340,6 +4347,15 @@ fn nav_section(ui: &mut Ui, name: &str) {
 /// Whether the AltTab app (which also uses Option+Tab) is running.
 fn alt_tab_running() -> bool {
     crate::platform::running_apps().iter().any(|(_, id)| id == "com.lwouis.alt-tab-macos")
+}
+
+/// AltTab's shortcuts, if it's running.
+fn alt_tab_hotkeys() -> Vec<window_switcher::Hotkey> {
+    if alt_tab_running() {
+        window_switcher::conflicts::alt_tab_hotkeys()
+    } else {
+        Vec::new()
+    }
 }
 
 /// Items in the running clipboard history, asked over its local socket.

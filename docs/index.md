@@ -2,7 +2,7 @@
 
 PowerMac brings PowerToys-style utilities to **macOS** (and, compile-checked, to **Windows**) in one Rust app. It lives in the menu bar on macOS and the notification area on Windows. A settings window configures it, and every module can be switched on or off on its own.
 
-It started as a port of Microsoft PowerToys and grew to cover the gaps people hit when they move to a Mac: window snapping, a window-based Alt+Tab, Dock previews, sensible mouse behaviour, external-monitor brightness, HiDPI on non-Retina screens, a battery charge limit and more.
+It started as a port of Microsoft PowerToys and grew to cover the gaps people hit when they move to a Mac: window snapping, a window-based Alt+Tab, Dock previews, sensible mouse behaviour, external-monitor brightness, HiDPI on non-Retina screens and more.
 
 !!! info "Version 1.0.0"
     Download the latest macOS build from the [Releases page](https://github.com/finepointcgi/PowerMac/releases). The Windows backends compile but have **not** been run on Windows yet, so no Windows build is published. See [Production readiness](production-readiness.md) for what is still open.
@@ -13,7 +13,7 @@ It started as a port of Microsoft PowerToys and grew to cover the gaps people hi
 |---|---|
 | **Windows and desktop** | [FancyZones and edge snapping](features/fancyzones.md) · [Window Switcher](features/window-switcher.md) · [Dock Previews](features/dock-previews.md) · [Menu Bar Manager](features/menu-bar.md) · [Notch Shelf and widgets](features/notch-shelf.md) |
 | **Input** | [Mouse Without Borders](features/mouse-without-borders.md) · [Mouse tuning](features/mouse-tuning.md) · [Scrolling](features/scrolling.md) · [Mouse Utilities](features/mouse-utils.md) · [Keyboard Manager](features/keyboard-manager.md) · [Text Expander](features/text-expander.md) |
-| **Hardware** | [Displays](features/displays.md) · [Display Scaling](features/display-scaling.md) · [Sound](features/sound.md) · [Battery charge limit](features/battery.md) · [Awake](features/awake.md) |
+| **Hardware** | [Displays](features/displays.md) · [Display Scaling](features/display-scaling.md) · [Sound](features/sound.md) · [Awake](features/awake.md) |
 | **Tools** | [Clipboard History](features/clipboard-history.md) · [Color Picker](features/color-picker.md) · [Text Extractor](features/text-extractor.md) · [File Tools](features/file-tools.md) (PowerRename, New+, Image Resizer, Finder basics) |
 
 The [feature overview](features/index.md) lists every module with its default state, shortcut and the permissions it needs.

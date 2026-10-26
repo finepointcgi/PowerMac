@@ -22,7 +22,6 @@ members = [
     "crates/display-scaling",
     "crates/menubar-manager",
     "crates/audio-control",
-    "crates/battery-limit",
     "crates/dock-previews",
     "crates/text-expander",
     "crates/powermac",

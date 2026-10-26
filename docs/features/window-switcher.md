@@ -10,7 +10,16 @@ Crate: `crates/window-switcher` · Settings page: **Window Switcher** · Config:
 |---|---|
 | **Option+Tab** | all windows |
 | **Option+\`** | windows of the front app (Alt+\` on Windows) |
-| Cmd+Tab | optional: `replaceCmdTab` takes over the system app switcher |
+| **Cmd+Tab** / Cmd+Shift+Tab | with **Replace Cmd+Tab** on: all windows (Option+Tab keeps working as a second shortcut) |
+| Cmd+\` | with Replace Cmd+Tab and `replaceCmdBacktick` on: windows of the front app |
+
+### Replacing Cmd+Tab
+
+Turn on **Replace Cmd+Tab** at the top of the Window Switcher settings page. Hold Cmd and press Tab to move on, release Cmd to switch; Esc cancels, and Cmd+Q / W / M / H act on the *selected* window (like AltTab). The macOS app switcher is turned off only while PowerMac's keyboard hook works: it comes back when you turn the option off, quit PowerMac, the hook is disabled or fails, or Secure Input (a password field) is active. If PowerMac crashes, the next start (of any PowerMac) turns it back on — a marker file in `$TMPDIR` records what was turned off. If the AltTab app is running with the same shortcut, the settings page warns about it.
+
+### Preview of the selected window
+
+While the switcher is open, the selected window is shown at its real position and size, above every other window and below the switcher, with the rest of the screen dimmed (`dimOpacity`, 25 %). Minimized windows, windows of hidden apps and windows on other desktops are shown in the middle of the screen with a badge. The image is the cached thumbnail at first and a full-resolution capture a moment later. Without Screen Recording the preview is an outline of the window with its app icon and title.
 
 While the switcher is open:
 
@@ -32,6 +41,10 @@ A tap-and-release quicker than `showDelayMs` (90 ms) switches to the previous wi
 | `trigger` | Option+Tab | all-windows shortcut (unset on Windows) |
 | `appWindowsTrigger` | Option+\` | front-app windows shortcut |
 | `replaceCmdTab` | false | also take over Cmd+Tab / Alt+Tab |
+| `replaceCmdBacktick` | false | macOS, with `replaceCmdTab`: Cmd+\` opens the front app's windows |
+| `previewSelectedWindow` | true | show the selected window on screen while the switcher is open (macOS) |
+| `dimBackground` | true | dim the rest of the screen behind the preview |
+| `dimOpacity` | 0.25 | how dark the dimming is (0–0.85) |
 | `showMinimized`, `showHidden`, `showOtherSpaces` | true | which windows are listed |
 | `onlyCurrentScreen` | false | only windows on the screen with the pointer |
 | `thumbnails` | true | live thumbnails (needs Screen Recording; app icons otherwise) |
@@ -41,5 +54,5 @@ A tap-and-release quicker than `showDelayMs` (90 ms) switches to the previous wi
 ## How it works
 
 - Pure logic (MRU order, filtering, key state machine, tile grid) is unit-tested.
-- **macOS:** an active `CGEventTap`; windows are enumerated through Accessibility and CGWindowList (other Spaces through the private CGS APIs AltTab uses); thumbnails via ScreenCaptureKit; the overlay is an `NSPanel` with `NSVisualEffectView`.
+- **macOS:** an active `CGEventTap`; windows are enumerated through Accessibility and CGWindowList (other Spaces through the private CGS APIs AltTab uses); thumbnails via ScreenCaptureKit; the overlay is an `NSPanel` with `NSVisualEffectView`; the preview is a second click-through, non-activating panel just below it. The system switcher is turned off with `CGSSetSymbolicHotKeyEnabled` (hotkeys 1 and 2; 6 and 27 for Cmd+\`).
 - **Windows:** low-level hooks, `EnumWindows` with Alt+Tab rules, DWM live thumbnails.

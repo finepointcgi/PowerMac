@@ -257,18 +257,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "battery-limit"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "libc",
- "log",
- "serde",
- "serde_json",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3227,7 +3215,6 @@ dependencies = [
  "anyhow",
  "audio-control",
  "awake",
- "battery-limit",
  "clipboard-history",
  "color-picker",
  "dirs 5.0.1",
@@ -3338,7 +3325,6 @@ dependencies = [
  "arboard",
  "audio-control",
  "awake",
- "battery-limit",
  "chrono",
  "clap",
  "clipboard-history",
@@ -3824,7 +3810,6 @@ dependencies = [
  "anyhow",
  "audio-control",
  "awake",
- "battery-limit",
  "chrono",
  "clipboard-history",
  "color-picker",

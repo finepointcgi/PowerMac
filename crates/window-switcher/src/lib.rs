@@ -42,9 +42,12 @@
 //! ignored.
 
 pub mod config;
+pub mod conflicts;
 pub mod engine;
+pub mod guard;
 pub mod layout;
 pub mod model;
+pub mod placement;
 mod platform;
 pub mod switcher;
 
@@ -71,6 +74,34 @@ pub struct Permissions {
     /// Needed for window thumbnails; without it app icons are shown.
     /// Always true on Windows.
     pub screen_recording: bool,
+}
+
+/// Whether the system's own app switcher (Cmd+Tab and Cmd+Shift+Tab) is
+/// enabled right now. `None` where that doesn't apply (Windows) or the
+/// private macOS API is missing.
+pub fn system_switcher_enabled() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::macos::cmdtab::system_switcher_enabled()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Whether macOS symbolic hotkey `id` is enabled (`None` off macOS). For
+/// diagnostics; see [`guard::HOTKEYS_CMD_TAB`].
+pub fn system_hotkey_enabled(id: i32) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::macos::cmdtab::hotkey_enabled(id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = id;
+        None
+    }
 }
 
 /// Current permission state (never prompts).
@@ -143,6 +174,14 @@ impl Handle {
     /// Whether the overlay is on screen.
     pub fn is_shown(&self) -> bool {
         self.with(|rt| rt.is_shown()).unwrap_or(false)
+    }
+
+    /// Tests / diagnostics: behave as if the keyboard hook had stopped
+    /// working (`true`) or works again (`false`). With Cmd+Tab replaced the
+    /// system switcher comes back while it's "broken".
+    #[doc(hidden)]
+    pub fn debug_break_input(&self, broken: bool) {
+        self.with(|rt| rt.debug_break_input(broken));
     }
 
     /// Whether the keyboard hook is installed (macOS: false until

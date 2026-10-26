@@ -1016,6 +1016,7 @@ impl SettingsApp {
         self.hero(ui, |_, _| {});
         let mac = cfg!(target_os = "macos");
         let alt_tab = self.alt_tab_running;
+        let alt_tab_keys = self.alt_tab_hotkeys.clone();
         let ax = self.perms.map(|p| p.0);
         let screen = self.screen_recording;
         let rec = &mut self.recording;
@@ -1024,20 +1025,55 @@ impl SettingsApp {
         let d = &mut self.app;
         let w = &mut d.cfg.window_switcher;
         if alt_tab && w.enabled {
-            callout(
-                ui,
-                icon::WARNING,
-                "AltTab is running",
-                "It also uses Option+Tab, so both would react. Quit AltTab, or give one of them another shortcut.",
-            );
+            let clash = alt_tab_keys.iter().find(|h| window_switcher::conflicts::clashes(w, h));
+            if let Some(h) = clash {
+                callout(
+                    ui,
+                    icon::WARNING,
+                    &format!("AltTab is running and also uses {h}"),
+                    "Both would react to the same shortcut. Quit AltTab, or give one of them another shortcut.",
+                );
+            }
         }
+        let system = if mac { "Cmd+Tab" } else { "Alt+Tab" };
+        replace_banner(
+            ui,
+            &format!("Replace {system}"),
+            if mac {
+                "Cmd+Tab opens this switcher instead of the macOS app switcher: hold Cmd and press Tab to move on, \
+                 release Cmd to switch to that window. The macOS switcher is off only while PowerMac runs, \
+                 and comes back when you turn this off or quit (even after a crash)."
+            } else {
+                "Alt+Tab opens this switcher instead of the Windows one."
+            },
+            &mut w.replace_cmd_tab,
+        );
         card(ui, "Shortcuts", |ui| {
-            row(
-                ui,
-                "Switch between windows",
-                Some("Hold the modifier, press the key to move on, release to switch. Add Shift to go back."),
-                |ui| hotkey_edit(ui, rec, Id::unique("ws-trigger"), &mut d.switch_trigger, RecMode::Combo),
-            );
+            if w.replace_cmd_tab {
+                row(
+                    ui,
+                    "Switch between windows",
+                    Some(if mac {
+                        "Hold Cmd, press Tab to move on, release to switch. Cmd+Shift+Tab goes back."
+                    } else {
+                        "Hold Alt, press Tab to move on, release to switch. Alt+Shift+Tab goes back."
+                    }),
+                    |ui| keycaps(ui, system),
+                );
+                row(
+                    ui,
+                    "Also with",
+                    Some("A second shortcut for the same switcher. Leave it empty to use only the one above."),
+                    |ui| hotkey_edit(ui, rec, Id::unique("ws-trigger"), &mut d.switch_trigger, RecMode::Combo),
+                );
+            } else {
+                row(
+                    ui,
+                    "Switch between windows",
+                    Some("Hold the modifier, press the key to move on, release to switch. Add Shift to go back."),
+                    |ui| hotkey_edit(ui, rec, Id::unique("ws-trigger"), &mut d.switch_trigger, RecMode::Combo),
+                );
+            }
             if let Err(e) = parse_hk(&d.switch_trigger) {
                 error_label(ui, &e);
                 ui.add_space(8.0);
@@ -1049,16 +1085,14 @@ impl SettingsApp {
                 error_label(ui, &e);
                 ui.add_space(8.0);
             }
-            toggle_row(
-                ui,
-                if mac { "Replace Cmd+Tab" } else { "Replace Alt+Tab" },
-                Some(if mac {
-                    "Cmd+Tab switches windows too; the macOS app switcher is off while this is on."
-                } else {
-                    "Alt+Tab opens this switcher instead of Windows' own."
-                }),
-                &mut w.replace_cmd_tab,
-            );
+            if mac && w.replace_cmd_tab {
+                toggle_row(
+                    ui,
+                    "Cmd+` switches the front app's windows too",
+                    Some("Instead of macOS's “Move focus to next window”."),
+                    &mut w.replace_cmd_backtick,
+                );
+            }
             row(
                 ui,
                 "Delay before it appears",
@@ -1066,6 +1100,30 @@ impl SettingsApp {
                 |ui| slider(ui, &mut w.show_delay_ms, 0..=500, " ms"),
             );
         });
+        if mac {
+            card_with(
+                ui,
+                "Preview",
+                Some("While the switcher is open, the window you're about to switch to is shown where it is on screen."),
+                |ui| {
+                    toggle_row(
+                        ui,
+                        "Preview the selected window",
+                        Some("Minimized windows and windows on other desktops are shown in the middle of the screen."),
+                        &mut w.preview_selected_window,
+                    );
+                    ui.add_enabled_ui(w.preview_selected_window, |ui| {
+                        toggle_row(ui, "Dim the rest of the screen", None, &mut w.dim_background);
+                        ui.add_enabled_ui(w.dim_background, |ui| {
+                            row(ui, "Dimming", None, |ui| percent_slider(ui, &mut w.dim_opacity));
+                        });
+                    });
+                    if w.preview_selected_window && !screen {
+                        hint(ui, "Without Screen Recording the preview shows the window's outline, app icon and title.");
+                    }
+                },
+            );
+        }
         card(ui, "Windows shown", |ui| {
             toggle_row(ui, "Minimized windows", None, &mut w.show_minimized);
             toggle_row(ui, "Windows of hidden apps", None, &mut w.show_hidden);
@@ -1079,6 +1137,9 @@ impl SettingsApp {
             );
         });
         card(ui, "While it's open", |ui| {
+            if mac && w.replace_cmd_tab {
+                hint(ui, "With Cmd+Tab, these work with Cmd still held (Cmd+Q, Cmd+W, …) — on the selected window, not the front one.");
+            }
             for (keys, what) in [
                 ("Q", "Quit the app"),
                 ("W", "Close the window"),
@@ -1177,6 +1238,27 @@ fn swatch(ui: &mut Ui, c: Rgb) {
 }
 
 /// A tinted note above the cards.
+/// A prominent on/off setting at the top of a page: an accent-tinted card
+/// with an icon, title, explanation and a switch.
+fn replace_banner(ui: &mut Ui, title: &str, text: &str, on: &mut bool) {
+    let p = pal(ui);
+    let c = p.accent;
+    ui.add_space(16.0);
+    egui::Frame::new()
+        .fill(theme::mix(p.card, c, if *on { if p.dark { 0.20 } else { 0.10 } } else if p.dark { 0.08 } else { 0.04 }))
+        .stroke(Stroke::new(1.0, theme::mix(p.card_border, c, if *on { 0.55 } else { 0.25 })))
+        .corner_radius(12.0)
+        .inner_margin(egui::Margin::symmetric(16, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            reset_rows(ui);
+            let (_, label) = icon_row(ui, icon::COMMAND, c, title, Some(text), |ui| toggle_labeled(ui, on, title));
+            if label.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && ui.is_enabled() {
+                *on = !*on;
+            }
+        });
+}
+
 pub(super) fn callout(ui: &mut Ui, glyph: &str, title: &str, text: &str) {
     let p = pal(ui);
     let c = if glyph == icon::WARNING { Color32::from_rgb(0xE8, 0x9A, 0x00) } else { p.accent };

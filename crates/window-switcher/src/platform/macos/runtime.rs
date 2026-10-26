@@ -18,7 +18,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -27,13 +27,17 @@ use objc2::MainThreadMarker;
 
 use super::apps;
 use super::ax;
+use super::cmdtab;
 use super::ffi::*;
 use super::focus;
 use super::overlay::{self, ItemView, Model};
+use super::spotlight::{self, PreviewView};
 use super::thumbs;
 use super::windows::{self, Elements};
 use crate::config::{Config, Mods};
 use crate::engine::{Engine, Snapshot};
+use crate::guard::Guard;
+use crate::placement;
 use crate::model::{self, FilterContext, Mode, Mru, RectF, WindowInfo};
 use crate::switcher::{Effect, WindowAction};
 
@@ -55,6 +59,10 @@ pub(crate) struct Shared {
     stopping: AtomicBool,
     /// A left-click was swallowed; swallow its mouse-up too.
     swallow_mouse_up: AtomicBool,
+    /// System Cmd+Tab take-over (see [`crate::guard`]).
+    guard: Mutex<Guard>,
+    /// Tests: pretend the keyboard hook stopped working.
+    debug_broken: AtomicBool,
 }
 
 impl Shared {
@@ -112,6 +120,54 @@ fn model_of(e: &Engine) -> Model {
     }
 }
 
+/// Show the preview of the selected window (if on) and fetch a sharp image
+/// of it and its neighbours.
+fn show_preview(eng: &Engine) {
+    let cfg = eng.config();
+    if !cfg.preview_selected_window || !eng.is_shown() {
+        return;
+    }
+    let Some(w) = eng.selected_item() else {
+        on_main(spotlight::hide);
+        return;
+    };
+    let outline = !thumbs::has_permission();
+    let view = PreviewView {
+        wid: w.id as u32,
+        pid: w.pid as i32,
+        title: w.display_title().to_string(),
+        app_path: w.app_path.clone(),
+        placement: placement::place(w, eng.screen(), &screens(), cfg.only_current_screen),
+        dim: cfg.effective_dim(),
+        outline,
+        avoid: Some(eng.layout().panel),
+    };
+    on_main(move |mtm| spotlight::show(mtm, view));
+    if outline {
+        return;
+    }
+    // The selected window first, then the next ones Tab would reach.
+    let n = eng.items().len();
+    let sel = eng.selected();
+    let reqs: Vec<thumbs::Request> = [sel, (sel + 1) % n.max(1), (sel + n.max(1) - 1) % n.max(1)]
+        .into_iter()
+        .filter_map(|i| eng.item(i))
+        .filter(|w| !w.minimized)
+        .map(|w| thumbs::Request::full(w.id as u32, w.frame.w, w.frame.h))
+        .fold(Vec::new(), |mut v, r| {
+            if !v.iter().any(|x: &thumbs::Request| x.wid == r.wid) {
+                v.push(r);
+            }
+            v
+        });
+    if reqs.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("window-switcher-preview".into()).spawn(move || {
+        thumbs::capture(reqs, |wid, img| on_main(move |mtm| spotlight::set_image(mtm, wid, img)));
+    });
+}
+
 fn on_main(f: impl FnOnce(MainThreadMarker) + Send + 'static) {
     dispatch_main(move || {
         if let Some(mtm) = MainThreadMarker::new() {
@@ -136,10 +192,12 @@ fn perform(shared: &Arc<Shared>, eng: &Engine, fx: Vec<Effect>) {
                 shared.shown.store(true, Ordering::SeqCst);
                 let m = model_of(eng);
                 on_main(move |mtm| overlay::show(mtm, m));
+                show_preview(eng);
             }
             Effect::Select(i) => {
                 if eng.is_shown() {
                     on_main(move |mtm| overlay::select(mtm, i));
+                    show_preview(eng);
                 }
             }
             Effect::Commit(i) => {
@@ -181,13 +239,21 @@ fn schedule_tick(shared: &Arc<Shared>, eng: &Engine) {
 fn request_thumbnails(items: &[WindowInfo]) {
     let reqs: Vec<thumbs::Request> = items
         .iter()
-        .map(|w| thumbs::Request { wid: w.id as u32, w: w.frame.w, h: w.frame.h, max_age: Duration::from_millis(500) })
+        .map(|w| thumbs::Request::thumbnail(w.id as u32, w.frame.w, w.frame.h))
         .collect();
     if reqs.is_empty() {
         return;
     }
     let _ = std::thread::Builder::new().name("window-switcher-capture".into()).spawn(move || {
-        thumbs::capture(reqs, |wid, img| on_main(move |mtm| overlay::set_thumbnail(mtm, wid, img)));
+        thumbs::capture(reqs, |wid, img| {
+            on_main(move |mtm| {
+                overlay::set_thumbnail(mtm, wid, img.clone());
+                // The preview waits for a capture when nothing was cached.
+                if spotlight::current() == Some(wid) {
+                    spotlight::set_image(mtm, wid, img);
+                }
+            })
+        });
     });
 }
 
@@ -205,6 +271,9 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
         if !port.is_null() {
             unsafe { CGEventTapEnable(port, true) };
         }
+        log::warn!("window-switcher: event tap was disabled ({etype:#x}); re-enabled");
+        // If it didn't come back, give the user the system switcher.
+        sync_cmd_tab(shared);
         return event;
     }
     let field = |f: u32| unsafe { CGEventGetIntegerValueField(event, f) };
@@ -305,11 +374,14 @@ fn tap_loop(shared: Arc<Shared>, runloop_out: Arc<Mutex<usize>>) {
             shared.port.store(port as *mut c_void, Ordering::SeqCst);
             shared.tap_active.store(true, Ordering::SeqCst);
             log::info!("window-switcher: event tap active");
+            // Only now that Cmd+Tab can reach us may the system's go.
+            sync_cmd_tab(&shared);
             while !shared.stopping.load(Ordering::SeqCst) {
                 CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, 0);
             }
             shared.tap_active.store(false, Ordering::SeqCst);
             shared.port.store(std::ptr::null_mut(), Ordering::SeqCst);
+            sync_cmd_tab(&shared);
             CGEventTapEnable(port, false);
             CFMachPortInvalidate(port);
             CFRelease(src);
@@ -360,6 +432,8 @@ fn worker_loop(shared: Arc<Shared>, rx: Receiver<Msg>) {
         if shared.stopping.load(Ordering::SeqCst) {
             break;
         }
+        // Tap disabled, Secure Input on…: hand Cmd+Tab back to macOS.
+        sync_cmd_tab(&shared);
         if !ax::is_trusted() {
             continue;
         }
@@ -411,6 +485,7 @@ fn push_refresh(shared: &Arc<Shared>) {
         if !eng.icon_mode() {
             request_thumbnails(eng.items());
         }
+        show_preview(&eng);
     } else {
         perform(shared, &eng, fx);
     }
@@ -418,26 +493,34 @@ fn push_refresh(shared: &Arc<Shared>) {
 
 // ------------------------------------------------- Cmd+Tab replacement
 
-type SetSymbolicHotKeyFn = unsafe extern "C" fn(i32, bool) -> i32;
-
-fn symbolic_hotkey_fn() -> Option<SetSymbolicHotKeyFn> {
-    static F: OnceLock<Option<SetSymbolicHotKeyFn>> = OnceLock::new();
-    *F.get_or_init(|| {
-        let p = find_symbol(c"CGSSetSymbolicHotKeyEnabled");
-        (!p.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, SetSymbolicHotKeyFn>(p) })
-    })
+/// Whether keystrokes reach our tap right now.
+fn tap_healthy(shared: &Shared) -> bool {
+    if !shared.tap_active.load(Ordering::SeqCst) || shared.stopping.load(Ordering::SeqCst) || shared.debug_broken.load(Ordering::SeqCst) {
+        return false;
+    }
+    let port = shared.port.load(Ordering::SeqCst);
+    if port.is_null() {
+        return false;
+    }
+    // Disabled without us hearing about it (no "disabled" event): try once.
+    if unsafe { !CGEventTapIsEnabled(port) } {
+        unsafe { CGEventTapEnable(port, true) };
+    }
+    let enabled = unsafe { CGEventTapIsEnabled(port) };
+    enabled && !cmdtab::secure_input_on()
 }
 
-/// Turn the Dock's Cmd+Tab / Cmd+Shift+Tab (symbolic hotkeys 1 and 2) off
-/// or back on, so the event tap receives them. Session-only: macOS resets
-/// it at logout; we restore it on stop.
-fn set_system_cmd_tab(enabled: bool) {
-    if let Some(f) = symbolic_hotkey_fn() {
-        unsafe {
-            f(1, enabled);
-            f(2, enabled);
-        }
-    }
+/// Turn the system's Cmd+Tab off only while it's replaced *and* our tap
+/// works; back on otherwise (see [`crate::guard`]).
+fn sync_cmd_tab(shared: &Shared) {
+    let (tab, backtick) = {
+        let eng = shared.engine();
+        let c = eng.config();
+        (c.replaces_system_switcher(), c.replaces_cmd_backtick())
+    };
+    let wanted = Guard::wanted(tab, backtick, tap_healthy(shared));
+    let mut g = shared.guard.lock().unwrap_or_else(|e| e.into_inner());
+    g.sync(wanted, &mut cmdtab::SysBackend);
 }
 
 // ------------------------------------------------------------- runtime
@@ -447,7 +530,6 @@ pub(crate) struct Runtime {
     tap_runloop: Arc<Mutex<usize>>,
     tap: Option<JoinHandle<()>>,
     worker: Option<JoinHandle<()>>,
-    cmd_tab_disabled: bool,
 }
 
 impl Runtime {
@@ -462,7 +544,12 @@ impl Runtime {
             port: AtomicPtr::new(std::ptr::null_mut()),
             stopping: AtomicBool::new(false),
             swallow_mouse_up: AtomicBool::new(false),
+            guard: Mutex::new(Guard::new()),
+            debug_broken: AtomicBool::new(false),
         });
+        // A crashed earlier run may have left the system switcher off.
+        cmdtab::recover();
+        cmdtab::install_exit_hook();
         let tap_runloop = Arc::new(Mutex::new(0usize));
         let tap = {
             let (s, rl) = (shared.clone(), tap_runloop.clone());
@@ -472,21 +559,10 @@ impl Runtime {
             let s = shared.clone();
             std::thread::Builder::new().name("window-switcher-worker".into()).spawn(move || worker_loop(s, rx))?
         };
-        let mut rt = Runtime { shared, tap_runloop, tap: Some(tap), worker: Some(worker), cmd_tab_disabled: false };
-        rt.apply_cmd_tab(&cfg);
-        Ok(rt)
-    }
-
-    fn apply_cmd_tab(&mut self, cfg: &Config) {
-        let want = cfg.enabled && cfg.replace_cmd_tab;
-        if want != self.cmd_tab_disabled {
-            set_system_cmd_tab(!want);
-            self.cmd_tab_disabled = want;
-        }
+        Ok(Runtime { shared, tap_runloop, tap: Some(tap), worker: Some(worker) })
     }
 
     pub(crate) fn update(&mut self, cfg: Config) {
-        self.apply_cmd_tab(&cfg);
         let refresh = {
             let mut eng = self.shared.engine();
             let refresh = eng.config().show_other_spaces != cfg.show_other_spaces;
@@ -494,6 +570,7 @@ impl Runtime {
             perform(&self.shared, &eng, fx);
             refresh
         };
+        sync_cmd_tab(&self.shared);
         if refresh {
             self.shared.send(Msg::Refresh);
         }
@@ -522,6 +599,11 @@ impl Runtime {
         self.shared.shown.load(Ordering::SeqCst)
     }
 
+    pub(crate) fn debug_break_input(&self, broken: bool) {
+        self.shared.debug_broken.store(broken, Ordering::SeqCst);
+        sync_cmd_tab(&self.shared);
+    }
+
     pub(crate) fn is_input_active(&self) -> bool {
         self.shared.tap_active.load(Ordering::SeqCst)
     }
@@ -535,10 +617,8 @@ impl Runtime {
         if self.shared.stopping.swap(true, Ordering::SeqCst) {
             return;
         }
-        if self.cmd_tab_disabled {
-            set_system_cmd_tab(true);
-            self.cmd_tab_disabled = false;
-        }
+        // Give Cmd+Tab back first, whatever happens below.
+        self.shared.guard.lock().unwrap_or_else(|e| e.into_inner()).release(&mut cmdtab::SysBackend);
         self.shared.send(Msg::Stop);
         let rl = *self.tap_runloop.lock().unwrap_or_else(|e| e.into_inner());
         if rl != 0 {

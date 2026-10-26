@@ -329,29 +329,6 @@ fn shots() {
         capture_permission: audio_control::CapturePermission::Granted,
         error: None,
     };
-    let battery = |control: Option<bool>| battery_limit::BatteryStatus {
-        battery: battery_limit::BatteryReading {
-            has_battery: true,
-            percent: Some(82),
-            charging: true,
-            plugged: true,
-            adapter_watts: Some(96),
-            cycles: Some(312),
-            health_percent: Some(91.4),
-            design_capacity_mah: Some(8579),
-            max_capacity_mah: Some(7841),
-            temperature_c: Some(31.2),
-            time_remaining_min: Some(48),
-            amperage_ma: Some(2100),
-        },
-        helper_installed: control == Some(true),
-        helper_running: control == Some(true),
-        scheme: Some(if control == Some(true) { "CHTE+CHIE".into() } else { "none".into() }),
-        charge_control: control,
-        reason: if control == Some(true) { "charging to the limit (80 %)".into() } else { "charge limit off".into() },
-        supported: true,
-        ..Default::default()
-    };
     let item = |id: &str, owner: &str, title: Option<&str>, sec: menubar_manager::Section, system: bool| menubar_manager::MenuBarItem {
         id: id.into(),
         owner: owner.into(),
@@ -383,12 +360,10 @@ fn shots() {
         layout_issue: None,
         error: None,
     };
-    let battery_ctl = std::cell::Cell::new(Some(false));
     let fresh_status = || {
         display_status.clone().stamp().save_for(&path).unwrap();
         pm_config::bridge::write(&path, pm_config::bridge::SCALING_STATUS_FILE, &scaling).unwrap();
         pm_config::bridge::write(&path, pm_config::bridge::AUDIO_STATUS_FILE, &audio).unwrap();
-        pm_config::bridge::write(&path, pm_config::bridge::BATTERY_STATUS_FILE, &battery(battery_ctl.get())).unwrap();
         pm_config::bridge::write(&path, pm_config::bridge::MENUBAR_STATUS_FILE, &menubar).unwrap();
     };
     fresh_status();
@@ -449,6 +424,8 @@ fn shots() {
             // Like the real window: characters the bundled fonts lack (the
             // default ¯\_(ツ)_/¯ snippet) are drawn as boxes, not a panic.
             h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
+            // Shots don't depend on whether AltTab runs on this machine.
+            h.state_mut().set_alt_tab_for_test(false, vec![]);
             for p in Page::ALL {
                 if !suffix.is_empty() && matches!(p, Page::Awake) {
                     continue;
@@ -459,13 +436,19 @@ fn shots() {
                 let slug = format!("{p:?}").to_lowercase();
                 save(&mut h, &dir, &format!("settings-{slug}-{tn}{suffix}"));
             }
-            // The Battery page on a Mac whose firmware allows a charge limit.
-            battery_ctl.set(Some(true));
-            fresh_status();
-            h.state_mut().set_page(Page::Battery);
-            h.state_mut().reload_status_for_test();
-            save(&mut h, &dir, &format!("settings-battery-limit-{tn}{suffix}"));
-            battery_ctl.set(Some(false));
+            // Window Switcher with Cmd+Tab replaced, while AltTab (set to
+            // Cmd+Tab) is running.
+            let before = h.state_mut().window_switcher_for_test().clone();
+            {
+                let ws = h.state_mut().window_switcher_for_test();
+                ws.replace_cmd_tab = true;
+                ws.replace_cmd_backtick = true;
+            }
+            h.state_mut().set_alt_tab_for_test(true, vec![window_switcher::Hotkey::system_switcher()]);
+            h.state_mut().set_page(Page::WindowSwitcher);
+            save(&mut h, &dir, &format!("settings-windowswitcher-cmdtab-{tn}{suffix}"));
+            h.state_mut().set_alt_tab_for_test(false, vec![]);
+            *h.state_mut().window_switcher_for_test() = before;
             if suffix.is_empty() {
                 h.state_mut().set_search_for_test("color");
                 save(&mut h, &dir, &format!("settings-search-{tn}"));

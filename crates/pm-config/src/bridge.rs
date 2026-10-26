@@ -22,10 +22,6 @@ pub const SCALING_REQUEST_FILE: &str = "display-scaling-request.json";
 pub const AUDIO_STATUS_FILE: &str = "audio-status.json";
 /// Sound: default device, device and app levels (written by the settings window).
 pub const AUDIO_REQUEST_FILE: &str = "audio-request.json";
-/// Battery: `battery_limit::BatteryStatus` (written by the app).
-pub const BATTERY_STATUS_FILE: &str = "battery-status.json";
-/// Battery: charge to 100 % now / refresh (written by the settings window).
-pub const BATTERY_REQUEST_FILE: &str = "battery-request.json";
 
 /// Menu bar: items and their sections (written by the app).
 pub const MENUBAR_STATUS_FILE: &str = "menubar-status.json";
@@ -203,19 +199,6 @@ pub enum AudioRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Battery
-
-/// A change the settings window asks the app to make.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "camelCase")]
-pub enum BatteryRequest {
-    /// Charge to 100 % until the adapter is unplugged.
-    ChargeToFull,
-    /// Re-read the battery and the helper now (e.g. after installing it).
-    Refresh,
-}
-
-// ---------------------------------------------------------------------------
 // Menu bar
 
 /// What the running menu bar manager reports.
@@ -301,9 +284,7 @@ mod tests {
         assert_eq!(read::<MenuBarRequest>(&cfg, MENUBAR_REQUEST_FILE).unwrap().data, m);
         assert!(std::fs::read_to_string(dir.join(MENUBAR_REQUEST_FILE)).unwrap().contains("\"alwaysHidden\""));
 
-        write(&cfg, BATTERY_REQUEST_FILE, &BatteryRequest::ChargeToFull).unwrap();
-        assert_eq!(read_fresh::<BatteryRequest>(&cfg, BATTERY_REQUEST_FILE, REQUEST_FRESH_MS), Some(BatteryRequest::ChargeToFull));
-        let old = Stamped { at: 1, data: BatteryRequest::Refresh };
+        let old = Stamped { at: 1, data: MenuBarRequest::List };
         assert!(!old.is_fresh(REQUEST_FRESH_MS));
         let _ = std::fs::remove_dir_all(&dir);
     }

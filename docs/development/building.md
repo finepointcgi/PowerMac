@@ -21,7 +21,7 @@ cargo check --workspace --target x86_64-pc-windows-msvc
 cargo test --workspace
 ```
 
-About 550 tests cover the platform-independent logic: zone math, key remapping, MWB crypto and packets, scroll classification, battery policy, rename transforms, image-resize math, color formats and more.
+About 550 tests cover the platform-independent logic: zone math, key remapping, MWB crypto and packets, scroll classification, rename transforms, image-resize math, color formats and more.
 
 ### Settings screenshots
 

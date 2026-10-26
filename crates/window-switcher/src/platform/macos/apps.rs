@@ -111,3 +111,39 @@ pub fn icon_for_path(path: &str) -> Option<Retained<AnyObject>> {
         msg_send![&*ws, iconForFile: &*p]
     }
 }
+
+/// AltTab's configured shortcuts (see [`crate::conflicts`]); its defaults
+/// for shortcut 1 when nothing is stored.
+pub fn alt_tab_hotkeys() -> Vec<crate::Hotkey> {
+    use super::ffi::*;
+    use crate::conflicts::{parse_alt_tab, ALT_TAB_BUNDLE_ID, ALT_TAB_DEFAULT_HOLD, ALT_TAB_DEFAULT_KEY};
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFPreferencesCopyAppValue(key: CFStringRef, app: CFStringRef) -> CFTypeRef;
+    }
+    /// A string pref, or the `string` member of a ShortcutRecorder dictionary.
+    fn pref(key: &str) -> Option<String> {
+        unsafe {
+            let app = CfString::new(ALT_TAB_BUNDLE_ID);
+            let k = CfString::new(key);
+            let v = CfOwned::new(CFPreferencesCopyAppValue(k.0, app.0))?;
+            let t = CFGetTypeID(v.0);
+            if t == CFStringGetTypeID() {
+                cfstring_to_string(v.0)
+            } else if t == CFDictionaryGetTypeID() {
+                dict_string(v.0, "string")
+            } else {
+                None
+            }
+        }
+    }
+    let mut v = Vec::new();
+    let hold = pref("holdShortcut").unwrap_or_else(|| ALT_TAB_DEFAULT_HOLD.into());
+    let key = pref("nextWindowShortcut").unwrap_or_else(|| ALT_TAB_DEFAULT_KEY.into());
+    v.extend(parse_alt_tab(&hold, &key));
+    if let (Some(h), Some(k)) = (pref("holdShortcut2"), pref("nextWindowShortcut2")) {
+        v.extend(parse_alt_tab(&h, &k));
+    }
+    v
+}

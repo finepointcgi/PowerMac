@@ -58,11 +58,6 @@ struct Ui {
     sound: Submenu,
     /// What the Sound submenu shows (to rebuild only on change).
     sound_shown: Option<SoundSig>,
-    battery: Submenu,
-    battery_status: MenuItem,
-    battery_detail: MenuItem,
-    battery_full: MenuItem,
-    battery_settings: MenuItem,
 }
 
 /// Sound submenu contents: devices (kind, uid, name, default) and, with
@@ -188,20 +183,8 @@ pub fn install() -> anyhow::Result<()> {
         None,
     );
 
-    // Sound and Battery (filled in by the refresh).
+    // Sound (filled in by the refresh).
     let sound = Submenu::new("Sound", false);
-    let battery = Submenu::new("Battery", false);
-    let battery_status = MenuItem::new("", false, None);
-    let battery_detail = MenuItem::new("", false, None);
-    let battery_full = MenuItem::new("Charge to 100 % now", false, None);
-    let battery_settings = MenuItem::new("Battery settings…", true, None);
-    battery.append_items(&[
-        &battery_status,
-        &battery_detail,
-        &PredefinedMenuItem::separator(),
-        &battery_full,
-        &battery_settings,
-    ])?;
 
     menu.append_items(&[
         &settings,
@@ -215,7 +198,6 @@ pub fn install() -> anyhow::Result<()> {
         &PredefinedMenuItem::separator(),
         &awake,
         &sound,
-        &battery,
         &zones,
         &scroll,
         &mouse,
@@ -297,11 +279,6 @@ pub fn install() -> anyhow::Result<()> {
             },
             sound,
             sound_shown: None,
-            battery,
-            battery_status,
-            battery_detail,
-            battery_full,
-            battery_settings,
         })
     });
 
@@ -345,19 +322,7 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
         ui.sound_shown = None;
         return;
     }
-    if id == ui.battery_full.id() {
-        std::thread::spawn(|| {
-            with_running(|r| {
-                if let Some(b) = &r.battery {
-                    log::info!("battery: charging to 100 % until unplugged (tray)");
-                    b.charge_to_full_once();
-                }
-            });
-        });
-        ui.battery_full.set_enabled(false);
-        return;
-    }
-    if id == ui.settings.id() || id == ui.battery_settings.id() {
+    if id == ui.settings.id() {
         open_settings();
         return;
     }
@@ -498,7 +463,6 @@ fn refresh() {
 fn refresh_ui(ui: &mut Ui) {
     refresh_tools(&mut ui.tools);
     refresh_sound(ui);
-    refresh_battery(ui);
     let snapshot = try_with_running(|r| {
         (
             r.mwb.as_ref().map(|m| m.status()),
@@ -1093,50 +1057,6 @@ fn rebuild_sound_menu(menu: &Submenu, sig: &SoundSig) {
             add(&sub);
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Battery
-
-fn refresh_battery(ui: &mut Ui) {
-    let Some(snap) = try_with_running(|r| r.battery.as_ref().map(|b| b.status())) else { return };
-    let limit_on = current_config().battery_limit.enabled;
-    let Some(st) = snap.filter(|s| s.battery.has_battery) else {
-        ui.battery.set_text("Battery");
-        ui.battery.set_enabled(false);
-        return;
-    };
-    ui.battery.set_enabled(true);
-    let pct = st.battery.percent.map(|p| format!("{p} %")).unwrap_or_default();
-    ui.battery.set_text(format!("Battery · {pct}"));
-    ui.battery_status.set_text(crate::battery_glue::status_line(&st));
-    let b = &st.battery;
-    let mut detail = Vec::new();
-    if let Some(h) = b.health_percent {
-        detail.push(format!("health {h:.0} %"));
-    }
-    if let Some(c) = b.cycles {
-        detail.push(format!("{c} cycles"));
-    }
-    if let Some(t) = b.temperature_c {
-        detail.push(format!("{t:.0} °C"));
-    }
-    if let Some(w) = b.adapter_watts.filter(|_| b.plugged) {
-        detail.push(format!("{w} W adapter"));
-    }
-    let mut detail = detail.join(" · ");
-    if let Some(first) = detail.get_mut(0..1) {
-        first.make_ascii_uppercase();
-    }
-    ui.battery_detail.set_text(if detail.is_empty() { "–".to_string() } else { detail });
-    let (text, enabled) = match st.charge_control {
-        Some(true) if limit_on && st.top_up_active => ("Charging to 100 % until unplugged".to_string(), false),
-        Some(true) if limit_on => ("Charge to 100 % now".to_string(), true),
-        Some(true) => ("Charge limit is off".to_string(), false),
-        _ => ("No charge limit on this Mac (see Settings)".to_string(), false),
-    };
-    ui.battery_full.set_text(text);
-    ui.battery_full.set_enabled(enabled);
 }
 
 /// The config file as it is on disk (for hotkeys the handles don't expose).

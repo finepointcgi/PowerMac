@@ -12,7 +12,7 @@ Many modules watch or change global input, move other apps' windows or capture t
 | **Audio capture** | Sound's per-app volume (experimental, macOS 14.4+). |
 | **Calendars** | Notch Shelf's Calendar widget. |
 | **Camera** | Notch Shelf's Mirror widget. |
-| **Administrator password (once)** | Installing the battery helper; installing a display override plist. |
+| **Administrator password (once)** | Installing a display override plist. |
 | none | Color Picker, Notch Shelf's shelf, Displays sliders, pointer speed/acceleration, File Tools, Awake |
 
 ## Where to see the status

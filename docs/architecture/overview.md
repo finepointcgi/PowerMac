@@ -20,8 +20,6 @@ flowchart LR
     Files -- requests --> Glue
     Tray -- spawns --> Settings
     Tray -- spawns --> Helpers
-    Daemon["battery helper<br/>(LaunchDaemon, root)"]
-    Mods -- Unix socket --> Daemon
 ```
 
 ## Principles
@@ -44,7 +42,7 @@ flowchart LR
 | `tray.rs` | Menu-bar / notification-area icon and menu |
 | `children.rs` | Helper windows as child processes (one per slot; asking again brings it to the front) |
 | `clipboard.rs` | Bridge between the system clipboard and Mouse Without Borders |
-| `*_glue.rs` | Status / request files for MWB, Displays, Display Scaling, Sound, Battery, Menu Bar |
+| `*_glue.rs` | Status / request files for MWB, Displays, Display Scaling, Sound, Menu Bar |
 | `quick.rs` | Notch Shelf quick controls |
 
 ## Config reload

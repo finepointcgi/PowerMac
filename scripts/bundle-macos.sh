@@ -11,15 +11,12 @@
 set -e
 cd "$(dirname "$0")/.."
 TARGET="${CARGO_TARGET_DIR:-target}"
-BINS="powermac powermac-battery-helper"
+BINS="powermac"
 OUT="$TARGET/release"
 
-# The battery charge-limit helper (installed from Settings → Battery, with an
-# admin prompt, from next to the app executable) is built with the app.
 if [ "$UNIVERSAL" = "1" ]; then
   for T in aarch64-apple-darwin x86_64-apple-darwin; do
     cargo build --release --target "$T" -p powermac
-    cargo build --release --target "$T" -p battery-limit --bin powermac-battery-helper
   done
   mkdir -p "$OUT"
   for B in $BINS; do
@@ -29,7 +26,6 @@ if [ "$UNIVERSAL" = "1" ]; then
   SUFFIX=.universal
 else
   cargo build --release -p powermac
-  cargo build --release -p battery-limit --bin powermac-battery-helper
   SUFFIX=
 fi
 
@@ -67,7 +63,6 @@ PLIST
 if [ -n "$SIGN_IDENTITY" ]; then
   # Distribution: Developer ID, hardened runtime, secure timestamp.
   ENT=scripts/PowerMac.entitlements
-  codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --options runtime --timestamp --entitlements "$ENT" -s "$SIGN_IDENTITY" "$APP"
   codesign --verify --strict --verbose=2 "$APP"
   echo "built $APP (signed with $SIGN_IDENTITY)"
@@ -79,11 +74,9 @@ fi
 # every rebuild).
 IDENTITY="PowerMac Local Signing"
 if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
-  codesign --force -s "$IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --deep -s "$IDENTITY" "$APP"
 else
   echo "note: ad-hoc signing; run scripts/create-signing-cert.sh once to keep permissions across rebuilds"
-  codesign --force -s - "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --deep -s - "$APP"
 fi
 echo "built $APP — move it to /Applications and open it"

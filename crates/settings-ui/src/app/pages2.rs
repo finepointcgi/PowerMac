@@ -1,21 +1,20 @@
 //! Pages and cards of the newest modules: Resolution & HiDPI (on the
-//! Displays page), Sound, Battery, Dock Previews, Text Expansion, the Caps
+//! Displays page), Sound, Dock Previews, Text Expansion, the Caps
 //! Lock card's neighbours, the Notch Shelf widgets and the Finder basics /
 //! Image Resizer cards of File Tools.
 //!
 //! Like Displays, the modules that need the running app (Display Scaling,
-//! the audio taps, the battery helper) are reached through status / request
-//! files (`pm_config::bridge`): the settings window never switches display
+//! the audio taps) are reached through status / request files
+//! (`pm_config::bridge`): the settings window never switches display
 //! modes or installs taps itself. Slow one-off actions with an admin or
-//! file prompt (installing the battery helper or a display override,
-//! choosing an espanso file) run on a background thread so the window keeps
-//! drawing.
+//! file prompt (installing a display override, choosing an espanso file)
+//! run on a background thread so the window keeps drawing.
 
 use super::*;
 use super::pages::{apps_list_pub, callout, permission_control};
 
 use audio_control::{AudioDevice, CapturePermission, DeviceKind, DeviceMatch};
-use pm_config::bridge::{self, AudioRequest, BatteryRequest, MenuBarRequest, ScalingRequest};
+use pm_config::bridge::{self, AudioRequest, MenuBarRequest, ScalingRequest};
 
 /// Accent of the Sound page's rows.
 const SOUND_TINT: Color32 = Color32::from_rgb(0xFF, 0x37, 0x5F);
@@ -31,7 +30,6 @@ impl SettingsApp {
         let p = &self.config_path;
         self.scaling_status = read_fresh(p, SCALING_STATUS_FILE, STATUS_FRESH_MS);
         self.audio_status = read_fresh(p, AUDIO_STATUS_FILE, STATUS_FRESH_MS);
-        self.battery_status = read_fresh(p, BATTERY_STATUS_FILE, STATUS_FRESH_MS);
         self.menubar_status = read_fresh(p, MENUBAR_STATUS_FILE, STATUS_FRESH_MS);
         if self.page == Page::MenuBar
             && self.app.cfg.menu_bar.enabled
@@ -50,12 +48,6 @@ impl SettingsApp {
                     audio_control::list_devices(DeviceKind::Input).unwrap_or_default(),
                 ));
             }
-        }
-        if self.page == Page::Battery
-            && self.battery_status.is_none()
-            && self.battery_local.as_ref().is_none_or(|(_, t)| t.elapsed() >= Duration::from_secs(5))
-        {
-            self.battery_local = Some((local_battery_status(), Instant::now()));
         }
     }
 
@@ -91,9 +83,6 @@ impl SettingsApp {
                 continue;
             }
             self.notes.insert(what, r);
-            if what == "battery-helper" {
-                self.write_battery_request(BatteryRequest::Refresh);
-            }
         }
         if !self.busy.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(200));
@@ -559,166 +548,6 @@ impl SettingsApp {
                 log::warn!("sound request: {e:#}");
             }
             self.audio_written = Instant::now();
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Battery
-
-    fn write_battery_request(&self, r: BatteryRequest) {
-        if let Err(e) = bridge::write(&self.config_path, bridge::BATTERY_REQUEST_FILE, &r) {
-            log::warn!("battery request: {e:#}");
-        }
-    }
-
-    pub(super) fn battery(&mut self, ui: &mut Ui) {
-        self.hero(ui, |_, _| {});
-        let mac = cfg!(target_os = "macos");
-        let from_app = self.battery_status.is_some();
-        let st = self.battery_status.clone().or_else(|| self.battery_local.as_ref().map(|(s, _)| s.clone())).unwrap_or_else(local_battery_status);
-        let b = &st.battery;
-        let mut full = false;
-        let mut install = false;
-        let busy = self.busy.contains("battery-helper");
-
-        card(ui, "Status", |ui| {
-            if !b.has_battery {
-                block(ui, |ui| hint(ui, "This computer has no battery."));
-                return;
-            }
-            block(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let p = pal(ui);
-                    ui.label(RichText::new(b.percent.map(|v| format!("{v} %")).unwrap_or_else(|| "–".into())).font(theme::font_semibold(30.0)).color(p.text));
-                    ui.add_space(10.0);
-                    ui.vertical(|ui| {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(battery_state(&st)).font(theme::font_semibold(13.5)).color(p.text));
-                        ui.label(RichText::new(&st.reason).size(12.0).color(p.text2));
-                    });
-                });
-                if let Some(pct) = b.percent {
-                    let p = pal(ui);
-                    let w = ui.available_width();
-                    let (r, _) = ui.allocate_exact_size(vec2(w, 8.0), Sense::hover());
-                    ui.painter().rect_filled(r, 4.0, p.control);
-                    let mut fill = r;
-                    fill.set_width(w * f32::from(pct.min(100)) / 100.0);
-                    let c = if pct <= 20 { p.error } else { p.ok };
-                    ui.painter().rect_filled(fill, 4.0, c);
-                }
-            });
-            let health = match (b.health_percent, b.max_capacity_mah, b.design_capacity_mah) {
-                (Some(h), Some(m), Some(d)) => format!("{h:.0} %  ({m} of {d} mAh)"),
-                (Some(h), _, _) => format!("{h:.0} %"),
-                _ => "–".into(),
-            };
-            row(ui, "Health", Some("Full-charge capacity compared to when it was new."), |ui| ui.label(health));
-            row(ui, "Cycle count", None, |ui| ui.label(b.cycles.map(|c| c.to_string()).unwrap_or_else(|| "–".into())));
-            row(ui, "Temperature", None, |ui| ui.label(b.temperature_c.map(|t| format!("{t:.1} °C")).unwrap_or_else(|| "–".into())));
-            let adapter = match (b.plugged, b.adapter_watts) {
-                (true, Some(w)) => format!("{w} W, connected"),
-                (true, None) => "Connected".into(),
-                (false, _) => "Not connected".into(),
-            };
-            row(ui, "Power adapter", None, |ui| ui.label(adapter));
-            if let Some(m) = b.time_remaining_min.filter(|m| *m > 0) {
-                let t = if m >= 60 { format!("{} h {:02} min", m / 60, m % 60) } else { format!("{m} min") };
-                row(ui, if b.charging { "Until full" } else { "Time left" }, None, |ui| ui.label(t));
-            }
-        });
-
-        let c = &mut self.app.cfg.battery_limit;
-        card_with(
-            ui,
-            "Charge limit",
-            Some("Lithium batteries age slower when they don't sit at 100 %. A limit stops charging there; the Mac runs from the adapter."),
-            |ui| {
-                match st.charge_control {
-                    Some(true) => {
-                        toggle_row(ui, "Limit charging", None, &mut c.enabled);
-                        ui.add_enabled_ui(c.enabled, |ui| {
-                            row(ui, "Stop charging at", None, |ui| slider(ui, &mut c.limit_percent, 20..=100, " %"));
-                            row(ui, "Let it drop before charging again", Some("Sailing: avoids topping up for every percent. 0 keeps it at the limit."), |ui| {
-                                slider(ui, &mut c.sailing_percent, 0..=20, " %")
-                            });
-                            toggle_row(
-                                ui,
-                                "Discharge down to the limit",
-                                Some("When plugged in above the limit, the adapter is switched off until the battery is down to it."),
-                                &mut c.discharge_to_limit,
-                            );
-                            row(ui, "Pause charging above", Some("Heat protection. 0 turns it off."), |ui| slider(ui, &mut c.heat_protection_celsius, 0..=60, " °C"));
-                            toggle_row(
-                                ui,
-                                "Keep the limit while the Mac sleeps",
-                                Some("Off: charging is allowed again before sleep, so nothing stays changed while PowerMac can't watch."),
-                                &mut c.keep_limit_during_sleep,
-                            );
-                            row(ui, "Charge to 100 % now", Some("Once, until you unplug the adapter (before a trip)."), |ui| {
-                                if st.top_up_active {
-                                    tag_pill(ui, pal(ui).ok, icon::LIGHTNING, "Charging to 100 %");
-                                } else if ui.add_enabled(from_app, egui::Button::new("Charge to 100 %")).clicked() {
-                                    full = true;
-                                }
-                            });
-                        });
-                        if mac {
-                            row(
-                                ui,
-                                "Charging helper",
-                                Some("Changing how the battery charges needs a small privileged helper (a LaunchDaemon). Installing it asks for an administrator password once."),
-                                |ui| {
-                                    let ok = st.helper_installed;
-                                    status_pill(ui, ok && (st.helper_running || !from_app), if ok { if st.helper_running || !from_app { "Installed" } else { "Not responding" } } else { "Not installed" });
-                                    if (!ok || st.needs_helper) && ui.add_enabled(!busy, egui::Button::new(if busy { "Installing…" } else { "Install helper…" })).clicked() {
-                                        install = true;
-                                    }
-                                },
-                            );
-                        }
-                        if let Some(e) = &st.error {
-                            warn_label(ui, e);
-                            ui.add_space(8.0);
-                        }
-                    }
-                    Some(false) => {
-                        block(ui, |ui| {
-                            hint(ui, "This Mac's firmware has no charge-control setting PowerMac can use, so the limit can't be set here.");
-                            hint(ui, "macOS has its own: System Settings → Battery → Charging → Charge Limit (on Apple silicon Macs with macOS 26 or later), or Optimized Battery Charging on earlier versions.");
-                            ui.add_space(4.0);
-                            if icon_text_button(ui, icon::ARROW_SQUARE_OUT, "Open Battery Settings…").clicked() {
-                                open_battery_settings();
-                            }
-                        });
-                    }
-                    None => {
-                        block(ui, |ui| {
-                            if mac {
-                                hint(ui, "The battery controller couldn't be read, so PowerMac can't tell whether a limit is possible on this Mac.");
-                                if icon_text_button(ui, icon::ARROW_SQUARE_OUT, "Open Battery Settings…").clicked() {
-                                    open_battery_settings();
-                                }
-                            } else {
-                                hint(ui, "Windows has no common charge-limit setting. Most laptops have one in their maker's app: Lenovo Vantage, MyASUS, Dell Power Manager, HP Battery Health Manager, or the Surface UEFI.");
-                            }
-                        });
-                    }
-                }
-            },
-        );
-        self.note(ui, "battery-helper");
-        if full {
-            self.write_battery_request(BatteryRequest::ChargeToFull);
-            self.toast = Some((Instant::now(), "Charging to 100 %".into()));
-        }
-        if install {
-            self.run_background("battery-helper", || {
-                let Some(helper) = battery_limit::bundled_helper_path() else {
-                    return Err(format!("{} isn't next to PowerMac (build it with the app bundle script).", battery_limit::HELPER_BINARY_NAME));
-                };
-                battery_limit::install_helper(&helper).map(|()| "Helper installed.".to_string()).map_err(|e| format!("{e:#}"))
-            });
         }
     }
 
@@ -1464,39 +1293,6 @@ fn device_rule_list(ui: &mut Ui, key: &str, list: &mut Vec<DeviceMatch>, devices
             }
         });
     });
-}
-
-/// The battery as this process can read it (no helper status).
-fn local_battery_status() -> battery_limit::BatteryStatus {
-    let supported = cfg!(target_os = "macos");
-    battery_limit::BatteryStatus {
-        battery: battery_limit::read_battery(),
-        helper_installed: supported && battery_limit::helper_installed(),
-        charge_control: if supported { battery_limit::detect_scheme().ok().map(|s| s.can_inhibit()) } else { None },
-        supported,
-        reason: "PowerMac isn't running".into(),
-        ..Default::default()
-    }
-}
-
-fn battery_state(st: &battery_limit::BatteryStatus) -> String {
-    let b = &st.battery;
-    if st.discharging {
-        "Discharging to the limit".into()
-    } else if st.inhibited {
-        "Holding at the limit".into()
-    } else if b.charging {
-        "Charging".into()
-    } else if b.plugged {
-        "On power, not charging".into()
-    } else {
-        "On battery".into()
-    }
-}
-
-fn open_battery_settings() {
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg("x-apple.systempreferences:com.apple.Battery-Settings.extension").spawn();
 }
 
 /// Short labels for a snippet's non-default options.

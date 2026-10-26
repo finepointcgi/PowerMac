@@ -4,6 +4,17 @@ All notable changes to PowerMac are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Window Switcher**: a "Replace Cmd+Tab" switch at the top of its settings page. Cmd+Tab / Cmd+Shift+Tab open the switcher, holding Cmd keeps it open, releasing switches, Esc cancels and Cmd+Q/W/M/H act on the selected window; Cmd+\` can switch the front app's windows. The macOS app switcher is only off while the switcher's keyboard hook works, and is turned back on when PowerMac stops, the hook fails, Secure Input is on, or (after a crash) on the next start.
+- **Window Switcher**: preview of the selected window — its live image at its real position above everything else, with the rest of the screen dimmed; minimized windows and windows on other desktops are shown centered with a badge, and without Screen Recording an outline with the app icon and title.
+
+### Removed
+
+- **Battery** charge limit (and its privileged helper). Old config files still load; the section is ignored. The Notch Shelf's Battery widget stays.
+
 ## [1.0.0] - 2026-10-26
 
 The first release: PowerToys-style utilities for macOS in one menu-bar app.

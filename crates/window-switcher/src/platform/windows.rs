@@ -727,6 +727,8 @@ impl Runtime {
         SHOWN.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub(crate) fn debug_break_input(&self, _broken: bool) {}
+
     pub(crate) fn is_input_active(&self) -> bool {
         self.thread.is_some()
     }

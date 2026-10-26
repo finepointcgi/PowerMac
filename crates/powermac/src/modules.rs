@@ -174,11 +174,6 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
     if changed(old.map(|o| &o.audio), &new.audio) {
         apply_audio(running, &new.audio);
     }
-    // The battery controller always runs (status only while the limit is
-    // off) so the tray and the settings window can show the battery.
-    if changed(old.map(|o| &o.battery_limit), &new.battery_limit) {
-        apply_battery(running, &new.battery_limit);
-    }
     if changed(old.map(|o| &o.dock_previews), &new.dock_previews) {
         apply_dock_previews(running, &new.dock_previews);
     }
@@ -283,23 +278,6 @@ fn apply_audio(running: &mut Running, cfg: &audio_control::Config) {
             log::info!("sound: stopped");
         }
         (false, None) => {}
-    }
-}
-
-fn apply_battery(running: &mut Running, cfg: &battery_limit::Config) {
-    match running.battery.as_ref() {
-        Some(h) => {
-            h.update(cfg.clone());
-            log::info!("battery: settings applied (limit {})", if cfg.enabled { format!("{} %", cfg.normalized().limit_percent) } else { "off".into() });
-        }
-        None => match battery_limit::BatteryLimit::start(cfg.clone()) {
-            Ok(h) => {
-                log::info!("battery: running (limit {})", if cfg.enabled { format!("{} %", cfg.normalized().limit_percent) } else { "off, status only".into() });
-                running.battery = Some(h);
-                crate::battery_glue::start_once();
-            }
-            Err(e) => log::error!("battery: {e:#}"),
-        },
     }
 }
 
