@@ -676,7 +676,7 @@ impl Shared {
         while !self.stop.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, addr)) => {
-                    debug!("accepted connection from {addr}");
+                    info!("incoming connection from {addr}");
                     let _ = stream.set_nonblocking(false);
                     let s = self.clone();
                     let _ = thread::Builder::new()
@@ -793,7 +793,13 @@ impl Shared {
         if let Origin::Discovered(addr) = origin {
             self.discovered_connection_ended(addr, &end, &r);
         } else if let Err(e) = r {
-            debug!("connection {hint_name} ended: {e}");
+            // Incoming failures are the main clue when pairing doesn't work
+            // (wrong key, firewall resets), so log them where users can see them.
+            if matches!(origin, Origin::Incoming) {
+                info!("incoming connection from {hint_name} ended: {e}");
+            } else {
+                debug!("connection {hint_name} ended: {e}");
+            }
         }
     }
 
