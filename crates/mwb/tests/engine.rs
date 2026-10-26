@@ -249,13 +249,14 @@ fn discovers_peer_through_injected_candidate() {
     assert!(a.switch_to("A"));
 
     // The discovered address is used for reconnects: restart B on the same
-    // port; A reconnects long before its next sweep (60 s).
+    // port; A reconnects long before its next sweep (60 s). The generous
+    // timeout covers slow CI runners (debug-build PBKDF2 per handshake).
     b.stop();
     drop(b);
     assert!(wait_until(Duration::from_secs(5), || a.status().peers.is_empty()));
     let b = Engine::start_with(lone("B", pb, KEY, false), MockBackend::hd(), no_scan()).unwrap();
     assert!(
-        wait_until(Duration::from_secs(8), || a.status().peers.iter().any(|p| p.name == "B")),
+        wait_until(Duration::from_secs(30), || a.status().peers.iter().any(|p| p.name == "B")),
         "A did not reconnect to B through the discovered address"
     );
     a.stop();
