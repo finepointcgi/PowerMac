@@ -54,6 +54,11 @@ When run from a terminal, macOS attributes permissions to the terminal app, not 
 3. Modules whose permission is missing log a message and stay off; the rest keep running. Open **Settings → General** to see each permission's status, with buttons that open the right System Settings pane. [Permissions](permissions.md) explains which module needs what.
 4. Run `powermac doctor` at any time to print the config location, permission status and detected screens.
 
+<figure markdown="span">
+  ![Clicking through the settings window and searching it](../assets/gifs/settings-tour.gif){ loading=lazy }
+  <figcaption>The settings window: one page per module in the sidebar, and a search across every setting.</figcaption>
+</figure>
+
 ## Launch at login
 
 Turn it on from the tray (**Launch at login**) or **Settings → General**.

@@ -4,6 +4,11 @@ PowerRename, New+ and Image Resizer ported from PowerToys, plus "Finder is missi
 
 Crate: `crates/file-tools` · Settings page: **File Tools** · Config: `file-tools.json`
 
+<figure markdown="span">
+  ![The File Tools settings page](../assets/screenshots/settings-file-tools.png){ loading=lazy }
+  <figcaption>The File Tools settings page.</figcaption>
+</figure>
+
 ## Finder Quick Actions
 
 Install them from **Settings → File Tools** or the tray. They appear when you right-click selected items (Quick Actions submenu, or Services):

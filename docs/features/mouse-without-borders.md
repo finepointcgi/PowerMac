@@ -4,6 +4,11 @@ Share one keyboard and mouse, plus clipboard text, across up to four machines. I
 
 Crate: `crates/mwb` (protocol + engine), `crates/pm-input` (capture/injection) · Settings page: **Mouse Without Borders** · Config: `mouseWithoutBorders`
 
+<figure markdown="span">
+  ![The Mouse Without Borders settings page](../assets/screenshots/settings-mouse-without-borders.png){ loading=lazy }
+  <figcaption>The Mouse Without Borders settings page.</figcaption>
+</figure>
+
 ## Pairing with Windows PowerToys
 
 1. In PowerToys → Mouse Without Borders on the PC, copy its security key and machine name. You can also go the other way: tray → **Copy security key** in PowerMac, and paste it into PowerToys.

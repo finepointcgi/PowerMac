@@ -4,6 +4,11 @@ Everything you copy — text, rich text, images and files — searchable in a pi
 
 Crate: `crates/clipboard-history` · Settings page: **Clipboard History** · Config: `clipboardHistory` · off by default
 
+<figure markdown="span">
+  ![The Clipboard History settings page](../assets/screenshots/settings-clipboard-history.png){ loading=lazy }
+  <figcaption>The Clipboard History settings page.</figcaption>
+</figure>
+
 ## Using it
 
 - **Cmd+Shift+V** (Win+Shift+V on Windows) opens the picker. Type to search, pick an item to paste it into the app that was in front.

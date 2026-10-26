@@ -1,0 +1,15 @@
+move 700 300 300
+wait 500
+move 560 352 700
+click
+wait 1300
+move 988 352 600
+click
+wait 1300
+move 131 552 700
+click
+wait 1300
+move 1060 388 800
+wait 300
+click
+wait 3500

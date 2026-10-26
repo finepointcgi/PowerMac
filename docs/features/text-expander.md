@@ -2,7 +2,12 @@
 
 Type an abbreviation anywhere (`;addr`, `:date`, `btw`) and it is replaced with its snippet, like TextExpander or espanso.
 
-Crate: `crates/text-expander` · Settings page: **Text Expander** · Config: `textExpander` · off by default
+Crate: `crates/text-expander` · Settings page: **Text Expansion** · Config: `textExpander` · off by default
+
+<figure markdown="span">
+  ![The Text Expansion settings page](../assets/screenshots/settings-text-expansion.png){ loading=lazy }
+  <figcaption>The Text Expansion settings page.</figcaption>
+</figure>
 
 ## Behaviour
 

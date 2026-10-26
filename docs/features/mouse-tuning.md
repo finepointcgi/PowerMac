@@ -4,6 +4,11 @@
 
 Crate: `crates/mouse-tuning` · Settings page: **Mouse** · Config: `mouseTuning`
 
+<figure markdown="span">
+  ![The Mouse settings page](../assets/screenshots/settings-mouse.png){ loading=lazy }
+  <figcaption>The Mouse settings page.</figcaption>
+</figure>
+
 ## Pointer
 
 - Turn pointer **acceleration off** (linear movement) and set the **speed**, separately for mice and trackpads.

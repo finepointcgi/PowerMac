@@ -4,6 +4,11 @@ Hover an app's Dock icon for a moment and a panel with thumbnails of that app's 
 
 Crate: `crates/dock-previews` · Settings page: **Dock Previews** · Config: `dockPreviews` · macOS only
 
+<figure markdown="span">
+  ![The Dock Previews settings page](../assets/screenshots/settings-dock-previews.png){ loading=lazy }
+  <figcaption>The Dock Previews settings page.</figcaption>
+</figure>
+
 ## Using it
 
 | In the panel | Action |

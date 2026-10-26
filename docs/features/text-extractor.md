@@ -4,6 +4,11 @@ Drag over any part of the screen and the text in it is copied. A port of PowerTo
 
 Crate: `crates/text-extractor` · Settings page: **Text Extractor** · Config: `textExtractor`
 
+<figure markdown="span">
+  ![The Text Extractor settings page](../assets/screenshots/settings-text-extractor.png){ loading=lazy }
+  <figcaption>The Text Extractor settings page.</figcaption>
+</figure>
+
 ## Using it
 
 - **Ctrl+Option+T** (Win+Shift+T on Windows), or tray → Extract text.

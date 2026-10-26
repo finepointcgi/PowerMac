@@ -4,6 +4,11 @@ Brightness, contrast and volume of external monitors over **DDC/CI**, native bri
 
 Crate: `crates/display-control` · Settings page: **Displays** · Config: `displayControl`
 
+<figure markdown="span">
+  ![The Displays settings page](../assets/screenshots/settings-displays.png){ loading=lazy }
+  <figcaption>The Displays settings page.</figcaption>
+</figure>
+
 ## Using it
 
 - **Settings → Displays** has sliders for every connected display; the tray has presets per external display.

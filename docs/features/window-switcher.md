@@ -4,6 +4,11 @@ A Windows-style Alt+Tab for macOS: hold a modifier, press Tab to cycle through *
 
 Crate: `crates/window-switcher` · Settings page: **Window Switcher** · Config: `windowSwitcher`
 
+<figure markdown="span">
+  ![The Window Switcher settings page](../assets/screenshots/settings-window-switcher.png){ loading=lazy }
+  <figcaption>The Window Switcher settings page.</figcaption>
+</figure>
+
 ## Shortcuts
 
 | Shortcut | Action |

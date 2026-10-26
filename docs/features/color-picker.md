@@ -4,6 +4,11 @@ Pick a color anywhere on screen and copy it in the format you need. A port of Po
 
 Crate: `crates/color-picker` · Settings page: **Color Picker** · Config: `colorPicker`
 
+<figure markdown="span">
+  ![The Color Picker settings page](../assets/screenshots/settings-color-picker.png){ loading=lazy }
+  <figcaption>The Color Picker settings page.</figcaption>
+</figure>
+
 ## Using it
 
 - **Ctrl+Option+C** (Win+Shift+C on Windows), tray → Pick color, or `powermac color-picker`.

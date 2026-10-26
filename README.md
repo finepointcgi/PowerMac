@@ -2,7 +2,26 @@
 
 A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as a menu-bar (macOS) or notification-area (Windows) app with a settings window.
 
-**Documentation:** the full guide (every feature, its settings, the architecture and the release checklist) is in [`docs/`](docs/index.md) and is published as a site by GitLab Pages (`.gitlab-ci.yml`) or GitHub Pages (`.github/workflows/docs.yml`). Preview it locally with `pip install -r requirements-docs.txt && mkdocs serve`.
+<p align="center">
+  <img src="docs/assets/gifs/settings-tour.gif" alt="The PowerMac settings window" width="820">
+</p>
+
+**Download:** the latest macOS build is on the [Releases page](https://github.com/finepointcgi/PowerMac/releases).
+
+**Documentation:** https://finepointcgi.github.io/PowerMac/ — the full guide (every feature, its settings, the architecture and the release checklist) is in [`docs/`](docs/index.md) and is published as a site by GitLab Pages (`.gitlab-ci.yml`) or GitHub Pages (`.github/workflows/docs.yml`). Preview it locally with `pip install -r requirements-docs.txt && mkdocs serve`.
+
+<table>
+  <tr>
+    <td><img src="docs/assets/screenshots/settings-fancyzones.png" alt="FancyZones settings"></td>
+    <td><img src="docs/assets/screenshots/settings-notch-widgets.png" alt="Notch Widgets settings"></td>
+    <td><img src="docs/assets/screenshots/settings-window-switcher.png" alt="Window Switcher settings"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/screenshots/settings-mouse-without-borders.png" alt="Mouse Without Borders settings"></td>
+    <td><img src="docs/assets/screenshots/settings-displays.png" alt="Displays settings"></td>
+    <td><img src="docs/assets/screenshots/fancyzones-editor.png" alt="FancyZones layout editor"></td>
+  </tr>
+</table>
 
 | Module | What it does |
 |---|---|

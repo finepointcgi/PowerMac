@@ -4,6 +4,11 @@ The open notch has a **Home view**: pages of widget cards next to the drop shelf
 
 Settings page: **Notch Widgets** (Windows & Desktop) · Tray: **Notch widgets…** · CLI: `powermac settings --page notch-widgets` · Config: `notchShelf.widgets`, `notchShelf.pages`
 
+<figure markdown="span">
+  ![The Notch Widgets settings page: pages, and a live preview of the Home view](../assets/screenshots/settings-notch-widgets.png){ loading=lazy }
+  <figcaption>The Notch Widgets settings page: pages, and a live preview of the Home view.</figcaption>
+</figure>
+
 The widget platform is macOS-only. On Windows the shelf has no Home view, but the settings page still edits, imports and exports layouts.
 
 ## The settings page
@@ -22,6 +27,11 @@ The widget platform is macOS-only. On Windows the shelf has no Home view, but th
 - **Share layout** — export and import (see below).
 
 Everything saves automatically; the running app applies widget and page changes live.
+
+<figure markdown="span">
+  ![Scrolling through the Notch Widgets page and opening the widget gallery](../assets/gifs/notch-widgets.gif){ loading=lazy }
+  <figcaption>The page preview, the widget list and the gallery that <strong>Add widget</strong> opens.</figcaption>
+</figure>
 
 ## Sizes and pages
 

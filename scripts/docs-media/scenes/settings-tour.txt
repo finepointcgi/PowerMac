@@ -1,0 +1,28 @@
+move 600 400 300
+wait 600
+move 86 271 700
+click
+wait 1400
+move 343 471 600
+wait 500
+move 471 457 400
+wait 500
+move 586 457 400
+wait 900
+move 86 314 700
+click
+wait 1600
+move 86 400 600
+click
+wait 1200
+move 700 520 400
+scroll 2
+wait 1600
+move 86 579 700
+click
+wait 1500
+move 126 126 600
+click
+wait 300
+type bright
+wait 2000

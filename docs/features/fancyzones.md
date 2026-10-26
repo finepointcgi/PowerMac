@@ -4,6 +4,11 @@ A port of PowerToys FancyZones: define a layout of zones per monitor and drop wi
 
 Crate: `crates/fancyzones` · Settings page: **FancyZones** · Config: `fancyzones.json`
 
+<figure markdown="span">
+  ![The FancyZones settings page, with a live preview of the zone colors](../assets/screenshots/settings-fancyzones.png){ loading=lazy }
+  <figcaption>The FancyZones settings page, with a live preview of the zone colors.</figcaption>
+</figure>
+
 ## Layouts
 
 - Templates: **Focus, Columns, Rows, Grid, Priority Grid**, each with adjustable zone count, spacing and sensitivity.
@@ -11,6 +16,11 @@ Crate: `crates/fancyzones` · Settings page: **FancyZones** · Config: `fancyzon
 - One layout per monitor, optionally one per Space (`layoutsPerVirtualDesktop`).
 - Quick switch: bind layouts to 0–9 and press Ctrl+Option+Cmd+0–9.
 - Layout files are compatible with PowerToys FancyZones' JSON, so layouts can be imported.
+
+<figure markdown="span">
+  ![Picking layouts in the FancyZones layout editor](../assets/gifs/fancyzones-editor.gif){ loading=lazy }
+  <figcaption>The layout editor: click a template to apply it to the monitor, and use the pencil to change its zone count and spacing.</figcaption>
+</figure>
 
 ## Snapping windows
 

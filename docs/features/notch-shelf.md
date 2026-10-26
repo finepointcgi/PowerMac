@@ -4,6 +4,11 @@ Turns the MacBook notch into a drop shelf and a small dashboard, in the spirit o
 
 Crate: `crates/notch-shelf` · Settings page: **Notch Shelf** · Config: `notchShelf`
 
+<figure markdown="span">
+  ![The Notch Shelf settings page](../assets/screenshots/settings-notch-shelf.png){ loading=lazy }
+  <figcaption>The Notch Shelf settings page.</figcaption>
+</figure>
+
 ## The shelf
 
 - Collapsed, the panel is a black shape exactly over the notch, so it's invisible.

@@ -4,6 +4,11 @@ Ports of PowerToys' Find My Mouse, Mouse Highlighter and Mouse Pointer Crosshair
 
 Crate: `crates/mouse-utils` · Settings page: **Mouse Utilities** · Config: `mouseUtils`
 
+<figure markdown="span">
+  ![The Mouse Utilities settings page](../assets/screenshots/settings-mouse-utilities.png){ loading=lazy }
+  <figcaption>The Mouse Utilities settings page.</figcaption>
+</figure>
+
 | Tool | Default trigger (macOS) | Windows |
 |---|---|---|
 | **Find My Mouse** — dims the screen except for a spotlight around the pointer | double-tap **Left Ctrl** (or shake, or a shortcut, Cmd+Shift+F) | same / Win+Shift+F |

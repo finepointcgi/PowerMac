@@ -1,0 +1,41 @@
+/* Screenshots and recordings of PowerMac's windows. */
+.md-typeset figure img,
+.md-typeset .shots img {
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+
+.md-typeset figure {
+  margin: 1.5em auto;
+}
+
+.md-typeset figcaption {
+  max-width: 40rem;
+  font-style: normal;
+  color: var(--md-default-fg-color--light);
+}
+
+/* A grid of screenshot thumbnails with captions. */
+.md-typeset .shots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 1.2rem;
+  margin: 1.5em 0;
+}
+
+.md-typeset .shots a {
+  display: block;
+  color: inherit;
+}
+
+.md-typeset .shots img {
+  display: block;
+  width: 100%;
+}
+
+.md-typeset .shots span {
+  display: block;
+  margin-top: 0.5em;
+  font-size: 0.7rem;
+  text-align: center;
+}

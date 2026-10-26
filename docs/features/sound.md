@@ -4,6 +4,11 @@ Default-device rules, device volume and mute, and per-app volume.
 
 Crate: `crates/audio-control` · Settings page: **Sound** · Config: `audio`
 
+<figure markdown="span">
+  ![The Sound settings page](../assets/screenshots/settings-sound.png){ loading=lazy }
+  <figcaption>The Sound settings page.</figcaption>
+</figure>
+
 ## Features
 
 - **Devices:** list outputs and inputs with name, transport, volume and mute; set the default output, input and alert device from Settings or the tray.

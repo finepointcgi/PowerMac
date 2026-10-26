@@ -4,6 +4,11 @@ Hide menu bar icons behind a chevron, Ice / Bartender style. Useful when there a
 
 Crate: `crates/menubar-manager` · Settings page: **Menu Bar** · Config: `menuBar` · macOS only · off by default
 
+<figure markdown="span">
+  ![The Menu Bar settings page](../assets/screenshots/settings-menu-bar.png){ loading=lazy }
+  <figcaption>The Menu Bar settings page.</figcaption>
+</figure>
+
 ## How the menu bar is split
 
 PowerMac adds three status items of its own. Left to right:

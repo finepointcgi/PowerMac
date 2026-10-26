@@ -4,6 +4,11 @@ Keep the computer (and optionally the display) awake. A port of PowerToys Awake.
 
 Crate: `crates/awake` · Settings page: **Awake** · Config: `awake` · tray: **Awake** submenu
 
+<figure markdown="span">
+  ![The Awake settings page](../assets/screenshots/settings-awake.png){ loading=lazy }
+  <figcaption>The Awake settings page.</figcaption>
+</figure>
+
 ## Modes
 
 | Mode | JSON |

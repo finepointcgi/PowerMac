@@ -4,6 +4,11 @@ Reverse the mouse wheel but keep natural scrolling on the trackpad (or any other
 
 Crate: `crates/scroll-reverser` · Settings page: **Scrolling** · Config: `scrollReverser`
 
+<figure markdown="span">
+  ![The Scrolling settings page](../assets/screenshots/settings-scrolling.png){ loading=lazy }
+  <figcaption>The Scrolling settings page.</figcaption>
+</figure>
+
 ## Reversal
 
 Four independent switches: `reverseMouseVertical`, `reverseMouseHorizontal`, `reverseTrackpadVertical`, `reverseTrackpadHorizontal`.

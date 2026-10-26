@@ -4,6 +4,11 @@ A port of PowerToys Keyboard Manager, plus Paste as plain text, Windows-style ke
 
 Crate: `crates/keyboard-manager` · Settings page: **Keyboard Manager** · Config: `keyboardManager`
 
+<figure markdown="span">
+  ![The Keyboard Manager settings page](../assets/screenshots/settings-keyboard-manager.png){ loading=lazy }
+  <figcaption>The Keyboard Manager settings page.</figcaption>
+</figure>
+
 ## Features
 
 - **Key remaps:** one key to another key (CapsLock → Esc, swap Option and Command), to a shortcut, to text, or to nothing.

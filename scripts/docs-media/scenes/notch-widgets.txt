@@ -1,0 +1,13 @@
+move 700 500 300
+wait 600
+scroll 3
+wait 1800
+scroll 7
+wait 900
+move 356 502 700
+wait 200
+click
+wait 3000
+move 600 520 500
+scroll 8
+wait 2500
