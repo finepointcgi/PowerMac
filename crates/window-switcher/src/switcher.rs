@@ -83,8 +83,6 @@ pub struct Keys {
     pub app_trigger: Hotkey,
     /// Cmd+Tab (macOS) / Alt+Tab (Windows) when `replace_cmd_tab` is on.
     pub system_trigger: Option<Hotkey>,
-    /// Cmd+` (macOS) when `replace_cmd_backtick` is on.
-    pub system_app_trigger: Option<Hotkey>,
     pub show_delay: Duration,
 }
 
@@ -100,11 +98,6 @@ impl Keys {
         }
         if self.app_trigger.matches(code, mods) {
             return Some((Mode::CurrentApp, self.app_trigger));
-        }
-        if let Some(s) = self.system_app_trigger {
-            if s.matches(code, mods) {
-                return Some((Mode::CurrentApp, s));
-            }
         }
         None
     }
@@ -421,7 +414,6 @@ mod tests {
             trigger: Hotkey::new(false, false, true, false, vk::VK_TAB),
             app_trigger: Hotkey::new(false, false, true, false, vk::VK_OEM_3),
             system_trigger: None,
-            system_app_trigger: None,
             show_delay: DELAY,
         }
     }
@@ -552,108 +544,6 @@ mod tests {
         // Without replacement Cmd+Tab passes through.
         let mut plain = Switcher::new(keys());
         assert!(!plain.key_down(vk::VK_TAB, CMD, t0, nav).swallow);
-    }
-
-    const CMD_SHIFT: Mods = Mods::new(true, false, false, true);
-
-    fn cmd_keys() -> Keys {
-        let mut k = keys();
-        k.system_trigger = Some(Hotkey::new(true, false, false, false, vk::VK_TAB));
-        k.system_app_trigger = Some(Hotkey::new(true, false, false, false, vk::VK_OEM_3));
-        k
-    }
-
-    #[test]
-    fn cmd_hold_keeps_open_cycles_and_release_switches() {
-        let mut s = Switcher::new(cmd_keys());
-        let t0 = Instant::now();
-        assert_eq!(open(&mut s, t0, 4, CMD), vec![Effect::Select(1)]);
-        assert!(s.key_up(vk::VK_TAB).swallow, "Tab key-up never reaches the app");
-        // Still holding Cmd past the delay: the overlay appears and stays.
-        assert_eq!(s.tick(t0 + DELAY), vec![Effect::Show]);
-        assert!(s.modifiers_changed(CMD).is_empty(), "Cmd still held");
-        assert_eq!(s.key_down(vk::VK_TAB, CMD, t0, nav).effects, vec![Effect::Select(2)]);
-        assert_eq!(s.key_down(vk::VK_TAB, CMD, t0, nav).effects, vec![Effect::Select(3)]);
-        // Cmd+Shift+Tab goes back; pressing/releasing Shift alone keeps it open.
-        assert!(s.modifiers_changed(CMD_SHIFT).is_empty());
-        assert_eq!(s.key_down(vk::VK_TAB, CMD_SHIFT, t0, nav).effects, vec![Effect::Select(2)]);
-        assert!(s.modifiers_changed(CMD).is_empty());
-        assert!(s.is_shown());
-        // Releasing Cmd switches to the selection.
-        assert_eq!(s.modifiers_changed(Mods::NONE), vec![Effect::Commit(2)]);
-        assert!(!s.is_active());
-        // Idle again: a plain Cmd+Q belongs to the focused app.
-        assert!(!s.key_down(0x51, CMD, t0, nav).swallow);
-    }
-
-    #[test]
-    fn cmd_tab_fast_switch_and_cmd_shift_tab_start() {
-        let mut s = Switcher::new(cmd_keys());
-        let t0 = Instant::now();
-        open(&mut s, t0, 3, CMD);
-        assert_eq!(s.modifiers_changed(Mods::NONE), vec![Effect::Commit(1)], "quick Cmd+Tab: previous window");
-        // Cmd+Shift+Tab from idle starts at the last window.
-        assert_eq!(open(&mut s, t0, 5, CMD_SHIFT), vec![Effect::Select(4)]);
-        // Releasing Shift first doesn't commit; releasing Cmd does.
-        assert!(s.modifiers_changed(CMD).is_empty());
-        assert_eq!(s.modifiers_changed(Mods::NONE), vec![Effect::Commit(4)]);
-    }
-
-    #[test]
-    fn cmd_escape_cancels_and_later_keys_pass() {
-        let mut s = Switcher::new(cmd_keys());
-        let t0 = Instant::now();
-        open(&mut s, t0, 3, CMD);
-        s.tick(t0 + DELAY);
-        let o = s.key_down(vk::VK_ESCAPE, CMD, t0, nav);
-        assert!(o.swallow);
-        assert_eq!(o.effects, vec![Effect::Cancel]);
-        assert!(s.key_up(vk::VK_ESCAPE).swallow);
-        // Cmd is still held: nothing happens on release, and Cmd+W goes to the app.
-        assert!(s.modifiers_changed(CMD).is_empty());
-        assert!(!s.key_down(0x57, CMD, t0, nav).swallow);
-        assert!(s.modifiers_changed(Mods::NONE).is_empty());
-    }
-
-    #[test]
-    fn cmd_q_w_m_h_act_on_the_selected_window() {
-        let mut s = Switcher::new(cmd_keys());
-        let t0 = Instant::now();
-        open(&mut s, t0, 4, CMD);
-        s.tick(t0 + DELAY);
-        s.key_down(vk::VK_TAB, CMD, t0, nav); // → 2
-        for (code, a) in [
-            (0x51, WindowAction::QuitApp),
-            (0x57, WindowAction::Close),
-            (0x4D, WindowAction::ToggleMinimize),
-            (0x48, WindowAction::ToggleHide),
-        ] {
-            let o = s.key_down(code, CMD, t0, nav);
-            assert!(o.swallow, "Cmd+{code:#x} must not reach the focused app");
-            assert_eq!(o.effects, vec![Effect::Act(a, 2)]);
-            assert!(s.key_up(code).swallow);
-        }
-        assert!(s.is_active(), "actions keep the switcher open");
-    }
-
-    #[test]
-    fn cmd_backtick_opens_app_windows_only_when_mapped() {
-        let mut s = Switcher::new(cmd_keys());
-        let t0 = Instant::now();
-        let o = s.key_down(vk::VK_OEM_3, CMD, t0, nav);
-        assert!(o.swallow);
-        assert_eq!(o.effects, vec![Effect::Open(Mode::CurrentApp)]);
-        s.set_count(3);
-        assert_eq!(s.key_down(vk::VK_OEM_3, CMD, t0, nav).effects, vec![Effect::Select(2)]);
-        assert_eq!(s.modifiers_changed(Mods::NONE), vec![Effect::Commit(2)]);
-        // Without the mapping Cmd+` is left to macOS.
-        let mut k = cmd_keys();
-        k.system_app_trigger = None;
-        let mut plain = Switcher::new(k);
-        assert!(!plain.key_down(vk::VK_OEM_3, CMD, t0, nav).swallow);
-        // Option+Tab keeps working next to Cmd+Tab.
-        let o = plain.key_down(vk::VK_TAB, OPT, t0, nav);
-        assert_eq!(o.effects, vec![Effect::Open(Mode::AllWindows)]);
     }
 
     #[test]

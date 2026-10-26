@@ -19,23 +19,9 @@ pub struct Config {
     /// Same, but only the windows of the frontmost app. Default Option+`
     /// (macOS) / Alt+` (Windows).
     pub app_windows_trigger: Hotkey,
-    /// Also take over Cmd+Tab and Cmd+Shift+Tab (macOS; the system app
-    /// switcher is disabled while this is on and restored when the switcher
-    /// stops, even after a crash) or Alt+Tab (Windows). [`Config::trigger`]
-    /// keeps working as a second shortcut.
+    /// Also take over Cmd+Tab (macOS; the system app switcher is disabled
+    /// while this is on) or Alt+Tab (Windows).
     pub replace_cmd_tab: bool,
-    /// macOS: Cmd+` opens the switcher for the front app's windows (the
-    /// system's "Move focus to next window" is off while this is on). Only
-    /// used together with [`Config::replace_cmd_tab`].
-    pub replace_cmd_backtick: bool,
-    /// While the switcher is open, show the selected window's live image at
-    /// its real position on screen (AltTab's "Preview selected window").
-    /// Minimized windows and windows on other Spaces are shown centered.
-    pub preview_selected_window: bool,
-    /// Dim the rest of the screen behind the preview.
-    pub dim_background: bool,
-    /// How dark the dimming is (0 = none, 1 = black).
-    pub dim_opacity: f64,
     /// List minimized windows.
     pub show_minimized: bool,
     /// List windows of hidden apps.
@@ -64,10 +50,6 @@ impl Default for Config {
             trigger: Hotkey::default_trigger(),
             app_windows_trigger: Hotkey::default_app_trigger(),
             replace_cmd_tab: false,
-            replace_cmd_backtick: false,
-            preview_selected_window: true,
-            dim_background: true,
-            dim_opacity: DEFAULT_DIM_OPACITY,
             show_minimized: true,
             show_hidden: true,
             show_other_spaces: true,
@@ -83,26 +65,7 @@ impl Default for Config {
 /// long enough that a quick Option+Tab tap doesn't flash the overlay.
 pub const DEFAULT_SHOW_DELAY_MS: u32 = 90;
 
-/// Default for [`Config::dim_opacity`].
-pub const DEFAULT_DIM_OPACITY: f64 = 0.25;
-
 impl Config {
-    /// Whether the system switcher (Cmd+Tab) is taken over.
-    pub fn replaces_system_switcher(&self) -> bool {
-        self.enabled && self.replace_cmd_tab
-    }
-
-    /// Whether Cmd+` is taken over (macOS only).
-    pub fn replaces_cmd_backtick(&self) -> bool {
-        cfg!(target_os = "macos") && self.replaces_system_switcher() && self.replace_cmd_backtick
-    }
-
-    /// Dimming behind the preview (`None` = no dimming), clamped to a sane range.
-    pub fn effective_dim(&self) -> Option<f64> {
-        let o = if self.dim_opacity.is_finite() { self.dim_opacity.clamp(0.0, 0.85) } else { DEFAULT_DIM_OPACITY };
-        (self.preview_selected_window && self.dim_background && o > 0.0).then_some(o)
-    }
-
     /// Whether `app` (bundle id, name or path) is in [`Config::excluded_apps`].
     pub fn is_excluded(&self, ids: &[&str]) -> bool {
         self.excluded_apps.iter().any(|ex| {
@@ -167,11 +130,6 @@ impl Hotkey {
     /// Option+` (macOS) / Alt+` (Windows).
     pub const fn default_app_trigger() -> Self {
         Self::new(false, false, true, false, vk::VK_OEM_3)
-    }
-
-    /// Cmd+` (macOS), used by `replace_cmd_backtick`.
-    pub const fn system_app_switcher() -> Self {
-        Self::new(true, false, false, false, vk::VK_OEM_3)
     }
 
     /// Cmd+Tab (macOS) / Alt+Tab (Windows), used by `replace_cmd_tab`.
@@ -272,10 +230,6 @@ mod tests {
         let j = serde_json::to_value(&c).unwrap();
         assert_eq!(j["enabled"], true);
         assert_eq!(j["replaceCmdTab"], false);
-        assert_eq!(j["replaceCmdBacktick"], false);
-        assert_eq!(j["previewSelectedWindow"], true);
-        assert_eq!(j["dimBackground"], true);
-        assert_eq!(j["dimOpacity"], 0.25);
         assert_eq!(j["showMinimized"], true);
         assert_eq!(j["showOtherSpaces"], true);
         assert_eq!(j["onlyCurrentScreen"], false);
@@ -287,28 +241,6 @@ mod tests {
         assert!(!partial.thumbnails);
         assert!(partial.enabled);
         assert_eq!(partial.show_delay_ms, DEFAULT_SHOW_DELAY_MS);
-    }
-
-    #[test]
-    fn system_switcher_and_dim_rules() {
-        let mut c = Config::default();
-        assert!(!c.replaces_system_switcher());
-        assert_eq!(c.effective_dim(), Some(0.25));
-        c.replace_cmd_tab = true;
-        c.replace_cmd_backtick = true;
-        assert!(c.replaces_system_switcher());
-        assert_eq!(c.replaces_cmd_backtick(), cfg!(target_os = "macos"));
-        c.enabled = false;
-        assert!(!c.replaces_system_switcher() && !c.replaces_cmd_backtick());
-        c.dim_opacity = 3.0;
-        assert_eq!(c.effective_dim(), Some(0.85));
-        c.dim_opacity = f64::NAN;
-        assert_eq!(c.effective_dim(), Some(DEFAULT_DIM_OPACITY));
-        c.dim_opacity = 0.0;
-        assert_eq!(c.effective_dim(), None);
-        c.dim_opacity = 0.4;
-        c.preview_selected_window = false;
-        assert_eq!(c.effective_dim(), None, "dimming belongs to the preview");
     }
 
     #[test]

@@ -33,8 +33,7 @@ pub fn keys_for(cfg: &Config) -> Keys {
     Keys {
         trigger: if cfg.enabled { cfg.trigger } else { Hotkey::none() },
         app_trigger: if cfg.enabled { cfg.app_windows_trigger } else { Hotkey::none() },
-        system_trigger: cfg.replaces_system_switcher().then(Hotkey::system_switcher),
-        system_app_trigger: cfg.replaces_cmd_backtick().then(Hotkey::system_app_switcher),
+        system_trigger: (cfg.enabled && cfg.replace_cmd_tab).then(Hotkey::system_switcher),
         show_delay: Duration::from_millis(cfg.show_delay_ms.min(2000) as u64),
     }
 }
@@ -77,20 +76,6 @@ impl Engine {
 
     pub fn layout(&self) -> &Layout {
         &self.layout
-    }
-
-    /// The screen the switcher is shown on (global coordinates).
-    pub fn screen(&self) -> RectF {
-        self.screen
-    }
-
-    /// The selected window, if the switcher is open and has windows.
-    pub fn selected_item(&self) -> Option<&WindowInfo> {
-        if self.is_active() {
-            self.items.get(self.selected())
-        } else {
-            None
-        }
     }
 
     pub fn icon_mode(&self) -> bool {
