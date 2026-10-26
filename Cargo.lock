@@ -1206,9 +1206,15 @@ name = "mouse-utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "env_logger",
  "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "pm-input",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1534,6 +1540,7 @@ dependencies = [
  "anyhow",
  "awake",
  "dirs 5.0.1",
+ "mouse-utils",
  "mwb",
  "scroll-reverser",
  "serde",
@@ -1592,6 +1599,7 @@ dependencies = [
  "env_logger",
  "fancyzones",
  "log",
+ "mouse-utils",
  "mwb",
  "objc2",
  "objc2-app-kit",

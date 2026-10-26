@@ -70,6 +70,7 @@ pub(crate) struct Running {
     pub(crate) zones: Option<fancyzones::Handle>,
     pub(crate) awake: Option<awake::Awake>,
     pub(crate) scroll: Option<scroll_reverser::Handle>,
+    pub(crate) mouse: Option<mouse_utils::Handle>,
 }
 
 /// The config file in use (for the tray's "copy key" / "open config folder").
@@ -96,6 +97,9 @@ pub(crate) fn shutdown() {
         }
         if let Some(s) = &mut r.scroll {
             s.stop();
+        }
+        if let Some(m) = &mut r.mouse {
+            m.stop();
         }
     }
 }

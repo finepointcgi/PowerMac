@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub awake: Module<awake::AwakeConfig>,
     /// Has its own `enabled` switch.
     pub scroll_reverser: scroll_reverser::Config,
+    /// Find My Mouse, Mouse Highlighter, Crosshairs (each has its own `enabled`).
+    pub mouse_utils: mouse_utils::Config,
 }
 
 impl Default for AppConfig {
@@ -39,6 +41,7 @@ impl Default for AppConfig {
             awake: Module { enabled: false, settings: awake::AwakeConfig::default() },
             // Windows has no "natural scrolling" default to undo, so only reverse on macOS.
             scroll_reverser: scroll_reverser::Config { enabled: cfg!(target_os = "macos"), ..Default::default() },
+            mouse_utils: mouse_utils::Config::default(),
         }
     }
 }

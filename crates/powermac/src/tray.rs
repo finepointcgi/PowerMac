@@ -41,6 +41,9 @@ struct Ui {
     layouts: Vec<CheckMenuItem>,
     copy_key: MenuItem,
     login: CheckMenuItem,
+    find_mouse: MenuItem,
+    highlighter: CheckMenuItem,
+    crosshairs: CheckMenuItem,
     scroll_mouse: CheckMenuItem,
     scroll_trackpad: CheckMenuItem,
     open_privacy: MenuItem,
@@ -86,6 +89,11 @@ pub fn install() -> anyhow::Result<()> {
     let scroll_mouse = CheckMenuItem::new("Reverse mouse wheel", true, false, None);
     let scroll_trackpad = CheckMenuItem::new("Reverse trackpad", true, false, None);
     scroll.append_items(&[&scroll_mouse, &scroll_trackpad])?;
+    let mouse = Submenu::new("Mouse utilities", true);
+    let find_mouse = MenuItem::new("Find my mouse", true, None);
+    let highlighter = CheckMenuItem::new("Highlight clicks", true, false, None);
+    let crosshairs = CheckMenuItem::new("Crosshairs", true, false, None);
+    mouse.append_items(&[&find_mouse, &highlighter, &crosshairs])?;
     let open_config = MenuItem::new("Open config folder", true, None);
     let login = CheckMenuItem::new("Launch at login", true, crate::login::is_enabled(), None);
     let quit = MenuItem::new("Quit PowerMac", true, None);
@@ -99,6 +107,7 @@ pub fn install() -> anyhow::Result<()> {
         &awake,
         &zones,
         &scroll,
+        &mouse,
         &PredefinedMenuItem::separator(),
         &login,
         &open_privacy,
@@ -129,6 +138,9 @@ pub fn install() -> anyhow::Result<()> {
             login,
             scroll_mouse,
             scroll_trackpad,
+            find_mouse,
+            highlighter,
+            crosshairs,
             open_privacy,
             open_config,
             quit,
@@ -155,6 +167,15 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     if id == ui.quit.id() {
         shutdown();
         std::process::exit(0);
+    }
+    if id == ui.find_mouse.id() {
+        with_running(|r| r.mouse.as_ref().map(|m| m.find_mouse()));
+        return;
+    }
+    if id == ui.highlighter.id() {
+        with_running(|r| r.mouse.as_ref().map(|m| m.toggle_highlighter()));
+    } else if id == ui.crosshairs.id() {
+        with_running(|r| r.mouse.as_ref().map(|m| m.toggle_crosshairs()));
     }
     if id == ui.scroll_mouse.id() || id == ui.scroll_trackpad.id() {
         let (mouse, trackpad) = (ui.scroll_mouse.is_checked(), ui.scroll_trackpad.is_checked());
@@ -256,9 +277,18 @@ fn refresh_ui(ui: &mut Ui) {
             r.zones.as_ref().map(|z| z.config()),
             r.zones.as_ref().and_then(|z| z.monitors().ok()),
             r.scroll.as_ref().map(|s| s.config()),
+            r.mouse.as_ref().map(|m| (m.highlighter_on(), m.crosshairs_on())),
         )
     });
-    let Some((mwb, awake, zones, monitors, scroll)) = snapshot else { return };
+    let Some((mwb, awake, zones, monitors, scroll, mouse)) = snapshot else { return };
+
+    // Mouse utilities
+    let (hl, ch) = mouse.unwrap_or((false, false));
+    ui.find_mouse.set_enabled(mouse.is_some());
+    ui.highlighter.set_enabled(mouse.is_some());
+    ui.crosshairs.set_enabled(mouse.is_some());
+    ui.highlighter.set_checked(hl);
+    ui.crosshairs.set_checked(ch);
 
     // Scroll reverser
     let sc = scroll.unwrap_or(scroll_reverser::Config { enabled: false, ..Default::default() });

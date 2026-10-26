@@ -52,6 +52,27 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
         apply_scroll(running, &new.scroll_reverser);
     }
 
+    if changed(old.map(|o| &o.mouse_utils), &new.mouse_utils) {
+        let m = &new.mouse_utils;
+        let any = m.find_my_mouse.enabled || m.highlighter.enabled || m.crosshairs.enabled;
+        match (any, running.mouse.as_mut()) {
+            (true, Some(h)) => h.update(m.clone()),
+            (true, None) => match mouse_utils::MouseUtils::start(m.clone()) {
+                Ok(h) => {
+                    log::info!("mouse utilities: running ({:?} input)", h.input_mode());
+                    running.mouse = Some(h);
+                }
+                Err(e) => log::error!("mouse utilities: {e:#}"),
+            },
+            (false, Some(_)) => {
+                if let Some(mut h) = running.mouse.take() {
+                    h.stop();
+                }
+            }
+            (false, None) => {}
+        }
+    }
+
     if changed(old.map(|o| &o.fancyzones), &new.fancyzones) {
         match (new.fancyzones.enabled, running.zones.is_some()) {
             (true, false) => {
