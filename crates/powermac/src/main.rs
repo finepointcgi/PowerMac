@@ -1,6 +1,8 @@
 //! PowerMac: Mouse Without Borders, FancyZones and Awake in one cross-platform app.
 
+mod clipboard;
 mod config;
+mod tray;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,8 +24,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run every enabled module (default).
-    Run,
+    /// Run every enabled module with a tray icon (default).
+    Run {
+        /// Don't show the menu-bar / notification-area icon.
+        #[arg(long)]
+        no_tray: bool,
+    },
     /// Write a default config file with a freshly generated MWB key.
     Init {
         /// Overwrite an existing config file.
@@ -58,15 +64,18 @@ enum Cmd {
 /// Running modules, kept globally so the Ctrl+C handler can shut them down
 /// (restoring the cursor and releasing power assertions) before exiting.
 #[derive(Default)]
-struct Running {
-    mwb: Option<mwb::EngineHandle>,
-    zones: Option<fancyzones::Handle>,
-    awake: Option<awake::Awake>,
+pub(crate) struct Running {
+    pub(crate) mwb: Option<mwb::EngineHandle>,
+    pub(crate) zones: Option<fancyzones::Handle>,
+    pub(crate) awake: Option<awake::Awake>,
 }
 
-static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+/// The config file in use (for the tray's "copy key" / "open config folder").
+pub(crate) static CONFIG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-fn shutdown() {
+pub(crate) static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+pub(crate) fn shutdown() {
     if let Some(mut r) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).take() {
         if let Some(m) = &r.mwb {
             m.stop();
@@ -87,8 +96,8 @@ fn main() -> Result<()> {
         Some(p) => p,
         None => AppConfig::default_path().context("no config directory on this platform")?,
     };
-    match cli.cmd.unwrap_or(Cmd::Run) {
-        Cmd::Run => run(&path),
+    match cli.cmd.unwrap_or(Cmd::Run { no_tray: false }) {
+        Cmd::Run { no_tray } => run(&path, !no_tray),
         Cmd::Init { force } => {
             if path.exists() && !force {
                 bail!("{} already exists (use --force to overwrite)", path.display());
@@ -141,19 +150,23 @@ fn install_ctrlc() {
     });
 }
 
-fn run(path: &std::path::Path) -> Result<()> {
-    let cfg = AppConfig::load_or_default(path)?;
+fn run(path: &std::path::Path, tray: bool) -> Result<()> {
+    // First launch (e.g. opening PowerMac.app): create a config with a fresh key.
     if !path.exists() {
-        log::warn!("no config at {} — run `powermac init` first; using defaults", path.display());
+        AppConfig::with_new_key().save(path)?;
+        log::info!("created {} with a new Mouse Without Borders key", path.display());
     }
+    let cfg = AppConfig::load_or_default(path)?;
+    let _ = CONFIG_PATH.set(path.to_path_buf());
     let mut running = Running::default();
 
+    // Awake always exists (passive unless enabled) so the tray can switch it on.
+    let a = awake::Awake::new()?;
     if cfg.awake.enabled {
-        let a = awake::Awake::new()?;
         a.set(cfg.awake.settings)?;
         log::info!("awake: {:?}", cfg.awake.settings.mode);
-        running.awake = Some(a);
     }
+    running.awake = Some(a);
 
     if cfg.mwb.enabled {
         let backend = pm_input::backend()?;
@@ -165,14 +178,9 @@ fn run(path: &std::path::Path) -> Result<()> {
         } else {
             let h = mwb::Engine::start(cfg.mwb.settings.clone(), backend)?;
             log::info!("mouse without borders: {} listening on {}", h.machine_name(), h.local_addr());
-            if let Some(rx) = h.events() {
-                std::thread::spawn(move || {
-                    for ev in rx {
-                        log::info!("mwb: {ev:?}");
-                    }
-                });
-            }
+            let rx = h.events();
             running.mwb = Some(h);
+            clipboard::start(rx, cfg.mwb.settings.share_clipboard);
         }
     }
 
@@ -187,18 +195,36 @@ fn run(path: &std::path::Path) -> Result<()> {
         }
     }
 
-    if running.mwb.is_none() && running.zones.is_none() && running.awake.is_none() {
+    let anything = running.mwb.is_some() || running.zones.is_some() || cfg.awake.enabled;
+    if !anything && !tray {
         bail!("no module is running (check the config and permissions with `powermac doctor`)");
     }
     *RUNNING.lock().unwrap() = Some(running);
     install_ctrlc();
 
-    // The FancyZones overlay is AppKit UI, so on macOS the main thread runs the app loop.
     #[cfg(target_os = "macos")]
-    fancyzones::platform::run_main_loop();
-
-    #[cfg(not(target_os = "macos"))]
     {
+        if tray {
+            // NSStatusItem needs the shared NSApplication to exist first.
+            let mtm = objc2::MainThreadMarker::new().context("run must be on the main thread")?;
+            let _ = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            tray::install()?;
+        }
+        // The FancyZones overlay and the tray are AppKit UI: run the app loop here.
+        fancyzones::platform::run_main_loop();
+    }
+
+    #[cfg(windows)]
+    {
+        if tray {
+            tray::install()?;
+        }
+        win_message_loop();
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = tray;
         let (_tx, rx) = std::sync::mpsc::channel::<()>();
         let _ = rx.recv();
     }
@@ -206,6 +232,25 @@ fn run(path: &std::path::Path) -> Result<()> {
     {
         shutdown();
         Ok(())
+    }
+}
+
+/// Pump the Win32 message loop (the tray icon's hidden window lives on this
+/// thread) and refresh the tray menu every 2 seconds.
+#[cfg(windows)]
+fn win_message_loop() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, SetTimer, TranslateMessage, MSG, WM_TIMER};
+    unsafe {
+        SetTimer(std::ptr::null_mut(), 0, 2000, None);
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_TIMER && msg.hwnd.is_null() {
+                tray::refresh_tick();
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 }
 
