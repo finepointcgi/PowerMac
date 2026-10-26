@@ -12,3 +12,8 @@ pm-input = { path = "../pm-input" }
 mwb = { path = "../mwb" }
 fancyzones = { path = "../fancyzones" }
 awake = { path = "../awake" }
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+ctrlc = "3"
+chrono = "0.4"
+dirs = "5"
