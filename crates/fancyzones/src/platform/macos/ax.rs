@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use super::ffi::*;
 use super::screens;
 use crate::engine::{Monitor, WindowKey, WindowSystem};
+use crate::filters::{self, AppIdentity, WindowKind};
 use crate::geometry::{Point, Rect};
 
 /// `true` if this process is trusted for Accessibility. Never prompts.
@@ -191,6 +192,34 @@ impl AxElement {
         self.string_attr("AXRole")
     }
 
+    pub fn perform(&self, action: &str) -> Result<()> {
+        let a = CfString::new(action);
+        let e = unsafe { AXUIElementPerformAction(self.0, a.0) };
+        if e != kAXErrorSuccess {
+            return Err(ax_err("perform", action, e));
+        }
+        Ok(())
+    }
+
+    /// Elements of an array attribute (e.g. `AXWindows`).
+    pub fn elements_attr(&self, attr: &str) -> Vec<AxElement> {
+        let Ok(v) = self.copy_attr(attr) else { return vec![] };
+        let mut out = Vec::new();
+        unsafe {
+            if CFGetTypeID(v) == CFArrayGetTypeID() {
+                for i in 0..CFArrayGetCount(v) {
+                    let e = CFArrayGetValueAtIndex(v, i);
+                    if !e.is_null() && CFGetTypeID(e) == AXUIElementGetTypeID() {
+                        CFRetain(e);
+                        out.push(AxElement(e));
+                    }
+                }
+            }
+            CFRelease(v);
+        }
+        out
+    }
+
     /// CGWindowID via the `_AXUIElementGetWindow` SPI.
     pub fn window_id(&self) -> Option<u32> {
         let mut id = 0u32;
@@ -252,12 +281,23 @@ impl MacWindow {
         if pid == std::process::id() as i32 {
             return None;
         }
-        // Skip sheets/popovers that are not resizable/movable standard windows.
-        match w.string_attr("AXSubrole").as_deref() {
-            Some("AXStandardWindow") | Some("AXDialog") | None => {}
-            Some(_) => return None,
-        }
+        // Sheets etc. are filtered by the engine (`Engine::is_processable`).
         Some(MacWindow { element: w, pid })
+    }
+
+    /// Windows of an application (on the current Space).
+    pub fn of_app(pid: i32) -> Vec<MacWindow> {
+        AxElement::application(pid)
+            .elements_attr("AXWindows")
+            .into_iter()
+            .filter(|w| w.role().as_deref() == Some("AXWindow"))
+            .map(|element| MacWindow { element, pid })
+            .collect()
+    }
+
+    pub fn kind(&self) -> WindowKind {
+        let minimized = self.element.bool_attr("AXMinimized").unwrap_or(false);
+        filters::mac_window_kind(self.element.role().as_deref(), self.element.string_attr("AXSubrole").as_deref(), minimized)
     }
 
     pub fn is_fullscreen(&self) -> bool {
@@ -324,6 +364,62 @@ fn app_path(pid: i32) -> Option<String> {
     }
 }
 
+/// Bundle id, localized name and activation policy of a running app.
+pub(crate) fn app_info(pid: i32) -> (Option<String>, Option<String>, Option<isize>) {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let app: Option<Retained<AnyObject>> =
+            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+        let Some(app) = app else { return (None, None, None) };
+        let bid: Option<Retained<NSString>> = msg_send![&*app, bundleIdentifier];
+        let name: Option<Retained<NSString>> = msg_send![&*app, localizedName];
+        let policy: isize = msg_send![&*app, activationPolicy];
+        (bid.map(|s| s.to_string()), name.map(|s| s.to_string()), Some(policy))
+    })
+}
+
+/// Activate an app (bring all its windows forward).
+fn activate_app(pid: i32) {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let app: Option<Retained<AnyObject>> =
+            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier: pid];
+        if let Some(app) = app {
+            // NSApplicationActivateIgnoringOtherApps = 2 (deprecated but still honoured)
+            let _: bool = msg_send![&*app, activateWithOptions: 2usize];
+        }
+    })
+}
+
+/// Pids of regular (Dock) applications, excluding this process.
+pub(crate) fn regular_app_pids() -> Vec<i32> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSArray;
+    let me = std::process::id() as i32;
+    objc2::rc::autoreleasepool(|_| unsafe {
+        let ws: Option<Retained<AnyObject>> = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let Some(ws) = ws else { return vec![] };
+        let apps: Option<Retained<NSArray<AnyObject>>> = msg_send![&*ws, runningApplications];
+        let Some(apps) = apps else { return vec![] };
+        let mut out = Vec::new();
+        for a in apps.iter() {
+            let policy: isize = msg_send![&*a, activationPolicy];
+            let pid: i32 = msg_send![&*a, processIdentifier];
+            if policy == 0 && pid > 0 && pid != me {
+                out.push(pid);
+            }
+        }
+        out
+    })
+}
+
 /// macOS [`WindowSystem`] (Accessibility + NSScreen).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NativeWindowSystem;
@@ -382,5 +478,46 @@ impl WindowSystem for NativeWindowSystem {
 
     fn window_app_id(&self, w: &MacWindow) -> Option<String> {
         app_path(w.pid)
+    }
+
+    fn window_identity(&self, w: &MacWindow) -> AppIdentity {
+        let (bundle_id, name, _) = app_info(w.pid);
+        AppIdentity { path: app_path(w.pid), bundle_id, name, title: None }
+    }
+
+    fn window_kind(&self, w: &MacWindow) -> WindowKind {
+        if w.is_fullscreen() {
+            return WindowKind::Never;
+        }
+        w.kind()
+    }
+
+    fn window_from_key(&self, key: WindowKey) -> Option<MacWindow> {
+        let pid = (key >> 32) as i32;
+        let wid = (key & 0xFFFF_FFFF) as u32;
+        MacWindow::of_app(pid).into_iter().find(|w| w.element.window_id() == Some(wid))
+    }
+
+    fn focus_window(&self, w: &MacWindow) -> Result<()> {
+        ensure_trusted()?;
+        let _ = w.element.set_bool_attr("AXMain", true);
+        w.element.perform("AXRaise")?;
+        activate_app(w.pid);
+        Ok(())
+    }
+
+    fn all_windows(&self) -> Result<Vec<MacWindow>> {
+        ensure_trusted()?;
+        Ok(regular_app_pids().into_iter().flat_map(MacWindow::of_app).collect())
+    }
+
+    fn virtual_desktops(&self, _monitors: &[Monitor]) -> std::collections::HashMap<String, String> {
+        match screens::monitors_with_displays() {
+            Ok(v) => {
+                let pairs: Vec<(String, u32)> = v.into_iter().map(|(m, d)| (m.id, d)).collect();
+                super::spaces::spaces_for(&pairs)
+            }
+            Err(_) => Default::default(),
+        }
     }
 }

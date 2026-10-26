@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::edge_snap::{BottomEdgeAction, EdgeSnapConfig, TopEdgeAction};
+use crate::keys::vk;
 use crate::layout::{AppliedLayout, CustomLayout, OverlappingZonesAlgorithm};
 
 /// Modifier set for a hotkey.
@@ -45,6 +46,191 @@ impl Modifiers {
     }
 }
 
+/// A hotkey: modifiers + a Windows virtual-key code (see [`crate::keys`];
+/// the macOS backend translates the code to a `kVK_*` key code).
+///
+/// Serialized as `{"modifiers": {...}, "code": 192}`; a string such as
+/// `"Ctrl+Option+Grave"` / `"Win+Shift+\u{60}"` is accepted when loading (see
+/// [`Hotkey::from_str`](std::str::FromStr)). Modifier names: `Ctrl`/`Control`,
+/// `Alt`/`Option`/`Opt`, `Shift`, `Win`/`Cmd`/`Command`/`Meta`/`Super`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Hotkey {
+    pub modifiers: Modifiers,
+    /// Windows virtual-key code (`VK_*`), e.g. `0xC0` for the backtick key.
+    pub code: u16,
+}
+
+impl Hotkey {
+    pub const fn new(modifiers: Modifiers, code: u16) -> Self {
+        Self { modifiers, code }
+    }
+
+    /// `true` if `m` + `code` (a VK code) is exactly this hotkey.
+    pub fn matches(&self, m: Modifiers, code: u16) -> bool {
+        self.code != 0 && self.code == code && self.modifiers == m
+    }
+
+    /// Editor: Win+Shift+` (PowerToys) / Ctrl+Option+` on macOS (Cmd+Shift+`
+    /// is the system's "previous window of the app").
+    pub fn default_editor() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::new(Modifiers::new(true, true, false, false), vk::OEM_3)
+        } else {
+            Self::new(Modifiers::new(false, false, true, true), vk::OEM_3)
+        }
+    }
+
+    /// Next window in zone: Win+PgDn / Ctrl+Option+] on macOS (laptops have no PgDn key).
+    pub fn default_next_tab() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::new(Modifiers::new(true, true, false, false), vk::OEM_6)
+        } else {
+            Self::new(Modifiers::new(false, false, false, true), vk::NEXT)
+        }
+    }
+
+    /// Previous window in zone: Win+PgUp / Ctrl+Option+[ on macOS.
+    pub fn default_prev_tab() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::new(Modifiers::new(true, true, false, false), vk::OEM_4)
+        } else {
+            Self::new(Modifiers::new(false, false, false, true), vk::PRIOR)
+        }
+    }
+
+    /// Monitor rotation chord (hold, then Left/Right): Alt+X / Ctrl+Option+X
+    /// on macOS (Option+X types a character).
+    pub fn default_monitor_rotation() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::new(Modifiers::new(true, true, false, false), vk::KEY_X)
+        } else {
+            Self::new(Modifiers::new(false, true, false, false), vk::KEY_X)
+        }
+    }
+}
+
+impl std::fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mac = cfg!(target_os = "macos");
+        let m = &self.modifiers;
+        let mut parts: Vec<&str> = Vec::new();
+        if m.ctrl {
+            parts.push("Ctrl");
+        }
+        if m.alt {
+            parts.push(if mac { "Option" } else { "Alt" });
+        }
+        if m.shift {
+            parts.push("Shift");
+        }
+        if m.meta {
+            parts.push(if mac { "Cmd" } else { "Win" });
+        }
+        let key = crate::keys::vk_name(self.code);
+        parts.push(&key);
+        f.write_str(&parts.join("+"))
+    }
+}
+
+impl std::str::FromStr for Hotkey {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut m = Modifiers::default();
+        let mut code = None;
+        // "+" itself can be the key ("Ctrl++"): split carefully.
+        let s = s.trim();
+        let (mods, key) = match s.strip_suffix("++") {
+            Some(rest) => (rest, "+"),
+            None => match s.rfind('+') {
+                Some(i) => (&s[..i], &s[i + 1..]),
+                None => ("", s),
+            },
+        };
+        for p in mods.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+            match p.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => m.ctrl = true,
+                "alt" | "option" | "opt" => m.alt = true,
+                "shift" => m.shift = true,
+                "win" | "cmd" | "command" | "meta" | "super" => m.meta = true,
+                other => return Err(format!("unknown modifier '{other}'")),
+            }
+        }
+        if key == "+" {
+            code = Some(vk::OEM_PLUS);
+        } else if !key.is_empty() {
+            code = crate::keys::vk_from_name(key);
+        }
+        let code = code.ok_or_else(|| format!("unknown key '{key}'"))?;
+        Ok(Hotkey { modifiers: m, code })
+    }
+}
+
+impl<'de> Deserialize<'de> for Hotkey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Obj {
+            modifiers: Modifiers,
+            code: u16,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Str(String),
+            Obj(Obj),
+        }
+        match Repr::deserialize(d)? {
+            Repr::Str(s) => s.parse().map_err(serde::de::Error::custom),
+            Repr::Obj(o) => Ok(Hotkey { modifiers: o.modifiers, code: o.code }),
+        }
+    }
+}
+
+/// `LayoutNameLabelPlacement` (where the layout name chip is drawn).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutNameLabelPlacement {
+    TopLeft,
+    #[default]
+    TopCenter,
+    TopRight,
+    Center,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+impl LayoutNameLabelPlacement {
+    pub const ALL: [Self; 7] =
+        [Self::TopLeft, Self::TopCenter, Self::TopRight, Self::Center, Self::BottomLeft, Self::BottomCenter, Self::BottomRight];
+
+    /// PowerToys' integer value (`fancyzones_layoutNameLabelPlacement`).
+    pub fn from_index(i: i64) -> Self {
+        Self::ALL.get(i as usize).copied().unwrap_or_default()
+    }
+
+    /// Top-left of a `w`x`h` chip inside `area`, `mx`/`my` from the edges.
+    pub fn position(self, area: crate::geometry::Rect, w: i32, h: i32, mx: i32, my: i32) -> crate::geometry::Point {
+        use LayoutNameLabelPlacement::*;
+        let cx = area.left + (area.width() - w) / 2;
+        let left = area.left + mx;
+        let right = area.right - mx - w;
+        let top = area.top + my;
+        let bottom = area.bottom - my - h;
+        let cy = area.top + (area.height() - h) / 2;
+        let (x, y) = match self {
+            TopLeft => (left, top),
+            TopCenter => (cx, top),
+            TopRight => (right, top),
+            Center => (cx, cy),
+            BottomLeft => (left, bottom),
+            BottomCenter => (cx, bottom),
+            BottomRight => (right, bottom),
+        };
+        crate::geometry::Point::new(x, y)
+    }
+}
+
 fn d_snap() -> Modifiers {
     Modifiers::default_snap()
 }
@@ -52,8 +238,9 @@ fn d_extend() -> Modifiers {
     Modifiers::default_extend()
 }
 
-/// FancyZones `Settings` subset that applies to this port. Defaults match
-/// FancyZones except `override_snap_hotkeys` (on by default here).
+/// FancyZones `Settings` (see PowerToys `Settings.h`). Defaults match
+/// FancyZones except `override_snap_hotkeys` (on by default here) and the
+/// macOS hotkeys (see [`Hotkey`]'s `default_*` constructors / the crate docs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -99,6 +286,69 @@ pub struct Settings {
     pub overlapping_zones_algorithm: OverlappingZonesAlgorithm,
     /// Applied to monitors that have no entry in `applied_layouts`.
     pub default_layout: AppliedLayout,
+
+    // ---- mouse
+    /// Middle click while dragging toggles multi-zone spanning (like holding
+    /// Ctrl). When off, the middle button acts like the secondary button.
+    pub mouse_middle_click_spanning_multiple_zones: bool,
+    /// Mouse wheel while dragging (zones shown) cycles the layouts of the
+    /// monitor under the cursor (layouts with quick-switch keys, or all
+    /// custom layouts when fewer than two have keys).
+    pub mouse_wheel_layout_switch: bool,
+    /// Make the dragged window semi-transparent while zones are shown
+    /// (Windows only; macOS has no API to change another app's window alpha).
+    pub make_dragged_window_transparent: bool,
+
+    // ---- window behaviour
+    /// Move windows back into their zones when displays or work areas change.
+    pub display_change_move_windows: bool,
+    /// Flash the zones when a monitor's layout changes.
+    pub zone_set_change_flash_zones: bool,
+    /// Move zoned windows into the zone with the same index when a monitor's layout changes.
+    pub zone_set_change_move_windows: bool,
+    /// New windows without zone history open on the monitor under the cursor.
+    pub open_window_on_active_monitor: bool,
+    /// Ctrl+Win+Alt+0..9 (Ctrl+Option+Cmd+0..9 on macOS) applies the layout
+    /// bound to that key in `Config::layout_hotkeys`.
+    pub quick_layout_switch: bool,
+    pub flash_zones_on_quick_switch: bool,
+    /// Snap windows that have a (visible) owner — dialogs (macOS `AXDialog`).
+    pub allow_snap_child_windows: bool,
+    /// Snap popup windows without a caption/thick frame (macOS floating panels).
+    pub allow_snap_popup_windows: bool,
+    /// Windows 11: square corners on snapped windows (no-op elsewhere).
+    pub disable_round_corners: bool,
+    /// Apps never snapped or tracked: Windows exe names (`notepad.exe`, or a
+    /// path suffix / prefix of the file name as in PowerToys, or a window-title
+    /// substring); macOS bundle ids (`com.apple.Safari`), app names (`Safari`)
+    /// or bundle file names (`Safari.app`). Case-insensitive.
+    pub excluded_apps: Vec<String>,
+    /// Keep a separate layout per virtual desktop (Windows) / Space (macOS,
+    /// via the private `CGSManagedDisplayGetCurrentSpace`; falls back to one
+    /// layout per monitor if unavailable).
+    pub layouts_per_virtual_desktop: bool,
+
+    // ---- layout name label (shown on quick / wheel layout switch)
+    pub layout_name_label_enabled: bool,
+    pub layout_name_label_placement: LayoutNameLabelPlacement,
+    pub layout_name_label_text_color: String,
+    pub layout_name_label_background_color: String,
+    /// Points / DIPs.
+    pub layout_name_label_font_size: i32,
+    pub layout_name_label_padding: i32,
+    pub layout_name_label_duration_ms: u32,
+
+    // ---- hotkeys
+    /// Fires `StartOptions::on_open_editor`.
+    pub editor_hotkey: Hotkey,
+    /// Cycle focus between windows snapped into the same zone(s).
+    pub window_switching: bool,
+    pub next_tab_hotkey: Hotkey,
+    pub prev_tab_hotkey: Hotkey,
+    /// Hold `monitor_rotation_hotkey` and press Left/Right to move all windows
+    /// to the previous/next monitor.
+    pub monitor_rotation: bool,
+    pub monitor_rotation_hotkey: Hotkey,
 }
 
 impl Default for Settings {
@@ -129,6 +379,33 @@ impl Default for Settings {
             zone_highlight_opacity: 50,
             overlapping_zones_algorithm: OverlappingZonesAlgorithm::Smallest,
             default_layout: AppliedLayout::default(),
+            mouse_middle_click_spanning_multiple_zones: false,
+            mouse_wheel_layout_switch: false,
+            make_dragged_window_transparent: true,
+            display_change_move_windows: true,
+            zone_set_change_flash_zones: false,
+            zone_set_change_move_windows: false,
+            open_window_on_active_monitor: false,
+            quick_layout_switch: true,
+            flash_zones_on_quick_switch: true,
+            allow_snap_child_windows: false,
+            allow_snap_popup_windows: false,
+            disable_round_corners: false,
+            excluded_apps: Vec::new(),
+            layouts_per_virtual_desktop: true,
+            layout_name_label_enabled: true,
+            layout_name_label_placement: LayoutNameLabelPlacement::TopCenter,
+            layout_name_label_text_color: "#FFFFFF".into(),
+            layout_name_label_background_color: "#262626".into(),
+            layout_name_label_font_size: 36,
+            layout_name_label_padding: 12,
+            layout_name_label_duration_ms: 1500,
+            editor_hotkey: Hotkey::default_editor(),
+            window_switching: true,
+            next_tab_hotkey: Hotkey::default_next_tab(),
+            prev_tab_hotkey: Hotkey::default_prev_tab(),
+            monitor_rotation: false,
+            monitor_rotation_hotkey: Hotkey::default_monitor_rotation(),
         }
     }
 }
@@ -156,6 +433,15 @@ pub struct AppZoneHistoryEntry {
     pub zones: Vec<usize>,
 }
 
+/// Quick layout switch binding (FancyZones `layout-hotkeys.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayoutHotkey {
+    /// 0..=9
+    pub key: u8,
+    /// Custom layout uuid.
+    pub layout_uuid: String,
+}
+
 pub const CONFIG_VERSION: u32 = 1;
 
 fn d_version() -> u32 {
@@ -176,6 +462,19 @@ pub struct Config {
     /// App id (executable path / bundle path) -> last zone.
     #[serde(default)]
     pub app_zone_history: BTreeMap<String, AppZoneHistoryEntry>,
+    /// Quick layout switch keys (FancyZones `layout-hotkeys.json`).
+    #[serde(default)]
+    pub layout_hotkeys: Vec<LayoutHotkey>,
+    /// Customized template layouts (zone count / spacing / sensitivity per
+    /// template type, FancyZones `layout-templates.json`); see [`Config::template`].
+    #[serde(default)]
+    pub layout_templates: Vec<AppliedLayout>,
+    /// Virtual desktop / Space id -> monitor id -> layout. Used when
+    /// `settings.layouts_per_virtual_desktop` is on; a desktop without an entry
+    /// falls back to `applied_layouts` (which always holds the layout applied
+    /// last, like FancyZones cloning the last used desktop's layout).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub virtual_desktop_layouts: BTreeMap<String, BTreeMap<String, AppliedLayout>>,
 }
 
 impl Config {
@@ -230,6 +529,118 @@ impl Config {
             .get(monitor_id)
             .cloned()
             .unwrap_or_else(|| self.settings.default_layout.clone())
+    }
+
+    /// Applied layout for a monitor on virtual desktop `vd` (honours
+    /// `layouts_per_virtual_desktop`).
+    pub fn layout_for_desktop(&self, monitor_id: &str, vd: Option<&str>) -> AppliedLayout {
+        if let (true, Some(vd)) = (self.settings.layouts_per_virtual_desktop, vd) {
+            if let Some(l) = self.virtual_desktop_layouts.get(vd).and_then(|m| m.get(monitor_id)) {
+                return l.clone();
+            }
+        }
+        self.layout_for(monitor_id)
+    }
+
+    /// Store `layout` for a monitor: always as the monitor's layout, and also
+    /// for virtual desktop `vd` when per-desktop layouts are on.
+    pub fn set_layout(&mut self, monitor_id: &str, vd: Option<&str>, layout: AppliedLayout) {
+        if let (true, Some(vd)) = (self.settings.layouts_per_virtual_desktop, vd) {
+            self.virtual_desktop_layouts.entry(vd.to_string()).or_default().insert(monitor_id.to_string(), layout.clone());
+        }
+        self.applied_layouts.insert(monitor_id.to_string(), layout);
+    }
+
+    /// Template layout of `kind` with the user's customizations from
+    /// `layout_templates` (or FancyZones' defaults).
+    pub fn template(&self, kind: crate::layout::LayoutType) -> AppliedLayout {
+        self.layout_templates.iter().find(|t| t.kind == kind).cloned().map(|mut t| {
+            t.uuid = crate::layout::NULL_GUID.into();
+            t
+        }).unwrap_or_else(|| {
+            let n = match kind {
+                crate::layout::LayoutType::Grid => 4,
+                crate::layout::LayoutType::Blank => 0,
+                _ => crate::layout::defaults::ZONE_COUNT,
+            };
+            AppliedLayout::template(kind, n)
+        })
+    }
+
+    /// Custom layout uuid bound to quick-switch key `key`.
+    pub fn layout_for_hotkey(&self, key: u8) -> Option<&str> {
+        self.layout_hotkeys.iter().find(|h| h.key == key).map(|h| h.layout_uuid.as_str())
+    }
+
+    /// Bind (or with `None` unbind) a quick-switch key.
+    pub fn set_layout_hotkey(&mut self, key: u8, layout_uuid: Option<String>) {
+        self.layout_hotkeys.retain(|h| h.key != key);
+        if let Some(u) = layout_uuid {
+            self.layout_hotkeys.retain(|h| !crate::layout::guid_eq(&h.layout_uuid, &u));
+            self.layout_hotkeys.push(LayoutHotkey { key, layout_uuid: u });
+            self.layout_hotkeys.sort_by_key(|h| h.key);
+        }
+    }
+
+    /// Merge FancyZones' `layout-hotkeys.json` (`{"layout-hotkeys": [{"key": 0, "layout-id": "{...}"}]}`).
+    pub fn import_fancyzones_layout_hotkeys(&mut self, json: &str) -> Result<usize> {
+        let v: serde_json::Value = serde_json::from_str(json)?;
+        let arr = v.get("layout-hotkeys").and_then(|a| a.as_array()).context("missing 'layout-hotkeys' array")?;
+        let mut n = 0;
+        for item in arr {
+            let key = item.get("key").and_then(|k| k.as_i64());
+            let id = item.get("layout-id").and_then(|k| k.as_str());
+            match (key, id) {
+                (Some(k @ 0..=9), Some(id)) => {
+                    self.set_layout_hotkey(k as u8, Some(id.to_string()));
+                    n += 1;
+                }
+                _ => log::warn!("skipping layout hotkey {item}"),
+            }
+        }
+        Ok(n)
+    }
+
+    pub fn export_fancyzones_layout_hotkeys(&self) -> Result<String> {
+        let arr: Vec<serde_json::Value> = self
+            .layout_hotkeys
+            .iter()
+            .map(|h| serde_json::json!({"key": h.key, "layout-id": h.layout_uuid}))
+            .collect();
+        Ok(serde_json::to_string_pretty(&serde_json::json!({ "layout-hotkeys": arr }))?)
+    }
+
+    /// Merge FancyZones' `layout-templates.json`
+    /// (`{"layout-templates": [{"type": "columns", "zone-count": 3, ...}]}`).
+    pub fn import_fancyzones_layout_templates(&mut self, json: &str) -> Result<usize> {
+        let v: serde_json::Value = serde_json::from_str(json)?;
+        let arr = v.get("layout-templates").and_then(|a| a.as_array()).context("missing 'layout-templates' array")?;
+        let mut n = 0;
+        for item in arr {
+            match serde_json::from_value::<AppliedLayout>(item.clone()) {
+                Ok(mut t) if t.kind != crate::layout::LayoutType::Custom => {
+                    t.uuid = crate::layout::NULL_GUID.into();
+                    self.layout_templates.retain(|x| x.kind != t.kind);
+                    self.layout_templates.push(t);
+                    n += 1;
+                }
+                Ok(_) => log::warn!("skipping custom entry in layout templates"),
+                Err(e) => log::warn!("skipping layout template: {e}"),
+            }
+        }
+        Ok(n)
+    }
+
+    pub fn export_fancyzones_layout_templates(&self) -> Result<String> {
+        let arr: Vec<serde_json::Value> = self
+            .layout_templates
+            .iter()
+            .map(|t| {
+                serde_json::json!({"type": t.kind, "show-spacing": t.show_spacing, "spacing": t.spacing,
+                    "zone-count": t.zone_count, "sensitivity-radius": t.sensitivity_radius})
+            })
+            .collect();
+        Ok(serde_json::to_string_pretty(&serde_json::json!({ "layout-templates": arr }))?)
     }
 
     /// Insert or replace a custom layout (matched by uuid).
@@ -535,5 +946,97 @@ mod tests {
         if let Some(p) = Config::default_path() {
             assert!(p.ends_with("PowerMac/fancyzones.json") || p.ends_with("PowerMac\\fancyzones.json"));
         }
+    }
+
+    #[test]
+    fn new_settings_defaults_and_old_json() {
+        let s = Config::from_json(r#"{"settings": {"shift_drag": false, "restore_size": true}}"#).unwrap().settings;
+        assert!(s.display_change_move_windows && s.quick_layout_switch && s.flash_zones_on_quick_switch);
+        assert!(s.make_dragged_window_transparent && s.window_switching && s.layout_name_label_enabled);
+        assert!(!s.zone_set_change_move_windows && !s.zone_set_change_flash_zones && !s.monitor_rotation);
+        assert!(!s.mouse_middle_click_spanning_multiple_zones && !s.mouse_wheel_layout_switch);
+        assert!(!s.open_window_on_active_monitor && !s.allow_snap_child_windows && !s.allow_snap_popup_windows);
+        assert!(!s.disable_round_corners && s.excluded_apps.is_empty() && s.layouts_per_virtual_desktop);
+        assert_eq!(s.layout_name_label_placement, LayoutNameLabelPlacement::TopCenter);
+        assert_eq!(s.layout_name_label_text_color, "#FFFFFF");
+        assert_eq!(s.layout_name_label_background_color, "#262626");
+        assert_eq!((s.layout_name_label_font_size, s.layout_name_label_padding, s.layout_name_label_duration_ms), (36, 12, 1500));
+        assert_eq!(s.editor_hotkey, Hotkey::default_editor());
+        assert_eq!(s.monitor_rotation_hotkey.code, vk::KEY_X);
+        let c = Config::from_json("{}").unwrap();
+        assert!(c.layout_hotkeys.is_empty() && c.layout_templates.is_empty() && c.virtual_desktop_layouts.is_empty());
+        // and everything round-trips
+        let mut c = Config::default();
+        c.settings.excluded_apps = vec!["com.apple.Safari".into()];
+        c.settings.layout_name_label_placement = LayoutNameLabelPlacement::BottomLeft;
+        c.layout_hotkeys.push(LayoutHotkey { key: 1, layout_uuid: "{X}".into() });
+        assert_eq!(Config::from_json(&c.to_json().unwrap()).unwrap(), c);
+        let v: serde_json::Value = serde_json::from_str(&c.to_json().unwrap()).unwrap();
+        assert_eq!(v["settings"]["layout_name_label_placement"], "bottom-left");
+        assert_eq!(v["layout_hotkeys"][0]["layout_uuid"], "{X}");
+        assert!(v.get("virtual_desktop_layouts").is_none());
+    }
+
+    #[test]
+    fn hotkey_formats() {
+        let h: Hotkey = "Win+Shift+`".parse().unwrap();
+        assert_eq!(h, Hotkey::new(Modifiers::new(false, false, true, true), vk::OEM_3));
+        let h: Hotkey = "ctrl+option+grave".parse().unwrap();
+        assert_eq!(h, Hotkey::new(Modifiers::new(true, true, false, false), vk::OEM_3));
+        assert_eq!("Cmd+PageDown".parse::<Hotkey>().unwrap().code, vk::NEXT);
+        assert_eq!("Ctrl++".parse::<Hotkey>().unwrap().code, vk::OEM_PLUS);
+        assert!("Hyper+X".parse::<Hotkey>().is_err());
+        assert!("Ctrl+Nope".parse::<Hotkey>().is_err());
+        let h = Hotkey::new(Modifiers::new(true, true, true, true), vk::KEY_X);
+        assert_eq!(h.to_string().parse::<Hotkey>().unwrap(), h);
+        // JSON: object form, string form
+        let j = serde_json::to_value(h).unwrap();
+        assert_eq!(j["code"], 0x58);
+        assert_eq!(j["modifiers"]["meta"], true);
+        assert_eq!(serde_json::from_value::<Hotkey>(j).unwrap(), h);
+        let s: Settings = serde_json::from_str(r#"{"next_tab_hotkey": "Ctrl+Alt+]", "prev_tab_hotkey": {"code": 33}}"#).unwrap();
+        assert_eq!(s.next_tab_hotkey, Hotkey::new(Modifiers::new(true, true, false, false), vk::OEM_6));
+        assert_eq!(s.prev_tab_hotkey, Hotkey::new(Modifiers::default(), vk::PRIOR));
+        assert!(serde_json::from_str::<Settings>(r#"{"editor_hotkey": "Ctrl+Bogus"}"#).is_err());
+        assert!(h.matches(Modifiers::new(true, true, true, true), vk::KEY_X));
+        assert!(!h.matches(Modifiers::new(true, true, true, false), vk::KEY_X));
+        assert!(!Hotkey::default().matches(Modifiers::default(), 0));
+    }
+
+    #[test]
+    fn import_layout_hotkeys_and_templates() {
+        let mut c = Config::default();
+        let hk = r#"{"layout-hotkeys": [{"key": 0, "layout-id": "{A}"}, {"key": 9, "layout-id": "{B}"}, {"key": 12, "layout-id": "{C}"}]}"#;
+        assert_eq!(c.import_fancyzones_layout_hotkeys(hk).unwrap(), 2);
+        assert_eq!(c.layout_for_hotkey(9), Some("{B}"));
+        // rebinding a layout moves its key
+        c.set_layout_hotkey(4, Some("{a}".into()));
+        assert_eq!(c.layout_for_hotkey(0), None);
+        assert_eq!(c.layout_for_hotkey(4), Some("{a}"));
+        c.set_layout_hotkey(9, None);
+        assert_eq!(c.layout_hotkeys.len(), 1);
+        let mut d = Config::default();
+        d.import_fancyzones_layout_hotkeys(&c.export_fancyzones_layout_hotkeys().unwrap()).unwrap();
+        assert_eq!(d.layout_hotkeys, c.layout_hotkeys);
+
+        let t = r#"{"layout-templates": [
+            {"type": "blank", "show-spacing": false, "spacing": 0, "zone-count": 0, "sensitivity-radius": 0},
+            {"type": "columns", "show-spacing": true, "spacing": 8, "zone-count": 4, "sensitivity-radius": 30},
+            {"type": "custom"}, {"type": "bogus"}]}"#;
+        assert_eq!(c.import_fancyzones_layout_templates(t).unwrap(), 2);
+        let col = c.template(crate::layout::LayoutType::Columns);
+        assert_eq!((col.zone_count, col.spacing, col.sensitivity_radius), (4, 8, 30));
+        assert_eq!(c.template(crate::layout::LayoutType::Grid).zone_count, 4);
+        assert_eq!(c.template(crate::layout::LayoutType::Rows).zone_count, 3);
+        let mut d = Config::default();
+        d.import_fancyzones_layout_templates(&c.export_fancyzones_layout_templates().unwrap()).unwrap();
+        assert_eq!(d.layout_templates, c.layout_templates);
+    }
+
+    #[test]
+    fn label_placement_index() {
+        assert_eq!(LayoutNameLabelPlacement::from_index(0), LayoutNameLabelPlacement::TopLeft);
+        assert_eq!(LayoutNameLabelPlacement::from_index(6), LayoutNameLabelPlacement::BottomRight);
+        assert_eq!(LayoutNameLabelPlacement::from_index(42), LayoutNameLabelPlacement::TopCenter);
     }
 }

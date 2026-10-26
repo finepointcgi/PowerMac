@@ -103,7 +103,11 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
             (true, false) => {
                 let path = fancyzones_path();
                 let started = load_fancyzones(path.as_deref()).and_then(|c| {
-                    fancyzones::FancyZones::start_with(c, fancyzones::StartOptions { config_path: path.clone() })
+                    let opts = fancyzones::StartOptions {
+                        config_path: path.clone(),
+                        on_open_editor: Some(editor_launcher(path.clone())),
+                    };
+                    fancyzones::FancyZones::start_with(c, opts)
                 });
                 match started {
                     Ok(h) => {
@@ -122,6 +126,44 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
             _ => {}
         }
     }
+}
+
+/// FancyZones editor hotkey: run `<this exe> --config <config> editor
+/// --monitor <id>` (the `editor` subcommand edits `fancyzones.json`).
+fn editor_launcher(fz_path: Option<PathBuf>) -> fancyzones::EditorCallback {
+    Box::new(move |monitor: Option<String>| {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                log::error!("fancyzones editor: {e}");
+                return;
+            }
+        };
+        let config = crate::CONFIG_PATH
+            .get()
+            .cloned()
+            .or_else(pm_config::AppConfig::default_path)
+            .or_else(|| fz_path.as_ref().map(|p| p.with_file_name("config.json")));
+        let mut cmd = std::process::Command::new(exe);
+        if let Some(c) = &config {
+            cmd.arg("--config").arg(c);
+        }
+        cmd.arg("editor");
+        if let Some(m) = &monitor {
+            cmd.arg("--monitor").arg(m);
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                log::info!("fancyzones: editor started (pid {})", child.id());
+                // reap it when it exits
+                std::thread::spawn(move || {
+                    let mut child = child;
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => log::error!("fancyzones: starting the editor failed: {e}"),
+        }
+    })
 }
 
 /// `fancyzones.json` next to the config file in use (the default location
@@ -147,11 +189,17 @@ pub(crate) struct FzChanges {
     /// Monitor id -> layout (a removed entry maps to the new default layout).
     pub layouts: Vec<(String, fancyzones::AppliedLayout)>,
     pub settings: Option<fancyzones::Settings>,
+    pub layout_hotkeys: Option<Vec<fancyzones::LayoutHotkey>>,
+    pub layout_templates: Option<Vec<fancyzones::AppliedLayout>>,
 }
 
 impl FzChanges {
     pub fn is_empty(&self) -> bool {
-        self.custom.is_empty() && self.layouts.is_empty() && self.settings.is_none()
+        self.custom.is_empty()
+            && self.layouts.is_empty()
+            && self.settings.is_none()
+            && self.layout_hotkeys.is_none()
+            && self.layout_templates.is_none()
     }
 }
 
@@ -176,7 +224,9 @@ pub(crate) fn fz_changes(cur: &fancyzones::Config, new: &fancyzones::Config) -> 
         }
     }
     let settings = (cur.settings != new.settings).then(|| new.settings.clone());
-    FzChanges { custom, layouts, settings }
+    let layout_hotkeys = (cur.layout_hotkeys != new.layout_hotkeys).then(|| new.layout_hotkeys.clone());
+    let layout_templates = (cur.layout_templates != new.layout_templates).then(|| new.layout_templates.clone());
+    FzChanges { custom, layouts, settings, layout_hotkeys, layout_templates }
 }
 
 /// Push changes made to `fancyzones.json` (e.g. by the settings window) into
@@ -205,6 +255,12 @@ fn reload_fancyzones(running: &Running, path: &Path) {
     }
     if let Some(s) = ch.settings {
         z.update_settings(|cur| *cur = s);
+    }
+    if let Some(h) = ch.layout_hotkeys {
+        z.set_layout_hotkeys(h);
+    }
+    if let Some(t) = ch.layout_templates {
+        z.set_layout_templates(t);
     }
 }
 
@@ -339,5 +395,11 @@ mod tests {
         let ch = fz_changes(&cur, &new);
         assert!(ch.layouts.is_empty());
         assert!(!ch.settings.unwrap().shift_drag);
+
+        let mut new = cur.clone();
+        new.layout_hotkeys.push(fancyzones::LayoutHotkey { key: 1, layout_uuid: "{X}".into() });
+        let ch = fz_changes(&cur, &new);
+        assert_eq!(ch.layout_hotkeys.unwrap().len(), 1);
+        assert!(ch.layout_templates.is_none() && ch.settings.is_none());
     }
 }

@@ -4,6 +4,8 @@
 //! main dispatch queue.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
@@ -15,7 +17,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 use super::ffi::dispatch_main;
 use super::screens::global_to_cocoa;
-use crate::engine::OverlayState;
+use crate::engine::{LabelState, OverlayState};
 use crate::geometry::Rect;
 
 /// NSStatusWindowLevel — above normal and floating windows.
@@ -31,10 +33,104 @@ struct MonitorOverlay {
 
 thread_local! {
     static OVERLAYS: RefCell<Vec<MonitorOverlay>> = const { RefCell::new(Vec::new()) };
+    static LABEL: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+}
+
+/// Bumped by every [`show`]; a delayed hide only applies if unchanged.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+static LABEL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Show `state` for `ms` milliseconds (zone flash), unless something else
+/// is shown meanwhile.
+pub fn flash(state: OverlayState, ms: u64) {
+    show(state);
+    let g = GENERATION.load(Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(ms));
+        dispatch_main(move || {
+            if GENERATION.load(Ordering::SeqCst) == g {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    apply(mtm, &OverlayState::default());
+                }
+            }
+        });
+    });
+}
+
+/// Show the layout name label (any thread); it fades out after its duration.
+pub fn show_label(label: LabelState) {
+    let g = LABEL_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let total = label.duration_ms as u64;
+    dispatch_main(move || {
+        if let Some(mtm) = MainThreadMarker::new() {
+            apply_label(mtm, &label);
+        }
+    });
+    std::thread::spawn(move || {
+        let fade = (total / 3).min(300);
+        std::thread::sleep(Duration::from_millis(total - fade));
+        const STEPS: u64 = 6;
+        for i in 1..=STEPS {
+            if LABEL_GENERATION.load(Ordering::SeqCst) != g {
+                return;
+            }
+            let alpha = 1.0 - i as f64 / STEPS as f64;
+            dispatch_main(move || {
+                if LABEL_GENERATION.load(Ordering::SeqCst) != g {
+                    return;
+                }
+                LABEL.with(|l| {
+                    if let Some(w) = l.borrow().as_ref() {
+                        if alpha <= 0.0 {
+                            w.orderOut(None);
+                        } else {
+                            w.setAlphaValue(alpha);
+                        }
+                    }
+                });
+            });
+            std::thread::sleep(Duration::from_millis(fade / STEPS));
+        }
+    });
+}
+
+fn apply_label(mtm: MainThreadMarker, l: &LabelState) {
+    let text = NSTextField::labelWithString(&NSString::from_str(&l.text), mtm);
+    text.setFont(Some(&NSFont::boldSystemFontOfSize(l.font_size as f64)));
+    text.setTextColor(Some(&color(l.text_color, 1.0)));
+    text.setAlignment(NSTextAlignment::Center);
+    text.sizeToFit();
+    let ts: NSSize = text.frame().size;
+    let max_w = (l.area.width() as f64 * 0.96 - 2.0 * l.padding as f64).max(1.0);
+    let tw = ts.width.min(max_w);
+    let pad = l.padding as f64;
+    let (w, h) = ((tw + 2.0 * pad).ceil() as i32, (ts.height + 2.0 * pad).ceil() as i32);
+    let origin = l.chip_origin(w, h);
+    let global = Rect::from_xywh(origin.x, origin.y, w, h);
+    let frame = global_to_cocoa(global, primary_height(mtm));
+    LABEL.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let window = cell.get_or_insert_with(|| make_window(mtm, frame)).clone();
+        let content = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w as f64, h as f64)));
+        let chip = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w as f64, h as f64)));
+        chip.setBoxType(NSBoxType::Custom);
+        chip.setTitlePosition(NSTitlePosition::NoTitle);
+        chip.setBorderWidth(0.0);
+        chip.setCornerRadius(8.0);
+        chip.setFillColor(&color(l.background_color, 1.0));
+        content.addSubview(&chip);
+        text.setFrame(NSRect::new(NSPoint::new(pad, pad), NSSize::new(tw, ts.height)));
+        content.addSubview(&text);
+        window.setContentView(Some(&content));
+        window.setFrame_display(frame, true);
+        window.setAlphaValue(1.0);
+        window.orderFrontRegardless();
+    });
 }
 
 /// Show/update the overlay (any thread).
 pub fn show(state: OverlayState) {
+    GENERATION.fetch_add(1, Ordering::SeqCst);
     dispatch_main(move || {
         if let Some(mtm) = MainThreadMarker::new() {
             apply(mtm, &state);
@@ -49,7 +145,14 @@ pub fn hide() {
 
 /// Close and release all overlay windows (any thread).
 pub fn destroy() {
+    LABEL_GENERATION.fetch_add(1, Ordering::SeqCst);
     dispatch_main(|| {
+        LABEL.with(|l| {
+            if let Some(w) = l.borrow_mut().take() {
+                w.orderOut(None);
+                w.close();
+            }
+        });
         OVERLAYS.with(|o| {
             for ov in o.borrow_mut().drain(..) {
                 ov.window.orderOut(None);

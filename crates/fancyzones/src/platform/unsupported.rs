@@ -40,6 +40,10 @@ impl WindowSystem for NativeWindowSystem {
     }
 }
 
+pub fn monitor_under_cursor() -> Option<String> {
+    None
+}
+
 pub(crate) struct Runtime;
 
 impl Runtime {

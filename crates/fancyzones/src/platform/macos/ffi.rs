@@ -61,6 +61,8 @@ pub const kCGEventLeftMouseDragged: u32 = 6;
 pub const kCGEventKeyDown: u32 = 10;
 pub const kCGEventKeyUp: u32 = 11;
 pub const kCGEventFlagsChanged: u32 = 12;
+pub const kCGEventScrollWheel: u32 = 22;
+pub const kCGEventOtherMouseDown: u32 = 25;
 pub const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
 pub const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
@@ -71,12 +73,21 @@ pub const kCGEventFlagMaskAlternate: u64 = 0x0008_0000;
 pub const kCGEventFlagMaskCommand: u64 = 0x0010_0000;
 
 pub const kCGKeyboardEventKeycode: u32 = 9;
+pub const kCGKeyboardEventAutorepeat: u32 = 8;
+pub const kCGMouseEventButtonNumber: u32 = 3;
+pub const kCGScrollWheelEventDeltaAxis1: u32 = 11;
+pub const kCGScrollWheelEventIsContinuous: u32 = 88;
+pub const kCGScrollWheelEventPointDeltaAxis1: u32 = 96;
 pub const kCGEventSourceStateCombinedSessionState: i32 = 0;
 
 pub const kVK_LeftArrow: i64 = 0x7B;
 pub const kVK_RightArrow: i64 = 0x7C;
 pub const kVK_DownArrow: i64 = 0x7D;
 pub const kVK_UpArrow: i64 = 0x7E;
+
+pub type AXObserverRef = *const c_void;
+pub type AXObserverCallback =
+    extern "C" fn(observer: AXObserverRef, element: AXUIElementRef, notification: CFStringRef, refcon: *mut c_void);
 
 pub type CGEventTapCallBack =
     extern "C" fn(proxy: CGEventTapProxy, etype: u32, event: CGEventRef, user_info: *mut c_void) -> CGEventRef;
@@ -113,6 +124,10 @@ extern "C" {
     pub fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     pub fn CFMachPortCreateRunLoopSource(alloc: CFAllocatorRef, port: CFMachPortRef, order: isize) -> CFRunLoopSourceRef;
     pub fn CFMachPortInvalidate(port: CFMachPortRef);
+    pub fn CFArrayGetCount(a: CFTypeRef) -> isize;
+    pub fn CFArrayGetValueAtIndex(a: CFTypeRef, i: isize) -> CFTypeRef;
+    pub fn CFArrayGetTypeID() -> CFTypeID;
+    pub fn CFUUIDCreateString(alloc: CFAllocatorRef, uuid: CFTypeRef) -> CFStringRef;
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -131,6 +146,11 @@ extern "C" {
     pub fn AXValueGetTypeID() -> CFTypeID;
     /// Private but long-stable SPI used by most window managers.
     pub fn _AXUIElementGetWindow(e: AXUIElementRef, wid: *mut u32) -> AXError;
+    pub fn AXUIElementPerformAction(e: AXUIElementRef, action: CFStringRef) -> AXError;
+    pub fn AXObserverCreate(pid: i32, callback: AXObserverCallback, out: *mut AXObserverRef) -> AXError;
+    pub fn AXObserverAddNotification(o: AXObserverRef, e: AXUIElementRef, n: CFStringRef, refcon: *mut c_void) -> AXError;
+    pub fn AXObserverRemoveNotification(o: AXObserverRef, e: AXUIElementRef, n: CFStringRef) -> AXError;
+    pub fn AXObserverGetRunLoopSource(o: AXObserverRef) -> CFRunLoopSourceRef;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -163,6 +183,28 @@ extern "C" {
     pub fn dispatch_async_f(queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
     // libproc
     pub fn proc_pidpath(pid: i32, buf: *mut c_void, size: u32) -> i32;
+    pub fn dlsym(handle: *mut c_void, symbol: *const std::ffi::c_char) -> *mut c_void;
+}
+
+/// `RTLD_DEFAULT` on macOS.
+pub const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+
+/// Look up a (private) symbol in the already-loaded images.
+pub fn find_symbol(name: &std::ffi::CStr) -> *mut c_void {
+    unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) }
+}
+
+/// Current cursor position (global, top-left origin).
+pub fn cursor_location() -> Option<CGPoint> {
+    unsafe {
+        let e = CGEventCreate(std::ptr::null());
+        if e.is_null() {
+            return None;
+        }
+        let p = CGEventGetLocation(e);
+        CFRelease(e);
+        Some(p)
+    }
 }
 
 pub const fn event_mask(t: u32) -> u64 {

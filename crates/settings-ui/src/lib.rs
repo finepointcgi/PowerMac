@@ -7,6 +7,7 @@
 //! the last change, and the running app's config watcher applies them.
 
 mod app;
+pub mod editor;
 pub mod model;
 mod platform;
 mod record;
@@ -36,4 +37,31 @@ pub fn run(config_path: PathBuf) -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("settings window: {e}"))
+}
+
+/// Open the FancyZones layout editor for the `fancyzones.json` next to
+/// `config_path`, starting on monitor `monitor` (an id from
+/// `fancyzones::Monitor::id`; default: the main monitor). Blocks until the
+/// window is closed. Must be called on the main thread.
+pub fn run_editor(config_path: PathBuf, monitor: Option<String>) -> anyhow::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("FancyZones Layout Editor")
+            .with_app_id("com.powermac.fancyzones-editor")
+            .with_inner_size([1120.0, 780.0])
+            .with_min_inner_size([720.0, 480.0])
+            .with_icon(platform::icon())
+            .with_active(true),
+        ..Default::default()
+    };
+    let fz_path = model::fancyzones_path(&config_path);
+    eframe::run_native(
+        "FancyZones Layout Editor",
+        options,
+        Box::new(move |_cc| {
+            platform::become_foreground_app();
+            Ok(Box::new(editor::EditorApp::new(fz_path, monitor)))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("layout editor window: {e}"))
 }

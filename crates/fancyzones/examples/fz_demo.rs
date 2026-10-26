@@ -7,9 +7,11 @@
 //! cargo run -p fancyzones --example fz_demo -- --snap-dir right   # keyboard-style snap
 //! cargo run -p fancyzones --example fz_demo -- --overlay 3        # draw zones overlay for 3 s
 //! cargo run -p fancyzones --example fz_demo -- --watch 30         # run hooks (drag w/ Shift, hotkeys) for 30 s
+//! cargo run -p fancyzones --example fz_demo -- --config c.json --save out.json --watch 30
 //! cargo run -p fancyzones --example fz_demo -- --import-custom custom-layouts.json
 //! ```
-//! The config is read from the default path if it exists but never written.
+//! The config is read from `--config` or the default path; it is only
+//! written to `--save <path>`.
 
 use std::time::Duration;
 
@@ -23,8 +25,13 @@ fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 }
 
 fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("fancyzones=info")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut config = Config::load_or_default().unwrap_or_else(|e| {
+    let loaded = match arg(&args, "--config") {
+        Some(p) => Config::load_from(std::path::Path::new(p)),
+        None => Config::load_or_default(),
+    };
+    let mut config = loaded.unwrap_or_else(|e| {
         eprintln!("warning: could not load config ({e:#}); using defaults");
         Config::default()
     });
@@ -51,7 +58,8 @@ fn main() -> Result<()> {
     println!("accessibility/window-control permission: {}", platform::has_permissions());
     let monitors = ws.monitors()?;
     let mut engine = Engine::new(config.clone());
-    let areas = engine.work_areas(&monitors);
+    println!("virtual desktops / Spaces: {:?}", ws.virtual_desktops(&monitors));
+    let areas = engine.areas(&ws)?;
     for (i, a) in areas.iter().enumerate() {
         let m = &a.monitor;
         println!(
@@ -126,7 +134,12 @@ fn main() -> Result<()> {
 
     if let Some(secs) = arg(&args, "--watch") {
         let secs: f64 = secs.parse()?;
-        let mut handle = match FancyZones::start_with(config, StartOptions { config_path: None }) {
+        // --save <path>: persist changes there (never to the default config)
+        let opts = StartOptions {
+            config_path: arg(&args, "--save").map(std::path::PathBuf::from),
+            on_open_editor: Some(Box::new(|m| println!("editor hotkey: monitor {m:?}"))),
+        };
+        let mut handle = match FancyZones::start_with(config, opts) {
             Ok(h) => h,
             Err(e) => {
                 println!("FancyZones::start failed (graceful): {e:#}");

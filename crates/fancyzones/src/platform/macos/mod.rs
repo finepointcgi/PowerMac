@@ -6,11 +6,13 @@ mod ffi;
 mod overlay;
 mod runtime;
 mod screens;
+mod spaces;
 
 use std::time::{Duration, Instant};
 
 pub use ax::{has_permissions, AxElement, MacWindow, NativeWindowSystem};
 pub(crate) use runtime::Runtime;
+pub use runtime::monitor_under_cursor;
 pub use screens::{cocoa_to_global, global_to_cocoa};
 
 /// Show the zone overlay directly (any thread; drawn on the main thread).

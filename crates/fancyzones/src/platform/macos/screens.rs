@@ -86,6 +86,11 @@ fn monitor_id(display: u32) -> String {
 }
 
 pub fn monitors() -> Result<Vec<Monitor>> {
+    Ok(monitors_with_displays()?.into_iter().map(|(m, _)| m).collect())
+}
+
+/// Monitors with their CGDirectDisplayID.
+pub fn monitors_with_displays() -> Result<Vec<(Monitor, u32)>> {
     let raw = raw_screens();
     if raw.is_empty() {
         bail!("no screens reported by NSScreen");
@@ -93,20 +98,20 @@ pub fn monitors() -> Result<Vec<Monitor>> {
     // screens[0] is the screen with the menu bar; its frame origin is (0,0).
     let primary_h = raw[0].frame.size.height;
     let main = unsafe { CGMainDisplayID() };
-    let mut out: Vec<Monitor> = Vec::new();
+    let mut out: Vec<(Monitor, u32)> = Vec::new();
     for s in &raw {
         let mut id = monitor_id(s.display_id);
-        if out.iter().any(|m| m.id == id) {
+        if out.iter().any(|(m, _)| m.id == id) {
             id = format!("{id}-{}", s.display_id);
         }
-        out.push(Monitor {
+        out.push((Monitor {
             id,
             name: if s.name.is_empty() { format!("Display {}", s.display_id) } else { s.name.clone() },
             frame: cocoa_to_global(s.frame, primary_h),
             work_area: cocoa_to_global(s.visible, primary_h),
             scale: s.scale,
             primary: s.display_id == main,
-        });
+        }, s.display_id));
     }
     Ok(out)
 }

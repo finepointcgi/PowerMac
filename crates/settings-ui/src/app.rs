@@ -649,6 +649,12 @@ impl SettingsApp {
     fn fancyzones(&mut self, ui: &mut Ui) {
         enable_row(ui, "Enable FancyZones", &mut self.app.cfg.fancyzones.enabled);
         ui.weak("Layouts and settings are written to fancyzones.json; a running PowerMac applies them within about a second.");
+        if ui.button("Edit layouts…").on_hover_text("Open the FancyZones layout editor").clicked() {
+            let monitor = (self.fz_selected != DEFAULT_TARGET).then(|| self.fz_selected.clone());
+            if let Err(e) = crate::editor::open_editor_process(&self.config_path, monitor.as_deref()) {
+                log::warn!("layout editor: {e:#}");
+            }
+        }
         let targets = self.fz_targets();
         if !targets.iter().any(|t| t.id == self.fz_selected) {
             self.fz_selected = DEFAULT_TARGET.into();

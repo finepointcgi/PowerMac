@@ -40,6 +40,7 @@ struct Ui {
     awake_display: CheckMenuItem,
     zones_status: MenuItem,
     layouts: Vec<CheckMenuItem>,
+    edit_layouts: MenuItem,
     copy_key: MenuItem,
     login: CheckMenuItem,
     find_mouse: MenuItem,
@@ -85,6 +86,8 @@ pub fn install() -> anyhow::Result<()> {
     for l in &layouts {
         zones.append(l)?;
     }
+    let edit_layouts = MenuItem::new("Edit layouts…", true, None);
+    zones.append_items(&[&PredefinedMenuItem::separator(), &edit_layouts])?;
 
     let copy_key = MenuItem::new("Copy security key", true, None);
     let open_privacy = MenuItem::new("Open Privacy settings…", cfg!(target_os = "macos"), None);
@@ -142,6 +145,7 @@ pub fn install() -> anyhow::Result<()> {
             awake_display,
             zones_status,
             layouts,
+            edit_layouts,
             copy_key,
             login,
             scroll_mouse,
@@ -179,6 +183,10 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     }
     if id == ui.settings.id() {
         open_settings();
+        return;
+    }
+    if id == ui.edit_layouts.id() {
+        open_editor();
         return;
     }
     if id == ui.paste_plain.id() {
@@ -431,15 +439,27 @@ fn copy_key() {
 
 /// The settings window process, if one was started from the menu.
 static SETTINGS_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+/// The FancyZones layout editor process, if one was started from the menu.
+static EDITOR_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 
 /// Start `powermac --config <path> settings` as a separate process (its
 /// event loop can't share this process' main loop), or bring the one that
 /// is already open to the front.
 fn open_settings() {
-    let mut child = SETTINGS_CHILD.lock().unwrap_or_else(|e| e.into_inner());
+    open_child(&SETTINGS_CHILD, "settings");
+}
+
+/// Start `powermac --config <path> editor` (the FancyZones layout editor),
+/// or bring the one that is already open to the front.
+fn open_editor() {
+    open_child(&EDITOR_CHILD, "editor");
+}
+
+fn open_child(slot: &std::sync::Mutex<Option<std::process::Child>>, subcommand: &str) {
+    let mut child = slot.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(c) = child.as_mut() {
         if let Ok(None) = c.try_wait() {
-            log::info!("settings window already open (pid {})", c.id());
+            log::info!("{subcommand} window already open (pid {})", c.id());
             activate_process(c.id());
             return;
         }
@@ -448,12 +468,12 @@ fn open_settings() {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
-            log::warn!("settings: {e}");
+            log::warn!("{subcommand}: {e}");
             return;
         }
     };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--config").arg(&path).arg("settings");
+    cmd.arg("--config").arg(&path).arg(subcommand);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -462,10 +482,10 @@ fn open_settings() {
     }
     match cmd.spawn() {
         Ok(c) => {
-            log::info!("settings window started (pid {})", c.id());
+            log::info!("{subcommand} window started (pid {})", c.id());
             *child = Some(c);
         }
-        Err(e) => log::warn!("settings: could not start the settings window: {e}"),
+        Err(e) => log::warn!("{subcommand}: could not start the window: {e}"),
     }
 }
 

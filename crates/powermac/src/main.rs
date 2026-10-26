@@ -47,6 +47,13 @@ enum Cmd {
     /// Open the settings window (edits config.json and fancyzones.json; a running
     /// PowerMac applies the changes within about a second).
     Settings,
+    /// Open the FancyZones layout editor (edits fancyzones.json; a running
+    /// PowerMac applies the changes within about a second).
+    Editor {
+        /// Monitor id to start on (default: the main monitor).
+        #[arg(long)]
+        monitor: Option<String>,
+    },
     /// Keep the computer awake (standalone, like PowerToys Awake's CLI).
     Awake {
         /// Keep the display on too.
@@ -137,6 +144,7 @@ fn main() -> Result<()> {
         }
         Cmd::Doctor { prompt } => doctor(&path, prompt),
         Cmd::Settings => settings_ui::run(path),
+        Cmd::Editor { monitor } => settings_ui::run_editor(path, monitor),
         Cmd::Awake { display_on, time_limit, expire_at, pid } => {
             let mode = match (time_limit, expire_at) {
                 (Some(_), Some(_)) => bail!("use either --time-limit or --expire-at"),
