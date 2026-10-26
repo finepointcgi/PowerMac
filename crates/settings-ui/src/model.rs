@@ -700,8 +700,72 @@ pub fn validate_layout(l: &fancyzones::AppliedLayout, custom: &[fancyzones::Cust
     fancyzones::Layout::new(l, fancyzones::Rect::new(0, 0, 1920, 1080), custom).err().map(|e| e.to_string())
 }
 
+/// A FancyZones hotkey in the settings window's key syntax ("" = none).
+pub fn format_fz_hotkey(h: &fancyzones::Hotkey) -> String {
+    let m = h.modifiers;
+    Combo { win: m.meta, ctrl: m.ctrl, alt: m.alt, shift: m.shift, vk: h.code as u32 }.to_text()
+}
+
+/// Parse a FancyZones hotkey: the settings syntax (what Record produces),
+/// or anything `fancyzones::Hotkey::from_str` accepts. Empty = none (code 0).
+pub fn parse_fz_hotkey(s: &str) -> Result<fancyzones::Hotkey, String> {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("none") {
+        return Ok(fancyzones::Hotkey::default());
+    }
+    match parse_hotkey(t) {
+        Ok(h) => Ok(fancyzones::Hotkey::new(fancyzones::Modifiers::new(h.ctrl, h.alt, h.shift, h.win), h.code as u16)),
+        Err(e) => t.parse::<fancyzones::Hotkey>().map_err(|_| e),
+    }
+}
+
+/// The FancyZones hotkeys that are switched on, with their labels.
+pub fn fz_active_hotkeys(s: &fancyzones::Settings) -> Vec<(&'static str, fancyzones::Hotkey)> {
+    let mut v = vec![("Layout editor", s.editor_hotkey)];
+    if s.window_switching {
+        v.push(("Next window in zone", s.next_tab_hotkey));
+        v.push(("Previous window in zone", s.prev_tab_hotkey));
+    }
+    if s.monitor_rotation {
+        v.push(("Monitor rotation", s.monitor_rotation_hotkey));
+    }
+    v
+}
+
 pub fn validate_fancyzones(c: &fancyzones::Config) -> Vec<Problem> {
     let mut out = Vec::new();
+    let s = &c.settings;
+    for (name, color) in [
+        ("Zone color", &s.zone_color),
+        ("Border color", &s.zone_border_color),
+        ("Highlight color", &s.zone_highlight_color),
+        ("Number color", &s.zone_number_color),
+        ("Layout name text color", &s.layout_name_label_text_color),
+        ("Layout name background", &s.layout_name_label_background_color),
+    ] {
+        if fancyzones::config::parse_hex_color(color).is_none() {
+            out.push(problem(Page::FancyZones, format!("{name} “{color}” isn't a #RRGGBB color.")));
+        }
+    }
+    let hks = fz_active_hotkeys(s);
+    for (i, (name, h)) in hks.iter().enumerate() {
+        let required = *name != "Layout editor";
+        if h.code == 0 && required {
+            out.push(problem(Page::FancyZones, format!("{name}: pick a shortcut or turn the feature off.")));
+        }
+        if h.code != 0 && h.modifiers == fancyzones::Modifiers::default() {
+            out.push(problem(Page::FancyZones, format!("{name}: add at least one modifier.")));
+        }
+        if let Some((other, _)) = hks[..i].iter().find(|(_, o)| o.code != 0 && o == h) {
+            out.push(problem(Page::FancyZones, format!("{name} uses the same shortcut as {other}.")));
+        }
+    }
+    if s.excluded_apps.iter().any(|a| a.trim().is_empty()) {
+        out.push(problem(Page::FancyZones, "Excluded apps: remove the empty entry."));
+    }
+    if s.layout_name_label_font_size < 6 || s.layout_name_label_font_size > 200 {
+        out.push(problem(Page::FancyZones, "Layout name font size must be 6–200.".to_string()));
+    }
     if let Some(e) = validate_layout(&c.settings.default_layout, &c.custom_layouts) {
         out.push(problem(Page::FancyZones, format!("Default layout: {e}")));
     }
@@ -900,6 +964,41 @@ mod tests {
         assert_eq!(c.mwb.settings.matrix, ["mac", "", "pc"]);
         assert_eq!(c.mwb.settings.peers["pc"], "10.1.1.1");
         assert!(c.keyboard_manager.paste_plain_text.restore_clipboard);
+    }
+
+    #[test]
+    fn fancyzones_hotkeys_parse_and_validate() {
+        use fancyzones::{Hotkey, Settings};
+        let d = Settings::default();
+        for h in [d.editor_hotkey, d.next_tab_hotkey, d.prev_tab_hotkey, d.monitor_rotation_hotkey] {
+            let t = format_fz_hotkey(&h);
+            assert_eq!(parse_fz_hotkey(&t).unwrap(), h, "{t}");
+            // fancyzones' own spelling is accepted too.
+            assert_eq!(parse_fz_hotkey(&h.to_string()).unwrap(), h, "{h}");
+        }
+        assert_eq!(parse_fz_hotkey("").unwrap(), Hotkey::default());
+        assert_eq!(parse_fz_hotkey("none").unwrap().code, 0);
+        assert!(parse_fz_hotkey("Ctrl+Nope").is_err());
+        assert!(parse_fz_hotkey("Ctrl+A+B").is_err());
+        let h = parse_fz_hotkey("Ctrl+Shift+K").unwrap();
+        assert!(h.modifiers.ctrl && h.modifiers.shift && !h.modifiers.alt && h.code == 0x4B);
+
+        let mut c = fancyzones::Config::default();
+        assert!(validate_fancyzones(&c).is_empty(), "{:?}", validate_fancyzones(&c));
+        // Conflicts only count for features that are on.
+        c.settings.monitor_rotation_hotkey = c.settings.editor_hotkey;
+        assert!(validate_fancyzones(&c).is_empty());
+        c.settings.monitor_rotation = true;
+        assert_eq!(validate_fancyzones(&c).len(), 1);
+        c.settings.monitor_rotation_hotkey = Hotkey::default();
+        assert!(validate_fancyzones(&c)[0].message.contains("pick a shortcut"));
+        c.settings.monitor_rotation = false;
+        c.settings.next_tab_hotkey = Hotkey::new(fancyzones::Modifiers::default(), 0x41);
+        assert!(validate_fancyzones(&c)[0].message.contains("modifier"));
+        c.settings.window_switching = false;
+        c.settings.layout_name_label_text_color = "white".into();
+        c.settings.excluded_apps = vec!["  ".into()];
+        assert_eq!(validate_fancyzones(&c).len(), 2);
     }
 
     #[test]

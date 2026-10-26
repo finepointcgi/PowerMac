@@ -81,3 +81,37 @@ pub fn icon() -> eframe::egui::IconData {
     }
     eframe::egui::IconData { rgba: px, width: N as u32, height: N as u32 }
 }
+
+/// Running regular (Dock) apps as (name, bundle id), sorted by name; empty
+/// where this isn't available.
+pub fn running_apps() -> Vec<(String, String)> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
+        let mut v: Vec<(String, String)> = NSWorkspace::sharedWorkspace()
+            .runningApplications()
+            .iter()
+            .filter(|a| a.activationPolicy() == NSApplicationActivationPolicy::Regular)
+            .filter_map(|a| {
+                let id = a.bundleIdentifier()?.to_string();
+                let name = a.localizedName().map(|n| n.to_string()).unwrap_or_else(|| id.clone());
+                Some((name, id))
+            })
+            .collect();
+        v.sort_by_key(|(n, _)| n.to_lowercase());
+        v.dedup_by(|a, b| a.1 == b.1);
+        v
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn running_apps_lists_bundle_ids() {
+        for (name, id) in super::running_apps() {
+            assert!(!name.is_empty() && !id.is_empty());
+        }
+    }
+}

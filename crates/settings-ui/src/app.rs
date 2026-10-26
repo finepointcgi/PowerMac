@@ -83,6 +83,10 @@ pub struct SettingsApp {
     confirm_new_key: bool,
     monitors: Vec<fancyzones::Monitor>,
     fz_selected: String,
+    /// Text of each FancyZones hotkey field and the value it was made from.
+    fz_hk_text: std::collections::BTreeMap<&'static str, (String, fancyzones::Hotkey)>,
+    fz_new_app: String,
+    running_apps: Option<Vec<(String, String)>>,
     login: bool,
     login_error: Option<String>,
     perms: Option<(bool, bool)>,
@@ -107,6 +111,9 @@ impl SettingsApp {
             confirm_new_key: false,
             monitors: Vec::new(),
             fz_selected: DEFAULT_TARGET.into(),
+            fz_hk_text: Default::default(),
+            fz_new_app: String::new(),
+            running_apps: None,
             login: pm_config::login::is_enabled(),
             login_error: None,
             perms: crate::platform::permissions(),
@@ -715,15 +722,25 @@ impl SettingsApp {
 
         let s = &mut self.fz.settings;
         let mods = mod_names();
-        section(ui, "Zones", |ui| {
+        let rec = &mut self.recording;
+        let bufs = &mut self.fz_hk_text;
+        let mac = cfg!(target_os = "macos");
+        section(ui, "Activation", |ui| {
             ui.checkbox(&mut s.shift_drag, "Hold Shift while dragging a window to show zones");
             ui.weak(if s.shift_drag { "" } else { "Zones show while dragging; holding Shift hides them." });
             ui.checkbox(&mut s.mouse_switch, "Press the right mouse button while dragging to toggle zones");
+            ui.checkbox(
+                &mut s.mouse_middle_click_spanning_multiple_zones,
+                "Press the middle mouse button while dragging to snap across multiple zones",
+            );
             ui.checkbox(&mut s.show_zones_on_all_monitors, "Show zones on all monitors while dragging");
             ui.checkbox(&mut s.span_zones_across_monitors, "Allow zones to span across monitors");
-            ui.checkbox(&mut s.show_zone_number, "Show zone numbers");
-            ui.checkbox(&mut s.restore_size, "Restore a window's original size when it leaves a zone");
-            ui.checkbox(&mut s.app_last_zone_move_windows, "Move newly opened windows to the zone they last used");
+            ui.horizontal(|ui| {
+                ui.add_enabled(!mac, egui::Checkbox::new(&mut s.make_dragged_window_transparent, "Make the dragged window transparent"));
+                if mac {
+                    ui.weak("(Windows only)");
+                }
+            });
             grid(ui, "overlap", |ui| {
                 ui.label("Overlapping zones");
                 use fancyzones::layout::OverlappingZonesAlgorithm as O;
@@ -739,7 +756,48 @@ impl SettingsApp {
                     ],
                 );
                 ui.end_row();
+                ui.label("Open the layout editor");
+                fz_hotkey_edit(ui, rec, bufs, "editor", &mut s.editor_hotkey);
+                ui.end_row();
             });
+        });
+
+        section(ui, "Zone appearance", |ui| {
+            ui.checkbox(&mut s.show_zone_number, "Show zone numbers");
+            ui.checkbox(&mut s.zone_set_change_flash_zones, "Flash zones when the active layout changes");
+            grid(ui, "colors", |ui| {
+                for (label, c) in [
+                    ("Zone color", &mut s.zone_color),
+                    ("Border color", &mut s.zone_border_color),
+                    ("Highlight color", &mut s.zone_highlight_color),
+                    ("Number color", &mut s.zone_number_color),
+                ] {
+                    ui.label(label);
+                    hex_color_edit(ui, c);
+                    ui.end_row();
+                }
+                ui.label("Zone opacity");
+                ui.add(egui::Slider::new(&mut s.zone_highlight_opacity, 0..=100).suffix(" %"));
+                ui.end_row();
+            });
+        });
+
+        section(ui, "Window behavior", |ui| {
+            ui.checkbox(&mut s.display_change_move_windows, "Keep windows in their zones when the screen resolution or displays change");
+            ui.checkbox(&mut s.zone_set_change_move_windows, "Move windows into the new zones when a monitor's layout changes");
+            ui.checkbox(&mut s.app_last_zone_move_windows, "Move newly opened windows to the zone they last used");
+            ui.checkbox(&mut s.open_window_on_active_monitor, "Open new windows on the monitor with the mouse pointer");
+            ui.checkbox(&mut s.restore_size, "Restore a window's original size when it leaves a zone");
+            ui.checkbox(&mut s.allow_snap_child_windows, if mac { "Allow dialogs to be snapped" } else { "Allow child windows to be snapped" });
+            ui.checkbox(&mut s.allow_snap_popup_windows, if mac { "Allow floating panels to be snapped" } else { "Allow popup windows to be snapped" });
+            ui.horizontal(|ui| {
+                ui.add_enabled(!mac, egui::Checkbox::new(&mut s.disable_round_corners, "Disable round corners when a window is snapped"));
+                ui.weak("(Windows 11 only)");
+            });
+            ui.checkbox(
+                &mut s.layouts_per_virtual_desktop,
+                if mac { "Use a separate layout on each Space" } else { "Use a separate layout on each virtual desktop" },
+            );
         });
 
         section(ui, "Keyboard snapping", |ui| {
@@ -794,21 +852,147 @@ impl SettingsApp {
             }
         });
 
-        section(ui, "Appearance", |ui| {
-            grid(ui, "colors", |ui| {
-                for (label, c) in [
-                    ("Zone color", &mut s.zone_color),
-                    ("Border color", &mut s.zone_border_color),
-                    ("Highlight color", &mut s.zone_highlight_color),
-                    ("Number color", &mut s.zone_number_color),
-                ] {
-                    ui.label(label);
-                    hex_color_edit(ui, c);
+        section(ui, "Switching between windows in a zone", |ui| {
+            ui.checkbox(&mut s.window_switching, "Cycle through windows snapped to the same zone with a shortcut");
+            ui.add_enabled_ui(s.window_switching, |ui| {
+                grid(ui, "tabkeys", |ui| {
+                    ui.label("Next window");
+                    fz_hotkey_edit(ui, rec, bufs, "next-tab", &mut s.next_tab_hotkey);
                     ui.end_row();
+                    ui.label("Previous window");
+                    fz_hotkey_edit(ui, rec, bufs, "prev-tab", &mut s.prev_tab_hotkey);
+                    ui.end_row();
+                });
+            });
+        });
+
+        section(ui, "Layout switching", |ui| {
+            ui.checkbox(&mut s.quick_layout_switch, "Switch layouts with the quick keys (set a layout's key in the layout editor)");
+            ui.add_enabled_ui(s.quick_layout_switch, |ui| {
+                ui.weak(format!("{}+0…9 applies the layout bound to that number.", quick_switch_mods()));
+                ui.checkbox(&mut s.flash_zones_on_quick_switch, "Flash zones when switching layouts");
+            });
+            ui.checkbox(&mut s.mouse_wheel_layout_switch, "Scroll the mouse wheel while dragging to switch layouts");
+            ui.checkbox(&mut s.layout_name_label_enabled, "Show the layout name when switching layouts");
+            ui.add_enabled_ui(s.layout_name_label_enabled, |ui| {
+                grid(ui, "label", |ui| {
+                    ui.label("Position");
+                    use fancyzones::LayoutNameLabelPlacement as P;
+                    combo(
+                        ui,
+                        "label-pos",
+                        &mut s.layout_name_label_placement,
+                        &[
+                            (P::TopLeft, "Top left"),
+                            (P::TopCenter, "Top center"),
+                            (P::TopRight, "Top right"),
+                            (P::Center, "Center"),
+                            (P::BottomLeft, "Bottom left"),
+                            (P::BottomCenter, "Bottom center"),
+                            (P::BottomRight, "Bottom right"),
+                        ],
+                    );
+                    ui.end_row();
+                    ui.label("Text color");
+                    hex_color_edit(ui, &mut s.layout_name_label_text_color);
+                    ui.end_row();
+                    ui.label("Background color");
+                    hex_color_edit(ui, &mut s.layout_name_label_background_color);
+                    ui.end_row();
+                    ui.label("Font size");
+                    ui.add(egui::Slider::new(&mut s.layout_name_label_font_size, 6..=200).suffix(" pt"));
+                    ui.end_row();
+                    ui.label("Padding");
+                    ui.add(egui::Slider::new(&mut s.layout_name_label_padding, 0..=100).suffix(" pt"));
+                    ui.end_row();
+                    ui.label("Show for");
+                    ui.add(egui::Slider::new(&mut s.layout_name_label_duration_ms, 200..=10_000).suffix(" ms"));
+                    ui.end_row();
+                });
+            });
+        });
+
+        section(ui, "Monitor rotation", |ui| {
+            ui.checkbox(&mut s.monitor_rotation, "Move all windows to the next / previous monitor with a shortcut");
+            ui.add_enabled_ui(s.monitor_rotation, |ui| {
+                grid(ui, "rotation", |ui| {
+                    ui.label("Hold, then press ← / →");
+                    fz_hotkey_edit(ui, rec, bufs, "rotation", &mut s.monitor_rotation_hotkey);
+                    ui.end_row();
+                });
+            });
+        });
+
+        let new_app = &mut self.fz_new_app;
+        let running = &mut self.running_apps;
+        section(ui, "Excluded apps", |ui| {
+            ui.label(if mac {
+                "Windows of these apps are never snapped. Use bundle ids (com.apple.Safari), app names (Safari) or bundle names (Safari.app)."
+            } else {
+                "Windows of these apps are never snapped. Use exe names (notepad.exe), a part of the path, or a part of the window title."
+            });
+            let mut remove = None;
+            for (i, a) in s.excluded_apps.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(a).desired_width(320.0));
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                s.excluded_apps.remove(i);
+            }
+            ui.horizontal(|ui| {
+                let r = ui.add(egui::TextEdit::singleline(new_app).desired_width(320.0).hint_text(if mac { "com.example.App" } else { "app.exe" }));
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Add").clicked() || enter) && !new_app.trim().is_empty() {
+                    add_excluded(&mut s.excluded_apps, new_app.trim());
+                    new_app.clear();
                 }
-                ui.label("Zone opacity");
-                ui.add(egui::Slider::new(&mut s.zone_highlight_opacity, 0..=100).suffix(" %"));
-                ui.end_row();
+                if mac {
+                    let resp = ui.menu_button("Add running app…", |ui| {
+                        let apps = running.get_or_insert_with(crate::platform::running_apps);
+                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                            for (name, id) in apps.iter() {
+                                let taken = s.excluded_apps.iter().any(|a| a.eq_ignore_ascii_case(id));
+                                if ui.add_enabled(!taken, egui::Button::new(format!("{name}  —  {id}"))).clicked() {
+                                    add_excluded(&mut s.excluded_apps, id);
+                                    ui.close();
+                                }
+                            }
+                            if apps.is_empty() {
+                                ui.weak("No running apps found.");
+                            }
+                        });
+                    });
+                    if resp.response.clicked() {
+                        *running = None; // refresh the list each time it opens
+                    }
+                }
+            });
+        });
+
+        section(ui, "Shortcuts", |ui| {
+            grid(ui, "cheatsheet", |ui| {
+                let m = |x: &fancyzones::Modifiers| fz_mods_text(x);
+                let mut row = |action: &str, keys: String, on: bool| {
+                    ui.label(action);
+                    if on {
+                        ui.monospace(keys);
+                    } else {
+                        ui.weak(format!("{keys} (off)"));
+                    }
+                    ui.end_row();
+                };
+                let arrows = if s.move_windows_based_on_position { "Arrows" } else { "Left/Right" };
+                row("Snap the focused window", format!("{}+{arrows}", m(&s.snap_modifiers)), s.override_snap_hotkeys);
+                row("Extend across zones", format!("{}+Arrows", m(&s.extend_modifiers)), s.override_snap_hotkeys && s.move_windows_based_on_position);
+                row("Open the layout editor", hk_text(&s.editor_hotkey), s.editor_hotkey.code != 0);
+                row("Next window in zone", hk_text(&s.next_tab_hotkey), s.window_switching);
+                row("Previous window in zone", hk_text(&s.prev_tab_hotkey), s.window_switching);
+                row("Apply layout 0–9", format!("{}+0…9", quick_switch_mods()), s.quick_layout_switch);
+                row("Move all windows to the next monitor", format!("{} then ←/→", hk_text(&s.monitor_rotation_hotkey)), s.monitor_rotation);
             });
         });
     }
@@ -1365,6 +1549,65 @@ fn matrix_preview(ui: &mut Ui, slots: &[String; MAX_MACHINE], one_row: bool, thi
     }
 }
 
+/// A FancyZones hotkey field (text + Record). Invalid text keeps the last
+/// valid value and shows why.
+fn fz_hotkey_edit(
+    ui: &mut Ui,
+    rec: &mut Option<Id>,
+    bufs: &mut std::collections::BTreeMap<&'static str, (String, fancyzones::Hotkey)>,
+    key: &'static str,
+    hk: &mut fancyzones::Hotkey,
+) {
+    let entry = bufs.entry(key).or_insert_with(|| (format_fz_hotkey(hk), *hk));
+    if entry.1 != *hk {
+        *entry = (format_fz_hotkey(hk), *hk); // changed elsewhere (file reload)
+    }
+    ui.vertical(|ui| {
+        hotkey_edit(ui, rec, Id::unique(("fz-hk", key)), &mut entry.0, RecMode::Combo);
+        match parse_fz_hotkey(&entry.0) {
+            Ok(h) => {
+                *hk = h;
+                entry.1 = h;
+            }
+            Err(e) => error_label(ui, &e),
+        }
+    });
+}
+
+fn hk_text(h: &fancyzones::Hotkey) -> String {
+    if h.code == 0 {
+        "none".into()
+    } else {
+        format_fz_hotkey(h)
+    }
+}
+
+fn fz_mods_text(m: &fancyzones::Modifiers) -> String {
+    let names = mod_names();
+    let mut v = Vec::new();
+    for (on, i) in [(m.ctrl, 0), (m.alt, 1), (m.shift, 2), (m.meta, 3)] {
+        if on {
+            v.push(names[i].1);
+        }
+    }
+    if v.is_empty() {
+        "(no modifiers)".into()
+    } else {
+        v.join("+")
+    }
+}
+
+/// Quick layout switch modifiers (fixed, like PowerToys' Win+Ctrl+Alt).
+fn quick_switch_mods() -> String {
+    fz_mods_text(&fancyzones::Modifiers::new(true, true, false, true))
+}
+
+fn add_excluded(list: &mut Vec<String>, app: &str) {
+    if !list.iter().any(|a| a.eq_ignore_ascii_case(app)) {
+        list.push(app.to_string());
+    }
+}
+
 fn modifiers_edit(ui: &mut Ui, m: &mut fancyzones::Modifiers, names: &[(keyboard_manager::keys::ModFamily, &str); 4]) {
     use keyboard_manager::keys::ModFamily as F;
     ui.horizontal(|ui| {
@@ -1402,6 +1645,9 @@ mod tests {
         let mut fz = fancyzones::Config::default();
         fz.applied_layouts.insert("gone".into(), AppliedLayout::template(LayoutType::Grid, 4));
         fz.settings.span_zones_across_monitors = true;
+        fz.settings.window_switching = true;
+        fz.settings.monitor_rotation = true;
+        fz.settings.excluded_apps = vec!["com.apple.Safari".into(), "notepad.exe".into()];
         fz.save_to(&fancyzones_path(&path)).unwrap();
 
         let mut app = SettingsApp::new(path.clone());
@@ -1444,6 +1690,19 @@ mod tests {
         assert_eq!(back.mwb.settings.peers["pc"], "10.0.0.2");
         let fz_back = load_fancyzones(&fancyzones_path(&path)).unwrap();
         assert!(!fz_back.settings.shift_drag);
+        assert_eq!(fz_back.settings.excluded_apps.len(), 2);
+        assert_eq!(fz_back.settings.editor_hotkey, fancyzones::Hotkey::default_editor());
+
+        // Typing a hotkey updates the setting; a bad one is not applied.
+        app.fz_hk_text.get_mut("rotation").unwrap().0 = "Ctrl+Shift+R".into();
+        app.page = Page::FancyZones;
+        frame(&mut app);
+        assert_eq!(format_fz_hotkey(&app.fz.settings.monitor_rotation_hotkey), parse_fz_hotkey("Ctrl+Shift+R").map(|h| format_fz_hotkey(&h)).unwrap());
+        app.fz_hk_text.get_mut("rotation").unwrap().0 = "Ctrl+Bogus".into();
+        frame(&mut app);
+        assert_eq!(app.fz.settings.monitor_rotation_hotkey.code, 0x52);
+        app.flush();
+        assert_eq!(load_fancyzones(&fancyzones_path(&path)).unwrap().settings.monitor_rotation_hotkey.code, 0x52);
         assert!(fz_back.applied_layouts.contains_key("gone"));
 
         // An invalid edit blocks saving and is reported on its page.

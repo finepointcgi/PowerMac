@@ -5,7 +5,7 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
 | Module | What it does |
 |---|---|
 | **Mouse Without Borders** | Share one keyboard and mouse (plus clipboard text) across up to 4 machines. It is wire-compatible with Windows PowerToys MWB, so a Mac running PowerMac can join a matrix of PCs running PowerToys. |
-| **FancyZones** | Zone layouts (Focus, Columns, Rows, Grid, Priority Grid, custom). Shift+drag a window to show the zones and drop it into one. Ctrl+Option+Arrow (Win+Arrow on Windows) snaps the focused window. |
+| **FancyZones** | PowerToys FancyZones, with the same features on macOS:<br>• Layouts: Focus, Columns, Rows, Grid, Priority Grid, plus custom grid and canvas layouts you build in the **layout editor** (Ctrl+Option+`, or tray → FancyZones → Edit layouts…).<br>• Dragging: Shift+drag to drop a window into a zone; Ctrl or middle-click to span zones; scroll while dragging to switch layouts.<br>• Shortcuts: Ctrl+Option+Arrow snaps the focused window; Ctrl+Option+Cmd+0–9 switches layouts; Ctrl+Option+] and [ cycle the windows in a zone.<br>• Window handling: monitor rotation, excluded apps, separate layouts for each Space, windows kept in their zones when layouts or displays change, new windows placed in their app's last zone.<br>On Windows the shortcuts use Win in place of Ctrl+Option, as in PowerToys. |
 | **Edge snapping** (Rectangle-style, part of FancyZones) | Drag a window to an edge to snap it: left/right edge for a half, top for maximize, bottom for the bottom half or thirds, corners for quarters. A preview shows first, and dragging the window out restores its size. On by default on macOS; off on Windows, which has its own Snap. |
 | **Awake** | Keep the computer (and optionally the display) awake: indefinitely, for a set time, until a set time, or while a process runs. |
 | **Scroll Reverser** | Reverse the mouse wheel but keep natural scrolling on the trackpad, or any other combination. Vertical and horizontal are set separately. |
@@ -64,7 +64,7 @@ crates/powermac          the app: tray, module lifecycle, config reload, clipboa
 
 ## Testing
 
-`cargo test --workspace` runs 210 tests. `crates/mwb/tests/interop.rs` builds a .NET harness from PowerToys' own encryption and packet code (it needs `dotnet`). That harness checks byte-for-byte test vectors and runs live TCP sessions in both directions.
+`cargo test --workspace` runs about 275 tests. `crates/mwb/tests/interop.rs` builds a .NET harness from PowerToys' own encryption and packet code (it needs `dotnet`). That harness checks byte-for-byte test vectors and runs live TCP sessions in both directions.
 
 On a Mac with permissions granted, these were also run live:
 - Input capture and injection.
@@ -80,4 +80,5 @@ On a Mac with permissions granted, these were also run live:
 - **Mouse Without Borders:** no file transfer, drag-and-drop or clipboard images; clipboard text works. About 1 in 512 keys trips a C# quirk that makes Windows MWB reject every packet; PowerMac warns about it, and you should generate a new key if you see the warning.
 - **Scroll Reverser on Windows:** it can't tell a touchpad from a mouse, so the mouse settings apply to all wheel input. There is an optional heuristic.
 - **Keyboard Manager:** no two-step chords and no PowerToys "alone" remaps. CapsLock works as a tap only on macOS.
-- **Not ported yet:** Mouse Jump, custom layout *editing* (custom layouts can be imported and selected), Color Picker, Always On Top, Workspaces.
+- **FancyZones on macOS:** a dragged window can't be made see-through (macOS offers no API for that). Zone assignments are kept in memory, so they're lost when PowerMac restarts. The new FancyZones features beyond the original set are unit-tested but haven't been run live yet.
+- **Not ported yet:** Mouse Jump, Color Picker, Always On Top, Workspaces.
