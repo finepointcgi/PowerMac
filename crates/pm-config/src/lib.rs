@@ -67,21 +67,23 @@ impl AppConfig {
         serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))
     }
 
+    /// Atomic write (temp file + rename) so the config watcher never reads half a file.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, path)?;
         Ok(())
     }
 }
 
-/// Change the config file in use; the config watcher then applies it.
-pub fn edit(f: impl FnOnce(&mut AppConfig)) -> Result<()> {
-    let path = crate::CONFIG_PATH.get().cloned().or_else(AppConfig::default_path).context("no config path")?;
-    let mut c = AppConfig::load_or_default(&path)?;
+/// Load, change and save the config file at `path`.
+pub fn edit_at(path: &Path, f: impl FnOnce(&mut AppConfig)) -> Result<()> {
+    let mut c = AppConfig::load_or_default(path)?;
     f(&mut c);
-    c.save(&path)
+    c.save(path)
 }
 
 fn rand_id() -> u32 {

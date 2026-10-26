@@ -1,7 +1,6 @@
 //! PowerMac: Mouse Without Borders, FancyZones and Awake in one cross-platform app.
 
 mod clipboard;
-mod config;
 mod login;
 mod modules;
 mod tray;
@@ -12,7 +11,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use config::AppConfig;
+use pm_config::AppConfig;
 
 #[derive(Parser)]
 #[command(name = "powermac", version, about = "PowerToys-style utilities for macOS and Windows")]
@@ -75,6 +74,12 @@ pub(crate) struct Running {
 
 /// The config file in use (for the tray's "copy key" / "open config folder").
 pub(crate) static CONFIG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Change the config file in use; the config watcher then applies it.
+pub(crate) fn edit_config(f: impl FnOnce(&mut AppConfig)) -> Result<()> {
+    let path = CONFIG_PATH.get().cloned().or_else(AppConfig::default_path).context("no config path")?;
+    pm_config::edit_at(&path, f)
+}
 
 pub(crate) static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 

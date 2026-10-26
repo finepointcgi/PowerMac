@@ -13,6 +13,7 @@ mwb = { path = "../mwb" }
 fancyzones = { path = "../fancyzones" }
 awake = { path = "../awake" }
 scroll-reverser = { path = "../scroll-reverser" }
+pm-config = { path = "../pm-config" }
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 ctrlc = "3"

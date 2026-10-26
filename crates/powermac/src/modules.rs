@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
-use crate::config::AppConfig;
+use pm_config::AppConfig;
 use crate::{clipboard, Running, RUNNING};
 
 fn changed<T: serde::Serialize>(old: Option<&T>, new: &T) -> bool {

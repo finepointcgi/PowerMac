@@ -158,7 +158,7 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     }
     if id == ui.scroll_mouse.id() || id == ui.scroll_trackpad.id() {
         let (mouse, trackpad) = (ui.scroll_mouse.is_checked(), ui.scroll_trackpad.is_checked());
-        let r = crate::config::edit(|c| {
+        let r = crate::edit_config(|c| {
             let s = &mut c.scroll_reverser;
             s.reverse_mouse_vertical = mouse;
             s.reverse_trackpad_vertical = trackpad;
@@ -359,8 +359,8 @@ pub fn refresh_tick() {
 }
 
 fn copy_key() {
-    let Some(path) = crate::CONFIG_PATH.get().cloned().or_else(crate::config::AppConfig::default_path) else { return };
-    let key = match crate::config::AppConfig::load_or_default(&path) {
+    let Some(path) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path) else { return };
+    let key = match pm_config::AppConfig::load_or_default(&path) {
         Ok(c) => c.mwb.settings.key,
         Err(e) => {
             log::warn!("{e:#}");
@@ -374,7 +374,7 @@ fn copy_key() {
 }
 
 fn open_config_dir() {
-    let Some(dir) = crate::CONFIG_PATH.get().cloned().or_else(crate::config::AppConfig::default_path).and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+    let Some(dir) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path).and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
