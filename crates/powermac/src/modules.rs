@@ -138,6 +138,240 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
             _ => {}
         }
     }
+
+    if changed(old.map(|o| &o.mouse_tuning), &new.mouse_tuning) {
+        apply_mouse_tuning(running, &new.mouse_tuning);
+    }
+    if changed(old.map(|o| &o.display_control), &new.display_control) {
+        apply_display_control(running, &new.display_control);
+    }
+    if changed(old.map(|o| &o.clipboard_history), &new.clipboard_history) {
+        apply_clipboard_history(running, &new.clipboard_history);
+    }
+    if changed(old.map(|o| &o.notch_shelf), &new.notch_shelf) {
+        apply_notch_shelf(running, &new.notch_shelf);
+    }
+    if changed(old.map(|o| &o.color_picker), &new.color_picker) {
+        apply_color_picker(running, &new.color_picker);
+    }
+    if changed(old.map(|o| &o.text_extractor), &new.text_extractor) {
+        apply_text_extractor(running, &new.text_extractor);
+    }
+    if changed(old.map(|o| &o.window_switcher), &new.window_switcher) {
+        apply_window_switcher(running, &new.window_switcher);
+    }
+}
+
+/// The config file in use.
+fn config_path() -> Option<PathBuf> {
+    crate::CONFIG_PATH.get().cloned().or_else(AppConfig::default_path)
+}
+
+/// The PowerMac data folder (the one holding `config.json`).
+pub(crate) fn data_dir() -> PathBuf {
+    config_path()
+        .map(|p| pm_config::data_dir_for(&p))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn apply_mouse_tuning(running: &mut Running, cfg: &mouse_tuning::Config) {
+    match (cfg.enabled, running.mouse_tuning.as_mut()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("mouse tuning: settings applied");
+            warn_mouse_buttons(cfg);
+        }
+        (true, None) => match mouse_tuning::MouseTuning::start(cfg.clone()) {
+            Ok(h) => {
+                log::info!("mouse tuning: running (pointer settings{})",
+                    if cfg.needs_button_hook() { ", button mappings" } else { "" });
+                warn_mouse_buttons(cfg);
+                running.mouse_tuning = Some(h);
+            }
+            Err(e) => log::error!("mouse tuning: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(mut h) = running.mouse_tuning.take() {
+                h.stop(); // restores the system's pointer settings
+            }
+            log::info!("mouse tuning: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn warn_mouse_buttons(cfg: &mouse_tuning::Config) {
+    if cfg.needs_button_hook() && mouse_tuning::needs_permission() {
+        log::warn!("mouse tuning: button mappings need Accessibility permission; grant it in \
+                    System Settings → Privacy & Security (pointer settings work without it)");
+    }
+}
+
+fn apply_display_control(running: &mut Running, cfg: &display_control::Config) {
+    match (cfg.enabled, running.display.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("display control: settings applied");
+        }
+        (true, None) => match display_control::DisplayControl::start(cfg.clone()) {
+            Ok(h) => {
+                let n = h.displays().len();
+                log::info!("display control: running ({n} display{})", if n == 1 { "" } else { "s" });
+                let wants_keys = cfg.take_over_brightness_keys || cfg.take_over_volume_keys;
+                if wants_keys && !h.keys_active() {
+                    log::warn!("display control: brightness/volume keys need Accessibility permission; \
+                                the sliders in Settings and the tray still work");
+                }
+                running.display = Some(h);
+                crate::display_glue::start_once();
+            }
+            Err(e) => log::error!("display control: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.display.take() {
+                h.stop(); // restores gamma tables
+            }
+            crate::display_glue::write_stopped();
+            log::info!("display control: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_clipboard_history(running: &mut Running, cfg: &clipboard_history::Config) {
+    match (cfg.enabled, running.clipboard.as_mut()) {
+        (true, Some(h)) => match h.update(cfg.clone()) {
+            Ok(()) => log::info!("clipboard history: settings applied{}", if cfg.paused { " (paused)" } else { "" }),
+            Err(e) => log::error!("clipboard history: {e:#}"),
+        },
+        (true, None) => {
+            let dir = match config_path() {
+                Some(p) => clipboard_history::data_dir_for_config(&p),
+                None => data_dir().join("clipboard"),
+            };
+            match clipboard_history::ClipboardHistory::start(cfg.clone(), dir) {
+                Ok(h) => {
+                    h.on_open_picker(|| crate::children::open(&crate::children::CLIPBOARD, &["clipboard"]));
+                    if cfg.hotkey().is_some() && !h.hotkey_active() {
+                        log::warn!("clipboard history: hotkey {} isn't active (it needs Accessibility permission); \
+                                    the picker still opens from the tray", cfg.hotkey);
+                    }
+                    log::info!("clipboard history: running{}", if cfg.paused { " (paused)" } else { "" });
+                    running.clipboard = Some(h);
+                }
+                Err(e) => log::error!("clipboard history: {e:#}"),
+            }
+        }
+        (false, Some(_)) => {
+            if let Some(h) = running.clipboard.take() {
+                h.stop();
+            }
+            log::info!("clipboard history: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_notch_shelf(running: &mut Running, cfg: &notch_shelf::Config) {
+    match (cfg.enabled, running.shelf.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("notch shelf: settings applied");
+        }
+        (true, None) => match notch_shelf::NotchShelf::start(cfg.clone(), data_dir()) {
+            Ok(h) => {
+                log::info!("notch shelf: running ({})", if notch_shelf::has_notch() { "notch" } else { "no notch on this Mac" });
+                running.shelf = Some(h);
+            }
+            Err(e) => log::error!("notch shelf: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.shelf.take() {
+                h.stop();
+            }
+            log::info!("notch shelf: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_color_picker(running: &mut Running, cfg: &pm_config::Module<color_picker::Config>) {
+    match (cfg.enabled, running.color.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.settings.clone());
+            log::info!("color picker: settings applied");
+        }
+        (true, None) => {
+            let started = color_picker::ColorPicker::start(cfg.settings.clone(), data_dir(), || {
+                crate::children::open(&crate::children::COLOR_EDITOR, &["color-picker", "--editor"])
+            });
+            match started {
+                Ok(h) => running.color = Some(h),
+                Err(e) => log::error!("color picker: {e:#}"),
+            }
+        }
+        (false, Some(_)) => {
+            running.color = None; // unregisters the hotkey
+            log::info!("color picker: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_text_extractor(running: &mut Running, cfg: &pm_config::Module<text_extractor::Config>) {
+    match (cfg.enabled, running.ocr.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.settings.clone());
+            log::info!("text extractor: settings applied");
+        }
+        (true, None) => match text_extractor::TextExtractor::start(cfg.settings.clone()) {
+            Ok(h) => {
+                if text_extractor::screen_recording_permission() != text_extractor::Permission::Granted {
+                    log::warn!("text extractor: capturing the screen needs Screen Recording permission; \
+                                grant it in System Settings → Privacy & Security → Screen Recording");
+                }
+                running.ocr = Some(h);
+            }
+            Err(e) => log::error!("text extractor: {e:#}"),
+        },
+        (false, Some(_)) => {
+            running.ocr = None; // unregisters the hotkey
+            log::info!("text extractor: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_window_switcher(running: &mut Running, cfg: &window_switcher::Config) {
+    match (cfg.enabled, running.switcher.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("window switcher: settings applied");
+        }
+        (true, None) => match window_switcher::WindowSwitcher::start(cfg.clone()) {
+            Ok(h) => {
+                let p = window_switcher::permissions();
+                log::info!("window switcher: running ({}{})", cfg.trigger,
+                    if cfg.replace_cmd_tab { ", replaces the system switcher" } else { "" });
+                if !p.accessibility {
+                    log::warn!("window switcher: needs Accessibility permission for its shortcut; \
+                                it starts working as soon as it's granted");
+                }
+                if cfg.thumbnails && !p.screen_recording {
+                    log::info!("window switcher: no Screen Recording permission, showing app icons instead of thumbnails");
+                }
+                running.switcher = Some(h);
+            }
+            Err(e) => log::error!("window switcher: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.switcher.take() {
+                h.stop();
+            }
+            log::info!("window switcher: stopped");
+        }
+        (false, None) => {}
+    }
 }
 
 /// FancyZones editor hotkey: run `<this exe> --config <config> editor

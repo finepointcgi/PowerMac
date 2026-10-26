@@ -54,7 +54,41 @@ struct Ui {
     open_config: MenuItem,
     open_log: MenuItem,
     quit: MenuItem,
+    tools: Tools,
 }
+
+/// The "Tools" part of the menu.
+struct Tools {
+    pick_color: MenuItem,
+    extract_text: MenuItem,
+    clip: Submenu,
+    clip_open: MenuItem,
+    clip_pause: MenuItem,
+    clip_clear: MenuItem,
+    /// The recent items shown (id, label), to rebuild only on change.
+    clip_shown: Option<Vec<(u64, String)>>,
+    switcher: MenuItem,
+    shelf: MenuItem,
+    displays: Submenu,
+    /// (id, name, has volume) of the displays shown.
+    displays_shown: Option<Vec<(String, String, bool)>>,
+    display_items: Vec<DisplayItems>,
+    finder: CheckMenuItem,
+    /// The hotkeys shown as accelerators (to update only on change).
+    accels: [Option<String>; 4],
+    finder_checked_at: std::time::Instant,
+}
+
+/// One display's items: (id, brightness presets, volume presets, mute).
+type DisplayItems = (String, Vec<CheckMenuItem>, Vec<CheckMenuItem>, Option<CheckMenuItem>);
+
+/// Clipboard history state for the menu: (paused, hotkey, recent items).
+type ClipState = (bool, Option<keyboard_manager::Shortcut>, Vec<(u64, String)>);
+
+/// Brightness / volume presets in the Displays submenu.
+const DISPLAY_PRESETS: [u8; 5] = [0, 25, 50, 75, 100];
+/// Clipboard items shown in the menu.
+const CLIP_ITEMS: usize = 10;
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -108,6 +142,25 @@ pub fn install() -> anyhow::Result<()> {
     let open_log = MenuItem::new("Open log file", true, None);
     let login = CheckMenuItem::new("Launch at login", true, pm_config::login::is_enabled(), None);
     let quit = MenuItem::new("Quit PowerMac", true, None);
+
+    // Tools
+    let tools_title = MenuItem::new("Tools", false, None);
+    let pick_color = MenuItem::new("Pick color", false, None);
+    let extract_text = MenuItem::new("Extract text", false, None);
+    let clip = Submenu::new("Clipboard history", false);
+    let clip_open = MenuItem::new("Open clipboard history…", true, None);
+    let clip_pause = MenuItem::new("Pause recording", true, None);
+    let clip_clear = MenuItem::new("Clear history", true, None);
+    let switcher = MenuItem::new("Window switcher", false, None);
+    let shelf = MenuItem::new("Show shelf", false, None);
+    let displays = Submenu::new("Displays", false);
+    let finder = CheckMenuItem::new(
+        if cfg!(windows) { "Explorer menu: PowerRename, New+" } else { "Finder Quick Actions: PowerRename, New+" },
+        cfg!(any(target_os = "macos", windows)),
+        file_tools::finder_integration_installed(),
+        None,
+    );
+
     menu.append_items(&[
         &settings,
         &PredefinedMenuItem::separator(),
@@ -123,6 +176,15 @@ pub fn install() -> anyhow::Result<()> {
         &scroll,
         &mouse,
         &paste_plain,
+        &PredefinedMenuItem::separator(),
+        &tools_title,
+        &pick_color,
+        &extract_text,
+        &clip,
+        &switcher,
+        &shelf,
+        &displays,
+        &finder,
         &PredefinedMenuItem::separator(),
         &login,
         &open_privacy,
@@ -165,6 +227,23 @@ pub fn install() -> anyhow::Result<()> {
             open_config,
             open_log,
             quit,
+            tools: Tools {
+                pick_color,
+                extract_text,
+                clip,
+                clip_open,
+                clip_pause,
+                clip_clear,
+                clip_shown: None,
+                switcher,
+                shelf,
+                displays,
+                displays_shown: None,
+                display_items: Vec::new(),
+                finder,
+                accels: Default::default(),
+                finder_checked_at: std::time::Instant::now(),
+            },
         })
     });
 
@@ -184,10 +263,24 @@ fn with_running<R>(f: impl FnOnce(&mut Running) -> R) -> Option<R> {
     RUNNING.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(f)
 }
 
+/// Like [`with_running`] but gives up instead of waiting when the modules
+/// are being reconfigured (the config watcher holds the lock and may be
+/// waiting for this main thread, e.g. to register a Carbon hotkey).
+fn try_with_running<R>(f: impl FnOnce(&mut Running) -> R) -> Option<R> {
+    match RUNNING.try_lock() {
+        Ok(mut g) => g.as_mut().map(f),
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner().as_mut().map(f),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     if id == ui.quit.id() {
         shutdown();
         std::process::exit(0);
+    }
+    if on_tools_click(&mut ui.tools, id) {
+        return;
     }
     if id == ui.settings.id() {
         open_settings();
@@ -226,7 +319,12 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
             let s = &mut c.scroll_reverser;
             s.reverse_mouse_vertical = mouse;
             s.reverse_trackpad_vertical = trackpad;
-            s.enabled = mouse || trackpad || s.reverse_mouse_horizontal || s.reverse_trackpad_horizontal;
+            // `enabled` covers smooth scrolling too.
+            s.enabled = mouse
+                || trackpad
+                || s.reverse_mouse_horizontal
+                || s.reverse_trackpad_horizontal
+                || s.smooth_scrolling;
         });
         if let Err(e) = r {
             log::warn!("scroll reverser: {e:#}");
@@ -323,7 +421,8 @@ fn refresh() {
 }
 
 fn refresh_ui(ui: &mut Ui) {
-    let snapshot = with_running(|r| {
+    refresh_tools(&mut ui.tools);
+    let snapshot = try_with_running(|r| {
         (
             r.mwb.as_ref().map(|m| m.status()),
             r.awake.as_ref().map(|a| a.status()),
@@ -456,68 +555,18 @@ fn copy_key() {
     }
 }
 
-/// The settings window process, if one was started from the menu.
-static SETTINGS_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
-/// The FancyZones layout editor process, if one was started from the menu.
-static EDITOR_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
-
 /// Start `powermac --config <path> settings` as a separate process (its
 /// event loop can't share this process' main loop), or bring the one that
 /// is already open to the front.
 fn open_settings() {
-    open_child(&SETTINGS_CHILD, "settings");
+    crate::children::open(&crate::children::SETTINGS, &["settings"]);
 }
 
 /// Start `powermac --config <path> editor` (the FancyZones layout editor),
 /// or bring the one that is already open to the front.
 fn open_editor() {
-    open_child(&EDITOR_CHILD, "editor");
+    crate::children::open(&crate::children::EDITOR, &["editor"]);
 }
-
-fn open_child(slot: &std::sync::Mutex<Option<std::process::Child>>, subcommand: &str) {
-    let mut child = slot.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(c) = child.as_mut() {
-        if let Ok(None) = c.try_wait() {
-            log::info!("{subcommand} window already open (pid {})", c.id());
-            activate_process(c.id());
-            return;
-        }
-    }
-    let Some(path) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path) else { return };
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            log::warn!("{subcommand}: {e}");
-            return;
-        }
-    };
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--config").arg(&path).arg(subcommand);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    match cmd.spawn() {
-        Ok(c) => {
-            log::info!("{subcommand} window started (pid {})", c.id());
-            *child = Some(c);
-        }
-        Err(e) => log::warn!("{subcommand}: could not start the window: {e}"),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn activate_process(pid: u32) {
-    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
-    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as i32) {
-        app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn activate_process(_pid: u32) {}
 
 fn open_config_dir() {
     let Some(dir) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path).and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
@@ -569,4 +618,338 @@ fn icon() -> Icon {
         }
     }
     Icon::from_rgba(px, N as u32, N as u32).expect("valid icon")
+}
+
+// ---------------------------------------------------------------------------
+// Tools: Color Picker, Text Extractor, Clipboard History, Window Switcher,
+// Notch Shelf, Displays, Finder Quick Actions
+
+/// Handle a click on a Tools item; false if `id` isn't one.
+fn on_tools_click(t: &mut Tools, id: &tray_icon::menu::MenuId) -> bool {
+    if id == t.pick_color.id() {
+        // Let the menu close before the loupe appears.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            with_running(|r| r.color.as_ref().map(|c| c.pick_now()));
+        });
+    } else if id == t.extract_text.id() {
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            with_running(|r| r.ocr.as_ref().map(|o| o.capture_now()));
+        });
+    } else if id == t.clip_open.id() {
+        with_running(|r| r.clipboard.as_ref().map(|c| c.open_picker()));
+    } else if id == t.clip_pause.id() {
+        let paused = with_running(|r| {
+            r.clipboard.as_ref().map(|c| {
+                let p = !c.paused();
+                c.pause(p);
+                p
+            })
+        })
+        .flatten();
+        if let Some(p) = paused {
+            // Keep it across restarts (the watcher re-applies the same value).
+            if let Err(e) = crate::edit_config(|c| c.clipboard_history.paused = p) {
+                log::warn!("clipboard history: {e:#}");
+            }
+            log::info!("clipboard history: {}", if p { "paused" } else { "recording" });
+        }
+        t.clip_shown = None;
+    } else if id == t.clip_clear.id() {
+        if let Some(Err(e)) = with_running(|r| r.clipboard.as_ref().map(|c| c.clear())).flatten() {
+            log::warn!("clipboard history: {e:#}");
+        }
+        t.clip_shown = None;
+    } else if let Some(item) = id.as_ref().strip_prefix("clip:").and_then(|n| n.parse::<u64>().ok()) {
+        // Paste into the app that was in front before the menu opened.
+        if let Some(Err(e)) = with_running(|r| r.clipboard.as_ref().map(|c| c.paste_item(item))).flatten() {
+            log::warn!("clipboard history: {e:#}");
+        }
+        t.clip_shown = None;
+    } else if id == t.switcher.id() {
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            with_running(|r| r.switcher.as_ref().map(|s| s.show()));
+        });
+    } else if id == t.shelf.id() {
+        with_running(|r| r.shelf.as_ref().map(|s| s.expand()));
+    } else if id == t.finder.id() {
+        toggle_finder_integration(t.finder.is_checked());
+        t.finder.set_checked(file_tools::finder_integration_installed());
+        t.finder_checked_at = std::time::Instant::now();
+    } else if let Some(rest) = id.as_ref().strip_prefix("disp:") {
+        display_click(rest);
+        t.displays_shown = None; // re-read the values
+    } else {
+        return false;
+    }
+    true
+}
+
+/// `b:<pct>:<id>`, `v:<pct>:<id>` or `m:<id>`.
+fn display_click(rest: &str) {
+    let (kind, rest) = rest.split_once(':').unwrap_or(("", ""));
+    let r = with_running(|r| {
+        let d = r.display.as_ref()?;
+        Some(match kind {
+            "m" => {
+                let muted = d.display(rest).and_then(|i| i.muted).unwrap_or(false);
+                d.set_mute(rest, !muted)
+            }
+            _ => {
+                let (pct, id) = rest.split_once(':')?;
+                let pct: u8 = pct.parse().ok()?;
+                if kind == "b" {
+                    d.set_brightness(id, pct)
+                } else {
+                    d.set_volume(id, pct)
+                }
+            }
+        })
+    })
+    .flatten();
+    if let Some(Err(e)) = r {
+        log::warn!("display control: {e:#}");
+    }
+}
+
+fn toggle_finder_integration(install: bool) {
+    if install {
+        // The Quick Actions run this executable (inside PowerMac.app when
+        // started from the bundle).
+        match std::env::current_exe().map_err(anyhow::Error::from).and_then(|exe| file_tools::install_finder_integration(&exe)) {
+            Ok(v) => log::info!("finder integration installed ({} items)", v.len()),
+            Err(e) => log::warn!("finder integration: {e:#}"),
+        }
+    } else {
+        match file_tools::uninstall_finder_integration() {
+            Ok(()) => log::info!("finder integration removed"),
+            Err(e) => log::warn!("finder integration: {e:#}"),
+        }
+    }
+}
+
+/// A menu accelerator showing a hotkey ({win, ctrl, alt, shift} + VK code);
+/// `None` for keys a menu can't show.
+fn accel_text(win: bool, ctrl: bool, alt: bool, shift: bool, vk: u32) -> Option<String> {
+    let key = match vk {
+        0x41..=0x5A | 0x30..=0x39 => char::from_u32(vk)?.to_string(),
+        0x70..=0x7B => format!("F{}", vk - 0x6F),
+        0x09 => "Tab".into(),
+        0x20 => "Space".into(),
+        0xC0 => "`".into(),
+        _ => return None,
+    };
+    let mut parts = Vec::new();
+    for (on, name) in [(ctrl, "Control"), (alt, "Alt"), (shift, "Shift"), (win, "Super")] {
+        if on {
+            parts.push(name);
+        }
+    }
+    parts.push(&key);
+    Some(parts.join("+"))
+}
+
+fn set_accel(item: &MenuItem, cur: &mut Option<String>, new: Option<String>) {
+    if *cur != new {
+        let a = new.as_deref().and_then(|s| s.parse::<tray_icon::menu::accelerator::Accelerator>().ok());
+        let _ = item.set_accelerator(a);
+        *cur = new;
+    }
+}
+
+/// What the Tools part needs from the running modules.
+struct ToolsSnapshot {
+    color: Option<color_picker::Hotkey>,
+    ocr: Option<text_extractor::Hotkey>,
+    clipboard: Option<ClipState>,
+    switcher: Option<window_switcher::Hotkey>,
+    shelf: bool,
+    displays: Option<Vec<display_control::DisplayInfo>>,
+}
+
+fn refresh_tools(t: &mut Tools) {
+    let cfg = current_config();
+    let Some(s) = try_with_running(|r| ToolsSnapshot {
+        color: r.color.as_ref().map(|_| cfg.color_picker.settings.hotkey),
+        ocr: r.ocr.as_ref().map(|_| cfg.text_extractor.settings.hotkey),
+        clipboard: r.clipboard.as_ref().map(|c| {
+            let items = c.recent(CLIP_ITEMS).into_iter().map(|i| (i.id, menu_label(&i))).collect();
+            (c.paused(), c.config().hotkey(), items)
+        }),
+        switcher: r.switcher.as_ref().map(|w| w.config().trigger),
+        shelf: r.shelf.is_some(),
+        displays: r.display.as_ref().map(|d| d.displays()),
+    }) else {
+        return;
+    };
+
+    t.pick_color.set_enabled(s.color.is_some());
+    let a = s.color.and_then(|h| accel_text(h.win, h.ctrl, h.alt, h.shift, h.code));
+    set_accel(&t.pick_color, &mut t.accels[0], a);
+    t.extract_text.set_enabled(s.ocr.is_some());
+    let a = s.ocr.and_then(|h| accel_text(h.win, h.ctrl, h.alt, h.shift, h.code));
+    set_accel(&t.extract_text, &mut t.accels[1], a);
+    t.switcher.set_enabled(s.switcher.is_some());
+    let a = s.switcher.and_then(|h| accel_text(h.win, h.ctrl, h.alt, h.shift, h.code));
+    set_accel(&t.switcher, &mut t.accels[2], a);
+    t.shelf.set_enabled(s.shelf);
+
+    // Clipboard history
+    match &s.clipboard {
+        None => {
+            t.clip.set_text("Clipboard history (off)");
+            t.clip.set_enabled(false);
+            t.clip_shown = None;
+        }
+        Some((paused, hotkey, items)) => {
+            t.clip.set_text(if *paused { "Clipboard history (paused)" } else { "Clipboard history" });
+            t.clip.set_enabled(true);
+            t.clip_pause.set_text(if *paused { "Resume recording" } else { "Pause recording" });
+            t.clip_clear.set_enabled(!items.is_empty());
+            let a = hotkey.and_then(|h| {
+                use keyboard_manager::keys::Side;
+                let on = |s: Side| s != Side::None;
+                accel_text(on(h.mods.win), on(h.mods.ctrl), on(h.mods.alt), on(h.mods.shift), h.key)
+            });
+            set_accel(&t.clip_open, &mut t.accels[3], a);
+            if t.clip_shown.as_ref() != Some(items) {
+                rebuild_clipboard_menu(t, items);
+                t.clip_shown = Some(items.clone());
+            }
+        }
+    }
+
+    // Displays: external ones (the built-in display has its own keys).
+    let external: Vec<display_control::DisplayInfo> =
+        s.displays.unwrap_or_default().into_iter().filter(|d| !d.is_builtin && d.enabled).collect();
+    t.displays.set_enabled(true);
+    let sig: Vec<(String, String, bool)> =
+        external.iter().map(|d| (d.id.clone(), d.name.clone(), d.volume.is_some())).collect();
+    if t.displays_shown.as_ref() != Some(&sig) {
+        rebuild_displays_menu(t, &sig);
+        t.displays_shown = Some(sig);
+    }
+    for (id, bright, vol, mute) in &t.display_items {
+        let Some(d) = external.iter().find(|d| &d.id == id) else { continue };
+        let near = |cur: Option<u8>, preset: u8| cur.is_some_and(|c| c.abs_diff(preset) <= 2);
+        let can_dim = d.brightness_method != display_control::BrightnessMethod::None;
+        for (item, p) in bright.iter().zip(DISPLAY_PRESETS) {
+            item.set_enabled(can_dim);
+            item.set_checked(near(d.brightness, p));
+        }
+        for (item, p) in vol.iter().zip(DISPLAY_PRESETS) {
+            item.set_checked(near(d.volume, p) && d.muted != Some(true));
+        }
+        if let Some(m) = mute {
+            m.set_checked(d.muted == Some(true));
+        }
+    }
+
+    // Finder Quick Actions (cheap file checks on macOS; Windows asks reg.exe,
+    // so only after a click there).
+    if cfg!(target_os = "macos") && t.finder_checked_at.elapsed() >= Duration::from_secs(10) {
+        t.finder_checked_at = std::time::Instant::now();
+        t.finder.set_checked(file_tools::finder_integration_installed());
+    }
+}
+
+/// The config file as it is on disk (for hotkeys the handles don't expose).
+fn current_config() -> pm_config::AppConfig {
+    crate::CONFIG_PATH
+        .get()
+        .and_then(|p| pm_config::AppConfig::load_or_default(p).ok())
+        .unwrap_or_default()
+}
+
+fn menu_label(i: &clipboard_history::ItemSummary) -> String {
+    use clipboard_history::Kind;
+    let text = i.label(42);
+    let text = if text.is_empty() {
+        match i.kind {
+            Kind::Image => match i.image_size {
+                Some((w, h)) => format!("Image {w}×{h}"),
+                None => "Image".into(),
+            },
+            Kind::Files => format!("{} file{}", i.file_count, if i.file_count == 1 { "" } else { "s" }),
+            _ => "(empty)".into(),
+        }
+    } else {
+        text
+    };
+    if i.pinned {
+        format!("📌 {text}")
+    } else {
+        text
+    }
+}
+
+fn rebuild_clipboard_menu(t: &Tools, items: &[(u64, String)]) {
+    while t.clip.remove_at(0).is_some() {}
+    let _ = t.clip.append(&t.clip_open);
+    let _ = t.clip.append(&PredefinedMenuItem::separator());
+    if items.is_empty() {
+        let _ = t.clip.append(&MenuItem::new("No items yet", false, None));
+    }
+    for (id, label) in items {
+        let _ = t.clip.append(&MenuItem::with_id(format!("clip:{id}"), label, true, None));
+    }
+    let _ = t.clip.append(&PredefinedMenuItem::separator());
+    let _ = t.clip.append(&t.clip_pause);
+    let _ = t.clip.append(&t.clip_clear);
+}
+
+fn rebuild_displays_menu(t: &mut Tools, sig: &[(String, String, bool)]) {
+    while t.displays.remove_at(0).is_some() {}
+    t.display_items.clear();
+    if sig.is_empty() {
+        let off = with_running(|r| r.display.is_none()).unwrap_or(true);
+        let _ = t.displays.append(&MenuItem::new(
+            if off { "Display control is off" } else { "No external displays" },
+            false,
+            None,
+        ));
+        return;
+    }
+    let single = sig.len() == 1;
+    for (id, name, has_volume) in sig {
+        // One display: its controls directly; several: a submenu each.
+        let sub = Submenu::new(name, true);
+        let target: &dyn Fn(&dyn tray_icon::menu::IsMenuItem) = &|item| {
+            let _ = if single { t.displays.append(item) } else { sub.append(item) };
+        };
+        if single {
+            target(&MenuItem::new(name, false, None));
+            target(&PredefinedMenuItem::separator());
+        }
+        target(&MenuItem::new("Brightness", false, None));
+        let bright: Vec<CheckMenuItem> = DISPLAY_PRESETS
+            .iter()
+            .map(|p| CheckMenuItem::with_id(format!("disp:b:{p}:{id}"), format!("{p} %"), true, false, None))
+            .collect();
+        for b in &bright {
+            target(b);
+        }
+        let mut vol = Vec::new();
+        let mut mute = None;
+        if *has_volume {
+            target(&PredefinedMenuItem::separator());
+            target(&MenuItem::new("Volume", false, None));
+            vol = DISPLAY_PRESETS
+                .iter()
+                .map(|p| CheckMenuItem::with_id(format!("disp:v:{p}:{id}"), format!("{p} %"), true, false, None))
+                .collect();
+            for v in &vol {
+                target(v);
+            }
+            let m = CheckMenuItem::with_id(format!("disp:m:{id}"), "Mute", true, false, None);
+            target(&m);
+            mute = Some(m);
+        }
+        if !single {
+            let _ = t.displays.append(&sub);
+        }
+        t.display_items.push((id.clone(), bright, vol, mute));
+    }
 }

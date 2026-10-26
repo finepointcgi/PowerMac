@@ -438,12 +438,17 @@ impl NewApp {
 /// Open the New+ picker for `target_dir` and block until it is closed.
 /// Must run on the main thread.
 pub fn run_new_window(target_dir: PathBuf) -> anyhow::Result<()> {
+    run_new_window_with(target_dir, Config::default_path())
+}
+
+/// [`run_new_window`] with the settings file at `cfg_path` (default:
+/// [`Config::default_path`]).
+pub fn run_new_window_with(target_dir: PathBuf, cfg_path: Option<PathBuf>) -> anyhow::Result<()> {
     anyhow::ensure!(
         target_dir.is_dir(),
         "not a folder: {}",
         target_dir.display()
     );
-    let cfg_path = Config::default_path();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("New from template")

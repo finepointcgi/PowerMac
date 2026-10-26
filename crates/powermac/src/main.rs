@@ -1,6 +1,9 @@
-//! PowerMac: Mouse Without Borders, FancyZones and Awake in one cross-platform app.
+//! PowerMac: PowerToys-style utilities (Mouse Without Borders, FancyZones,
+//! Awake, Keyboard Manager, Color Picker, ...) in one cross-platform app.
 
+mod children;
 mod clipboard;
+mod display_glue;
 mod modules;
 mod mwb_glue;
 mod tray;
@@ -70,6 +73,37 @@ enum Cmd {
         #[arg(short, long)]
         pid: Option<u32>,
     },
+    /// Open the clipboard history picker (the hotkey and the tray start it).
+    Clipboard,
+    /// Pick a color from the screen, copy it in the configured format and
+    /// print it (or open the Color Picker editor with --editor).
+    ColorPicker {
+        /// Open the editor (history, variations, every format) instead.
+        #[arg(long)]
+        editor: bool,
+    },
+    /// Recognize text: in an image file, in the clipboard image, or (with
+    /// neither) in a region you select on screen. Prints the text; a selected
+    /// region is also copied to the clipboard.
+    Ocr {
+        /// An image file (PNG, JPEG, HEIC, TIFF, ...).
+        file: Option<std::path::PathBuf>,
+        /// Use the image on the clipboard.
+        #[arg(long, conflicts_with = "file")]
+        clipboard: bool,
+    },
+    /// Bulk-rename files and folders with PowerRename (the Finder Quick
+    /// Action runs this).
+    Rename {
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// Create a new file or folder from a template (New+) in a folder (the
+    /// Finder Quick Action runs this).
+    New {
+        #[arg(long)]
+        dir: std::path::PathBuf,
+    },
 }
 
 /// Running modules, kept globally so the Ctrl+C handler can shut them down
@@ -82,6 +116,31 @@ pub(crate) struct Running {
     pub(crate) scroll: Option<scroll_reverser::Handle>,
     pub(crate) mouse: Option<mouse_utils::Handle>,
     pub(crate) keyboard: Option<keyboard_manager::Handle>,
+    pub(crate) mouse_tuning: Option<mouse_tuning::Handle>,
+    pub(crate) display: Option<display_control::Handle>,
+    pub(crate) clipboard: Option<clipboard_history::Handle>,
+    pub(crate) shelf: Option<notch_shelf::Handle>,
+    pub(crate) color: Option<color_picker::Handle>,
+    pub(crate) ocr: Option<text_extractor::Handle>,
+    pub(crate) switcher: Option<window_switcher::Handle>,
+}
+
+impl Running {
+    /// Whether any module that does something by itself is running.
+    fn any(&self) -> bool {
+        self.mwb.is_some()
+            || self.zones.is_some()
+            || self.scroll.is_some()
+            || self.mouse.is_some()
+            || self.keyboard.is_some()
+            || self.mouse_tuning.is_some()
+            || self.display.is_some()
+            || self.clipboard.is_some()
+            || self.shelf.is_some()
+            || self.color.is_some()
+            || self.ocr.is_some()
+            || self.switcher.is_some()
+    }
 }
 
 /// The config file in use (for the tray's "copy key" / "open config folder").
@@ -116,6 +175,24 @@ pub(crate) fn shutdown() {
         if let Some(k) = r.keyboard.take() {
             k.stop();
         }
+        if let Some(mut m) = r.mouse_tuning.take() {
+            m.stop(); // restores the pointer settings
+        }
+        if let Some(d) = r.display.take() {
+            d.stop(); // restores gamma tables
+            display_glue::write_stopped();
+        }
+        if let Some(c) = r.clipboard.take() {
+            c.stop();
+        }
+        if let Some(s) = r.shelf.take() {
+            s.stop();
+        }
+        if let Some(w) = r.switcher.take() {
+            w.stop();
+        }
+        drop(r.color.take());
+        drop(r.ocr.take());
     }
 }
 
@@ -174,6 +251,18 @@ fn main() -> Result<()> {
         }
         Cmd::Doctor { prompt } => doctor(&path, prompt),
         Cmd::Settings => settings_ui::run(path),
+        Cmd::Clipboard => {
+            let cfg = AppConfig::load_or_default(&path)?;
+            clipboard_history::run_picker(clipboard_history::data_dir_for_config(&path), cfg.clipboard_history)
+        }
+        Cmd::ColorPicker { editor } => color_picker_cmd(&path, editor),
+        Cmd::Ocr { file, clipboard } => ocr_cmd(&path, file, clipboard),
+        Cmd::Rename { paths } => file_tools::rename_ui::run_rename_window_with(
+            paths,
+            Some(pm_config::file_tools_path_for(&path)),
+            Some(path.with_file_name("rename-undo.json")),
+        ),
+        Cmd::New { dir } => file_tools::newplus_ui::run_new_window_with(dir, Some(pm_config::file_tools_path_for(&path))),
         Cmd::Editor { monitor } => settings_ui::run_editor(path, monitor),
         Cmd::Awake { display_on, time_limit, expire_at, pid } => {
             let mode = match (time_limit, expire_at) {
@@ -202,6 +291,55 @@ fn main() -> Result<()> {
     }
 }
 
+/// `powermac color-picker [--editor]`
+fn color_picker_cmd(path: &std::path::Path, editor: bool) -> Result<()> {
+    let cfg = AppConfig::load_or_default(path)?.color_picker.settings;
+    let dir = pm_config::data_dir_for(path);
+    if editor {
+        return color_picker::run_editor(dir, cfg);
+    }
+    if !color_picker::SUPPORTED {
+        bail!("picking colors isn't supported on this platform");
+    }
+    let Some(c) = color_picker::pick_once() else {
+        eprintln!("cancelled");
+        return Ok(());
+    };
+    let text = cfg.copied_text(c);
+    if let Err(e) = color_picker::history::add(&dir, c, cfg.history_limit) {
+        log::warn!("color picker: saving history: {e:#}");
+    }
+    color_picker::copy_text(&text)?;
+    println!("{text}");
+    Ok(())
+}
+
+/// `powermac ocr [FILE] [--clipboard]`
+fn ocr_cmd(path: &std::path::Path, file: Option<std::path::PathBuf>, clipboard: bool) -> Result<()> {
+    let cfg = AppConfig::load_or_default(path)?.text_extractor.settings;
+    let text = match (file, clipboard) {
+        (Some(f), _) => text_extractor::ocr_image_with(&f, &cfg)?,
+        (None, true) => text_extractor::ocr_clipboard(&cfg)?,
+        (None, false) => {
+            if text_extractor::screen_recording_permission() != text_extractor::Permission::Granted {
+                eprintln!("note: capturing the screen needs Screen Recording permission");
+            }
+            match text_extractor::capture_once(&cfg)? {
+                Some(t) => {
+                    text_extractor::copy_text(&t)?;
+                    t
+                }
+                None => {
+                    eprintln!("cancelled");
+                    return Ok(());
+                }
+            }
+        }
+    };
+    println!("{text}");
+    Ok(())
+}
+
 fn install_ctrlc() {
     let _ = ctrlc::set_handler(|| {
         log::info!("shutting down");
@@ -218,11 +356,19 @@ fn run(path: &std::path::Path, tray: bool) -> Result<()> {
     }
     let cfg = AppConfig::load_or_default(path)?;
     let _ = CONFIG_PATH.set(path.to_path_buf());
+    // Display Control's OSD, the notch shelf and the Carbon hotkeys (Color
+    // Picker, Text Extractor) need the shared NSApplication before they start.
+    #[cfg(target_os = "macos")]
+    {
+        let mtm = objc2::MainThreadMarker::new().context("run must be on the main thread")?;
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+    }
     let mut running = Running::default();
     modules::apply(&mut running, None, &cfg);
     modules::watch(path, cfg.clone());
 
-    let anything = running.mwb.is_some() || running.zones.is_some() || cfg.awake.enabled;
+    let anything = running.any() || cfg.awake.enabled;
     if !anything && !tray {
         bail!("no module is running (check the config and permissions with `powermac doctor`)");
     }
@@ -232,9 +378,7 @@ fn run(path: &std::path::Path, tray: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         if tray {
-            // NSStatusItem needs the shared NSApplication to exist first.
-            let mtm = objc2::MainThreadMarker::new().context("run must be on the main thread")?;
-            let _ = objc2_app_kit::NSApplication::sharedApplication(mtm);
+            // NSStatusItem needs the shared NSApplication (created above).
             tray::install()?;
         }
         // The FancyZones overlay and the tray are AppKit UI: run the app loop here.
@@ -284,12 +428,18 @@ fn win_message_loop() {
 fn doctor(path: &std::path::Path, prompt: bool) -> Result<()> {
     println!("config: {} ({})", path.display(), if path.exists() { "exists" } else { "missing" });
     let cfg = AppConfig::load_or_default(path)?;
-    println!("modules: mwb={} fancyzones={} awake={}",
-        cfg.mwb.enabled, cfg.fancyzones.enabled, cfg.awake.enabled);
+    println!("modules: mwb={} fancyzones={} awake={} scroll={} mouse-tuning={} keyboard={} displays={} \
+              clipboard={} shelf={} color-picker={} text-extractor={} window-switcher={}",
+        cfg.mwb.enabled, cfg.fancyzones.enabled, cfg.awake.enabled, cfg.scroll_reverser.enabled,
+        cfg.mouse_tuning.enabled, cfg.keyboard_manager.enabled, cfg.display_control.enabled,
+        cfg.clipboard_history.enabled, cfg.notch_shelf.enabled, cfg.color_picker.enabled,
+        cfg.text_extractor.enabled, cfg.window_switcher.enabled);
     println!("machine name: {}", cfg.mwb.settings.effective_machine_name());
     println!("mwb key valid: {}", mwb::crypto::is_key_valid(&cfg.mwb.settings.key));
     let backend: Arc<dyn pm_input::InputBackend> = pm_input::backend()?;
     println!("input permissions: {}", backend.has_permissions(prompt));
+    println!("screen recording: {:?}", text_extractor::screen_recording_permission());
+    println!("finder quick actions installed: {}", file_tools::finder_integration_installed());
     for (i, s) in backend.screens()?.iter().enumerate() {
         println!("screen {i}: {}x{} at ({}, {})", s.width(), s.height(), s.left, s.top);
     }

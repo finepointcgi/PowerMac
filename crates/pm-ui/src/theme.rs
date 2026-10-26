@@ -318,11 +318,14 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 #[allow(dead_code)]
 pub mod icon {
     pub const APP_WINDOW: &str = "\u{E5DA}";
-    pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
-    pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
     pub const ARROWS_CLOCKWISE: &str = "\u{E094}";
     pub const ARROWS_DOWN_UP: &str = "\u{E098}";
     pub const ARROWS_LEFT_RIGHT: &str = "\u{E0A0}";
+    pub const ARROW_COUNTER_CLOCKWISE: &str = "\u{E038}";
+    pub const ARROW_DOWN: &str = "\u{E03E}";
+    pub const ARROW_SQUARE_OUT: &str = "\u{E5DE}";
+    pub const ARROW_UP: &str = "\u{E08E}";
+    pub const CARDS: &str = "\u{E0F8}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const CARET_LEFT: &str = "\u{E138}";
     pub const CARET_RIGHT: &str = "\u{E13A}";
@@ -336,9 +339,12 @@ pub mod icon {
     pub const CROSSHAIR: &str = "\u{E1D6}";
     pub const CURSOR: &str = "\u{E1DC}";
     pub const CURSOR_CLICK: &str = "\u{E7C8}";
+    pub const CURSOR_TEXT: &str = "\u{E7D8}";
     pub const DOTS_SIX_VERTICAL: &str = "\u{EAE2}";
     pub const EYE: &str = "\u{E220}";
+    pub const EYEDROPPER: &str = "\u{E568}";
     pub const EYE_SLASH: &str = "\u{E224}";
+    pub const FILE_PLUS: &str = "\u{E236}";
     pub const FOLDER_OPEN: &str = "\u{E256}";
     pub const GEAR_SIX: &str = "\u{E272}";
     pub const GRID_FOUR: &str = "\u{E296}";
@@ -346,6 +352,7 @@ pub mod icon {
     pub const INFO: &str = "\u{E2CE}";
     pub const KEY: &str = "\u{E2D6}";
     pub const KEYBOARD: &str = "\u{E2D8}";
+    pub const LAPTOP: &str = "\u{E586}";
     pub const LAYOUT: &str = "\u{E6D6}";
     pub const LIGHTNING: &str = "\u{E2DE}";
     pub const LINK: &str = "\u{E2E2}";
@@ -362,17 +369,25 @@ pub mod icon {
     pub const PLUGS_CONNECTED: &str = "\u{EB5A}";
     pub const PLUS: &str = "\u{E3D4}";
     pub const POWER: &str = "\u{E3DA}";
+    pub const PUSH_PIN: &str = "\u{E3E2}";
     pub const RECORD: &str = "\u{E3EE}";
     pub const ROCKET_LAUNCH: &str = "\u{E3FE}";
     pub const SHIELD_CHECK: &str = "\u{E40C}";
     pub const SLIDERS_HORIZONTAL: &str = "\u{E434}";
     pub const SPARKLE: &str = "\u{E6A2}";
+    pub const SPEAKER_HIGH: &str = "\u{E44A}";
+    pub const SPEAKER_X: &str = "\u{E45C}";
     pub const SQUARES_FOUR: &str = "\u{E464}";
     pub const STACK: &str = "\u{E466}";
+    pub const SUN: &str = "\u{E472}";
     pub const SWAP: &str = "\u{E83C}";
+    pub const SWATCHES: &str = "\u{E5B8}";
+    pub const TEXT_AA: &str = "\u{E6EE}";
     pub const TEXT_T: &str = "\u{E48A}";
     pub const TIMER: &str = "\u{E492}";
+    pub const TRANSLATE: &str = "\u{E4A2}";
     pub const TRASH: &str = "\u{E4A6}";
+    pub const TRAY: &str = "\u{E4AA}";
     pub const WARNING: &str = "\u{E4E0}";
     pub const WARNING_CIRCLE: &str = "\u{E4E2}";
     pub const X: &str = "\u{E4F6}";

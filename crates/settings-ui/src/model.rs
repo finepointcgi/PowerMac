@@ -23,20 +23,39 @@ pub enum Page {
     Mwb,
     FancyZones,
     Awake,
+    /// "Scrolling": reversal and smooth scrolling.
     ScrollReverser,
     MouseUtils,
     KeyboardManager,
+    /// "Mouse": pointer acceleration / speed and button mappings.
+    MouseTuning,
+    Displays,
+    ClipboardHistory,
+    NotchShelf,
+    ColorPicker,
+    TextExtractor,
+    FileTools,
+    WindowSwitcher,
 }
 
 impl Page {
-    pub const ALL: [Page; 7] = [
+    /// Sidebar order (grouped by [`Page::section`]).
+    pub const ALL: [Page; 15] = [
         Page::General,
-        Page::Mwb,
         Page::FancyZones,
-        Page::Awake,
+        Page::WindowSwitcher,
+        Page::NotchShelf,
+        Page::MouseTuning,
         Page::ScrollReverser,
         Page::MouseUtils,
         Page::KeyboardManager,
+        Page::Displays,
+        Page::Awake,
+        Page::ClipboardHistory,
+        Page::ColorPicker,
+        Page::TextExtractor,
+        Page::FileTools,
+        Page::Mwb,
     ];
 
     pub fn title(self) -> &'static str {
@@ -45,10 +64,34 @@ impl Page {
             Page::Mwb => "Mouse Without Borders",
             Page::FancyZones => "FancyZones",
             Page::Awake => "Awake",
-            Page::ScrollReverser => "Scroll Reverser",
+            Page::ScrollReverser => "Scrolling",
             Page::MouseUtils => "Mouse Utilities",
             Page::KeyboardManager => "Keyboard Manager",
+            Page::MouseTuning => "Mouse",
+            Page::Displays => "Displays",
+            Page::ClipboardHistory => "Clipboard History",
+            Page::NotchShelf => "Notch Shelf",
+            Page::ColorPicker => "Color Picker",
+            Page::TextExtractor => "Text Extractor",
+            Page::FileTools => "File Tools",
+            Page::WindowSwitcher => "Window Switcher",
         }
+    }
+
+    /// The sidebar group the page is listed under (`None`: above the groups).
+    pub fn section(self) -> Option<&'static str> {
+        Some(match self {
+            Page::General => return None,
+            Page::FancyZones | Page::WindowSwitcher | Page::NotchShelf => "Windows & Desktop",
+            Page::MouseTuning | Page::ScrollReverser | Page::MouseUtils | Page::KeyboardManager => {
+                "Mouse & Keyboard"
+            }
+            Page::Displays | Page::Awake => "Displays & Power",
+            Page::ClipboardHistory | Page::ColorPicker | Page::TextExtractor | Page::FileTools => {
+                "Productivity"
+            }
+            Page::Mwb => "Connectivity",
+        })
     }
 }
 
@@ -391,6 +434,186 @@ pub fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
     s.parse::<Shortcut>()
 }
 
+/// A `{win, ctrl, alt, shift, code}` hotkey (Color Picker, Text Extractor,
+/// Window Switcher, Display Control) in the settings key syntax.
+pub fn format_hk(win: bool, ctrl: bool, alt: bool, shift: bool, code: u32) -> String {
+    Combo { win, ctrl, alt, shift, vk: code }.to_text()
+}
+
+/// Parse a `{win, ctrl, alt, shift, code}` hotkey ("" = none).
+pub fn parse_hk(s: &str) -> Result<(bool, bool, bool, bool, u32), String> {
+    let h = parse_hotkey(s)?;
+    Ok((h.win, h.ctrl, h.alt, h.shift, h.code))
+}
+
+/// The display-control hotkeys: (label, accessor).
+pub const DC_HOTKEYS: [&str; 7] =
+    ["Brightness up", "Brightness down", "Contrast up", "Contrast down", "Volume up", "Volume down", "Mute"];
+
+pub fn dc_hotkey_refs(h: &mut display_control::Hotkeys) -> [&mut display_control::Hotkey; 7] {
+    [
+        &mut h.brightness_up,
+        &mut h.brightness_down,
+        &mut h.contrast_up,
+        &mut h.contrast_down,
+        &mut h.volume_up,
+        &mut h.volume_down,
+        &mut h.mute,
+    ]
+}
+
+fn dc_hotkey_list(h: &display_control::Hotkeys) -> [display_control::Hotkey; 7] {
+    [h.brightness_up, h.brightness_down, h.contrast_up, h.contrast_down, h.volume_up, h.volume_down, h.mute]
+}
+
+/// Display name of a smooth-scrolling easing curve.
+pub fn easing_label(e: scroll_reverser::Easing) -> &'static str {
+    use scroll_reverser::Easing as E;
+    match e {
+        E::EaseOutCubic => "Smooth (ease out)",
+        E::EaseOutQuint => "Snappy",
+        E::EaseOutQuad => "Gentle",
+        E::EaseInOutCubic => "Ease in and out",
+        E::Linear => "Linear",
+    }
+}
+
+/// Mouse buttons that can be remapped in the settings window.
+pub const MAPPABLE_BUTTONS: [(u8, &str); 3] = [
+    (mouse_tuning::button::MIDDLE, "Middle button"),
+    (mouse_tuning::button::BACK, "Back (side button 4)"),
+    (mouse_tuning::button::FORWARD, "Forward (side button 5)"),
+];
+
+// ---------------------------------------------------------------------------
+// Global hotkey registry: every shortcut a running module listens to, so the
+// same keys can't be given to two modules.
+
+/// One shortcut in use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyUse {
+    pub page: Page,
+    pub name: String,
+    pub combo: Combo,
+}
+
+fn hk_use(page: Page, name: impl Into<String>, win: bool, ctrl: bool, alt: bool, shift: bool, vk: u32) -> HotkeyUse {
+    HotkeyUse { page, name: name.into(), combo: Combo { win, ctrl, alt, shift, vk } }
+}
+
+fn shortcut_combo(s: &Shortcut) -> Combo {
+    use keyboard_manager::keys::Side;
+    let on = |x: Side| x != Side::None;
+    Combo { win: on(s.mods.win), ctrl: on(s.mods.ctrl), alt: on(s.mods.alt), shift: on(s.mods.shift), vk: s.key }
+}
+
+/// The shortcuts of the FancyZones features that are on (`fancyzones.json`).
+pub fn fz_hotkey_uses(fz: &fancyzones::Config, enabled: bool) -> Vec<HotkeyUse> {
+    if !enabled {
+        return Vec::new();
+    }
+    fz_active_hotkeys(&fz.settings)
+        .into_iter()
+        .filter(|(_, h)| h.code != 0)
+        .map(|(name, h)| {
+            let m = h.modifiers;
+            hk_use(Page::FancyZones, name, m.meta, m.ctrl, m.alt, m.shift, h.code as u32)
+        })
+        .collect()
+}
+
+/// The shortcuts of the modules in `config.json` that are on.
+pub fn hotkey_uses(c: &AppConfig) -> Vec<HotkeyUse> {
+    let mut v = Vec::new();
+    let mu = &c.mouse_utils;
+    let f = &mu.find_my_mouse;
+    if f.enabled && f.activation_method == mouse_utils::ActivationMethod::Shortcut {
+        let h = f.hotkey;
+        v.push(hk_use(Page::MouseUtils, "Find My Mouse", h.win, h.ctrl, h.alt, h.shift, h.code));
+    }
+    for (on, h, name) in [
+        (mu.highlighter.enabled, mu.highlighter.hotkey, "Mouse Highlighter"),
+        (mu.crosshairs.enabled, mu.crosshairs.hotkey, "Crosshairs"),
+    ] {
+        if on {
+            v.push(hk_use(Page::MouseUtils, name, h.win, h.ctrl, h.alt, h.shift, h.code));
+        }
+    }
+    let km = &c.keyboard_manager;
+    if km.paste_plain_text.enabled {
+        v.push(HotkeyUse {
+            page: Page::KeyboardManager,
+            name: "Paste as plain text".into(),
+            combo: shortcut_combo(&km.paste_plain_text.hotkey),
+        });
+    }
+    if km.enabled {
+        for (i, r) in km.remap_shortcuts.iter().enumerate() {
+            if r.app.is_none() {
+                v.push(HotkeyUse {
+                    page: Page::KeyboardManager,
+                    name: format!("Shortcut remap {}", i + 1),
+                    combo: shortcut_combo(&r.from),
+                });
+            }
+        }
+    }
+    if c.clipboard_history.enabled {
+        if let Some(s) = c.clipboard_history.hotkey() {
+            v.push(HotkeyUse { page: Page::ClipboardHistory, name: "Clipboard history".into(), combo: shortcut_combo(&s) });
+        }
+    }
+    if c.color_picker.enabled {
+        let h = c.color_picker.settings.hotkey;
+        v.push(hk_use(Page::ColorPicker, "Color Picker", h.win, h.ctrl, h.alt, h.shift, h.code));
+    }
+    if c.text_extractor.enabled {
+        let h = c.text_extractor.settings.hotkey;
+        v.push(hk_use(Page::TextExtractor, "Text Extractor", h.win, h.ctrl, h.alt, h.shift, h.code));
+    }
+    let ws = &c.window_switcher;
+    if ws.enabled {
+        for (h, name) in [(ws.trigger, "Switch between windows"), (ws.app_windows_trigger, "Switch between an app's windows")] {
+            v.push(hk_use(Page::WindowSwitcher, name, h.win, h.ctrl, h.alt, h.shift, h.code));
+        }
+        if ws.replace_cmd_tab {
+            let h = window_switcher::Hotkey::system_switcher();
+            v.push(hk_use(Page::WindowSwitcher, "Replaced system switcher", h.win, h.ctrl, h.alt, h.shift, h.code));
+        }
+    }
+    let dc = &c.display_control;
+    if dc.enabled {
+        for (h, name) in dc_hotkey_list(&dc.hotkeys).into_iter().zip(DC_HOTKEYS) {
+            v.push(hk_use(Page::Displays, name, h.win, h.ctrl, h.alt, h.shift, h.code));
+        }
+    }
+    v.retain(|u| u.combo.vk != 0);
+    v
+}
+
+/// Shortcuts used twice. Each clash is reported once, on the page of the
+/// later entry (so put the entries of other files first).
+pub fn hotkey_conflicts(uses: &[HotkeyUse]) -> Vec<Problem> {
+    let mut out = Vec::new();
+    for (i, u) in uses.iter().enumerate() {
+        if u.combo.vk == 0 {
+            continue;
+        }
+        if let Some(o) = uses[..i].iter().find(|o| o.combo == u.combo) {
+            if o.page == Page::FancyZones && u.page == Page::FancyZones {
+                continue; // validate_fancyzones reports these
+            }
+            let where_ = if o.page == u.page { String::new() } else { format!(" ({})", o.page.title()) };
+            let what = if u.name == u.page.title() { "Shortcut".to_string() } else { u.name.clone() };
+            out.push(problem(
+                u.page,
+                format!("{what}: {} is already used by {}{where_}.", u.combo.to_text(), o.name),
+            ));
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Keyboard Manager rows
 
@@ -566,6 +789,14 @@ pub struct AppDraft {
     pub key_remaps: Vec<RemapRow>,
     pub shortcut_remaps: Vec<RemapRow>,
     pub paste_hotkey: String,
+    pub color_hotkey: String,
+    pub ocr_hotkey: String,
+    pub switch_trigger: String,
+    pub switch_app_trigger: String,
+    pub display_hotkeys: [String; 7],
+    /// Shortcuts of other files (FancyZones), for the conflict check.
+    #[serde(skip)]
+    pub external_hotkeys: Vec<HotkeyUse>,
 }
 
 impl AppDraft {
@@ -582,6 +813,25 @@ impl AppDraft {
             key_remaps: k.remap_keys.iter().map(RemapRow::from_key_remap).collect(),
             shortcut_remaps: k.remap_shortcuts.iter().map(RemapRow::from_shortcut_remap).collect(),
             paste_hotkey: k.paste_plain_text.hotkey.to_string(),
+            color_hotkey: {
+                let h = cfg.color_picker.settings.hotkey;
+                format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
+            },
+            ocr_hotkey: {
+                let h = cfg.text_extractor.settings.hotkey;
+                format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
+            },
+            switch_trigger: {
+                let h = cfg.window_switcher.trigger;
+                format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
+            },
+            switch_app_trigger: {
+                let h = cfg.window_switcher.app_windows_trigger;
+                format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
+            },
+            display_hotkeys: dc_hotkey_list(&cfg.display_control.hotkeys)
+                .map(|h| format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)),
+            external_hotkeys: Vec::new(),
             cfg,
         }
     }
@@ -657,6 +907,77 @@ impl AppDraft {
             Ok(s) => km.paste_plain_text.hotkey = s,
             Err(e) => errs.push(problem(Page::KeyboardManager, format!("Paste as plain text shortcut: {e}"))),
         }
+        if km.windows_style.excluded_apps.iter().any(|a| a.trim().is_empty()) {
+            errs.push(problem(Page::KeyboardManager, "Windows-style keys, excluded apps: remove the empty entry."));
+        }
+
+        // Mouse
+        for m in &c.mouse_tuning.buttons.mappings {
+            if let mouse_tuning::ButtonAction::Keystroke { keys } = &m.action {
+                if let Err(e) = mouse_tuning::keys::parse_combo(keys) {
+                    let name = MAPPABLE_BUTTONS.iter().find(|(b, _)| *b == m.button).map(|(_, n)| *n).unwrap_or("Button");
+                    errs.push(problem(Page::MouseTuning, format!("{name}: {e}")));
+                }
+            }
+        }
+
+        // Displays
+        for ((text, hk), name) in self.display_hotkeys.iter().zip(dc_hotkey_refs(&mut c.display_control.hotkeys)).zip(DC_HOTKEYS) {
+            match parse_hk(text) {
+                Ok((w, ct, a, sh, code)) => *hk = display_control::Hotkey::new(w, ct, a, sh, code),
+                Err(e) => errs.push(problem(Page::Displays, format!("{name} shortcut: {e}"))),
+            }
+        }
+
+        // Clipboard History
+        let ch = &mut c.clipboard_history;
+        ch.hotkey = ch.hotkey.trim().to_string();
+        if !ch.hotkey.is_empty() {
+            if let Err(e) = parse_shortcut(&ch.hotkey) {
+                errs.push(problem(Page::ClipboardHistory, format!("Shortcut: {e}")));
+            }
+        }
+        if ch.excluded_apps.iter().any(|a| a.trim().is_empty()) {
+            errs.push(problem(Page::ClipboardHistory, "Excluded apps: remove the empty entry."));
+        }
+
+        // Color Picker
+        match parse_hk(&self.color_hotkey) {
+            Ok((w, ct, a, sh, code)) => c.color_picker.settings.hotkey = color_picker::Hotkey::new(w, ct, a, sh, code),
+            Err(e) => errs.push(problem(Page::ColorPicker, format!("Shortcut: {e}"))),
+        }
+        errs.extend(validate_color_formats(&c.color_picker.settings).into_iter().map(|e| problem(Page::ColorPicker, e)));
+
+        // Text Extractor
+        match parse_hk(&self.ocr_hotkey) {
+            Ok((w, ct, a, sh, code)) => c.text_extractor.settings.hotkey = text_extractor::Hotkey::new(w, ct, a, sh, code),
+            Err(e) => errs.push(problem(Page::TextExtractor, format!("Shortcut: {e}"))),
+        }
+
+        // Window Switcher
+        let ws = &mut c.window_switcher;
+        for (text, hk, name) in [
+            (&self.switch_trigger, &mut ws.trigger, "Switch between windows"),
+            (&self.switch_app_trigger, &mut ws.app_windows_trigger, "Switch between an app's windows"),
+        ] {
+            match parse_hk(text) {
+                Ok((false, false, false, _, code)) if code != 0 => {
+                    errs.push(problem(Page::WindowSwitcher, format!("{name}: add a modifier to hold (Option, Ctrl or Cmd).")))
+                }
+                Ok((w, ct, a, sh, code)) => *hk = window_switcher::Hotkey::new(w, ct, a, sh, code),
+                Err(e) => errs.push(problem(Page::WindowSwitcher, format!("{name}: {e}"))),
+            }
+        }
+        if ws.excluded_apps.iter().any(|a| a.trim().is_empty()) {
+            errs.push(problem(Page::WindowSwitcher, "Excluded apps: remove the empty entry."));
+        }
+
+        // The same shortcut in two places (only checked once each field parses).
+        if errs.is_empty() {
+            let mut uses = self.external_hotkeys.clone();
+            uses.extend(hotkey_uses(&c));
+            errs.extend(hotkey_conflicts(&uses));
+        }
 
         if errs.is_empty() {
             Ok(c)
@@ -664,6 +985,60 @@ impl AppDraft {
             Err(errs)
         }
     }
+}
+
+/// Problems with the Color Picker formats.
+pub fn validate_color_formats(c: &color_picker::Config) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, f) in c.custom_formats.iter().enumerate() {
+        let n = f.name.trim();
+        if n.is_empty() {
+            out.push(format!("Custom format {}: give it a name.", i + 1));
+        } else if c.custom_formats[..i].iter().any(|o| o.name.trim() == n) {
+            out.push(format!("There are two custom formats named “{n}”."));
+        }
+        if f.format.trim().is_empty() {
+            out.push(format!("Custom format “{n}”: enter a template, like #%ReX%GrX%BlX."));
+        }
+    }
+    if c.template(&c.copied_format).is_none() {
+        out.push(format!("The copied format “{}” doesn't exist.", c.copied_format));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// file-tools.json
+
+/// The parts of `file-tools.json` the settings window edits (PowerRename
+/// keeps its recently used terms and options there too).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FtEdit {
+    pub remember_options: bool,
+    pub show_only_changed: bool,
+    pub mru_size: usize,
+    pub new_plus: file_tools::NewPlusConfig,
+}
+
+impl FtEdit {
+    pub fn of(c: &file_tools::Config) -> Self {
+        FtEdit {
+            remember_options: c.rename.remember_options,
+            show_only_changed: c.rename.show_only_changed,
+            mru_size: c.rename.mru_size,
+            new_plus: c.new_plus.clone(),
+        }
+    }
+}
+
+/// Write the edited parts into `path`, keeping the rest as it is on disk now.
+pub fn save_file_tools(path: &Path, e: &FtEdit) -> Result<()> {
+    let mut c = file_tools::Config::load_from(path);
+    c.rename.remember_options = e.remember_options;
+    c.rename.show_only_changed = e.show_only_changed;
+    c.rename.mru_size = e.mru_size;
+    c.new_plus = e.new_plus.clone();
+    c.save_to(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1386,108 @@ mod tests {
         assert_eq!(c.mwb.settings.matrix, ["mac", "", "pc"]);
         assert_eq!(c.mwb.settings.peers["pc"], "10.1.1.1");
         assert!(c.keyboard_manager.paste_plain_text.restore_clipboard);
+    }
+
+    #[test]
+    fn new_sections_round_trip_through_the_draft() {
+        let n = now();
+        let mut cfg = AppConfig::with_new_key();
+        cfg.keyboard_manager.windows_style.enabled = true;
+        cfg.keyboard_manager.windows_style.finder_cut_paste = false;
+        cfg.keyboard_manager.windows_style.excluded_apps = vec!["com.example.Term".into()];
+        cfg.color_picker.settings.hotkey = color_picker::Hotkey::new(true, false, false, true, 0x4B);
+        cfg.window_switcher.app_windows_trigger = window_switcher::Hotkey::new(false, true, false, false, 0xC0);
+        cfg.display_control.hotkeys.mute = display_control::Hotkey::new(false, true, true, true, 0x4D);
+        cfg.mouse_tuning.buttons.mappings.push(mouse_tuning::ButtonMapping {
+            button: 2,
+            action: mouse_tuning::ButtonAction::Keystroke { keys: "Cmd+W".into() },
+        });
+        let built = AppDraft::new(cfg.clone(), n).build(n).unwrap();
+        assert_eq!(serde_json::to_value(&built).unwrap(), serde_json::to_value(&cfg).unwrap());
+
+        // Bad values are caught on their pages.
+        let mut d = AppDraft::new(cfg, n);
+        d.switch_trigger = "Tab".into();
+        d.color_hotkey = "Ctrl+Nope".into();
+        d.cfg.clipboard_history.hotkey = "Cmd+Bogus".into();
+        d.cfg.color_picker.settings.copied_format = "Missing".into();
+        d.cfg.mouse_tuning.buttons.mappings[0].action = mouse_tuning::ButtonAction::Keystroke { keys: "Cmd+Nope".into() };
+        let pages: Vec<Page> = d.build(n).unwrap_err().iter().map(|e| e.page).collect();
+        for p in [Page::WindowSwitcher, Page::ColorPicker, Page::ClipboardHistory, Page::MouseTuning] {
+            assert!(pages.contains(&p), "{p:?} in {pages:?}");
+        }
+    }
+
+    #[test]
+    fn global_hotkey_conflicts() {
+        let n = now();
+        // The defaults don't clash, FancyZones' included.
+        let mut cfg = AppConfig::with_new_key();
+        cfg.clipboard_history.enabled = true;
+        let mut d = AppDraft::new(cfg.clone(), n);
+        let mut fz = fancyzones::Config::default();
+        fz.settings.window_switching = true;
+        fz.settings.monitor_rotation = true;
+        d.external_hotkeys = fz_hotkey_uses(&fz, true);
+        let uses = [d.external_hotkeys.clone(), hotkey_uses(&cfg)].concat();
+        assert!(hotkey_conflicts(&uses).is_empty(), "{:?}", hotkey_conflicts(&uses));
+        assert!(d.build(n).is_ok());
+
+        // The Color Picker on Cmd+Shift+V clashes with the clipboard history.
+        d.color_hotkey = "Cmd+Shift+V".into();
+        let errs = d.build(n).unwrap_err();
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].page, Page::ColorPicker);
+        assert!(errs[0].message.contains("Clipboard history"), "{}", errs[0].message);
+        // ... but not while the clipboard history is off.
+        d.cfg.clipboard_history.enabled = false;
+        assert!(d.build(n).is_ok());
+
+        // A FancyZones shortcut taken by a display hotkey is reported on Displays.
+        let editor = fz.settings.editor_hotkey;
+        d.display_hotkeys[0] = format_fz_hotkey(&editor);
+        let errs = d.build(n).unwrap_err();
+        assert_eq!(errs[0].page, Page::Displays);
+        assert!(errs[0].message.contains("Layout editor"), "{}", errs[0].message);
+        // Not when FancyZones is off.
+        d.external_hotkeys = fz_hotkey_uses(&fz, false);
+        assert!(d.build(n).is_ok());
+
+        // Same page: the second one is reported.
+        let a = HotkeyUse { page: Page::Displays, name: "A".into(), combo: Combo { ctrl: true, vk: 0x41, ..Default::default() } };
+        let b = HotkeyUse { name: "B".into(), ..a.clone() };
+        let p = hotkey_conflicts(&[a, b]);
+        assert_eq!(p.len(), 1);
+        assert!(p[0].message.starts_with("B:"));
+    }
+
+    #[test]
+    fn color_formats_validation() {
+        let mut c = color_picker::Config::default();
+        assert!(validate_color_formats(&c).is_empty());
+        c.custom_formats.push(color_picker::CustomFormat { name: "x".into(), format: "%Re".into() });
+        c.custom_formats.push(color_picker::CustomFormat { name: "x".into(), format: "".into() });
+        c.copied_format = "x".into();
+        assert_eq!(validate_color_formats(&c).len(), 2);
+    }
+
+    #[test]
+    fn file_tools_save_keeps_rename_history() {
+        let dir = std::env::temp_dir().join(format!("pm-settings-ft-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file-tools.json");
+        let mut c = file_tools::Config::default();
+        c.rename.search_mru = vec!["IMG_".into()];
+        c.save_to(&path).unwrap();
+        let mut e = FtEdit::of(&file_tools::Config::default());
+        e.new_plus.open_after_create = true;
+        e.mru_size = 3;
+        save_file_tools(&path, &e).unwrap();
+        let back = file_tools::Config::load_from(&path);
+        assert_eq!(back.rename.search_mru, ["IMG_"]);
+        assert!(back.new_plus.open_after_create);
+        assert_eq!(back.rename.mru_size, 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

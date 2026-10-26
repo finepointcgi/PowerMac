@@ -19,6 +19,8 @@ use crate::widgets::*;
 use crate::mu_color::color_edit;
 use crate::zone_style;
 
+mod pages;
+
 /// Wait this long after the last change before writing the file.
 const DEBOUNCE: Duration = Duration::from_millis(300);
 /// How often the files are checked for changes made elsewhere (tray, editor).
@@ -108,7 +110,7 @@ fn meta(p: Page) -> Meta {
         Page::ScrollReverser => (
             icon::ARROWS_DOWN_UP,
             Color32::from_rgb(0x1F, 0xA5, 0xD6),
-            "Reverse the scroll direction of the mouse wheel or the trackpad.",
+            "Reverse the scroll direction per device, and make mouse wheels scroll smoothly.",
         ),
         Page::MouseUtils => (
             icon::CURSOR_CLICK,
@@ -118,7 +120,47 @@ fn meta(p: Page) -> Meta {
         Page::KeyboardManager => (
             icon::KEYBOARD,
             Color32::from_rgb(0x2F, 0xB3, 0x4F),
-            "Remap keys and shortcuts, and paste as plain text.",
+            "Remap keys and shortcuts, Windows-style keys, and paste as plain text.",
+        ),
+        Page::MouseTuning => (
+            icon::MOUSE_SIMPLE,
+            Color32::from_rgb(0xA8, 0x55, 0xF7),
+            "Pointer speed without acceleration, and what the extra mouse buttons do.",
+        ),
+        Page::Displays => (
+            icon::SUN,
+            Color32::from_rgb(0xF5, 0xB2, 0x00),
+            "Brightness, contrast and volume of external monitors, with the keyboard keys.",
+        ),
+        Page::ClipboardHistory => (
+            icon::CLIPBOARD_TEXT,
+            Color32::from_rgb(0x34, 0x7D, 0xF6),
+            "Everything you copy, one shortcut away. Search, pin and paste it again.",
+        ),
+        Page::NotchShelf => (
+            icon::TRAY,
+            Color32::from_rgb(0x3A, 0x3A, 0x3C),
+            "A drop shelf in the notch: park files, links and text, then drag them out again.",
+        ),
+        Page::ColorPicker => (
+            icon::EYEDROPPER,
+            Color32::from_rgb(0xE8, 0x4A, 0x8A),
+            "Pick a color anywhere on screen and copy it as HEX, RGB, HSL or your own format.",
+        ),
+        Page::TextExtractor => (
+            icon::TEXT_T,
+            Color32::from_rgb(0x14, 0xA3, 0x8B),
+            "Select part of the screen and copy the text in it.",
+        ),
+        Page::FileTools => (
+            icon::FOLDER_OPEN,
+            Color32::from_rgb(0x2E, 0x8C, 0xE6),
+            "PowerRename and New+ in Finder: rename many files at once, or create files from templates.",
+        ),
+        Page::WindowSwitcher => (
+            icon::CARDS,
+            Color32::from_rgb(0x58, 0x56, 0xD6),
+            "Switch between windows, not apps, with Option+Tab.",
         ),
     };
     Meta { icon, tint, blurb }
@@ -166,6 +208,36 @@ pub struct SettingsApp {
     mwb_status: Option<pm_config::MwbStatus>,
     /// When "Search now" was clicked (shows "Searching…" until the app answers).
     search_clicked: Option<Instant>,
+
+    // file-tools.json
+    ft_path: PathBuf,
+    ft: file_tools::Config,
+    ft_file: FileState,
+
+    /// Display Control status written by the running app.
+    display_status: Option<pm_config::DisplayStatus>,
+    /// Values just set here (display id, feature) → (value, when): shown
+    /// instead of the status file's until the app has caught up.
+    display_local: std::collections::HashMap<(String, u8), (u8, Instant)>,
+    /// A request not written yet (writes are spaced out while dragging).
+    display_pending: Option<pm_config::DisplayRequest>,
+    display_written: Instant,
+    /// Pointing devices (Mouse page).
+    devices: Option<Vec<mouse_tuning::DeviceInfo>>,
+    /// OCR languages the OS offers.
+    languages: Option<Vec<String>>,
+    /// "Add app" text fields, per list.
+    new_app: std::collections::BTreeMap<&'static str, String>,
+    screen_recording: bool,
+    /// AltTab (com.lwouis.alt-tab-macos) is running.
+    alt_tab_running: bool,
+    finder_installed: Option<bool>,
+    finder_error: Option<String>,
+    /// Items in the running clipboard history (asked over its local socket).
+    clip_count: Option<usize>,
+    has_notch: bool,
+    /// The custom color format being added (name, template).
+    new_format: (String, String),
 }
 
 impl SettingsApp {
@@ -199,6 +271,23 @@ impl SettingsApp {
             perms_at: now,
             mwb_status: pm_config::MwbStatus::load_for(&config_path),
             search_clicked: None,
+            ft_path: pm_config::file_tools_path_for(&config_path),
+            ft: file_tools::Config::default(),
+            ft_file: FileState::default(),
+            display_status: pm_config::DisplayStatus::load_for(&config_path),
+            display_local: Default::default(),
+            display_pending: None,
+            display_written: now,
+            devices: None,
+            languages: None,
+            new_app: Default::default(),
+            screen_recording: text_extractor::screen_recording_permission() == text_extractor::Permission::Granted,
+            alt_tab_running: alt_tab_running(),
+            finder_installed: None,
+            finder_error: None,
+            clip_count: None,
+            has_notch: notch_shelf::has_notch(),
+            new_format: Default::default(),
             config_path,
         };
         if !s.config_path.exists() {
@@ -210,6 +299,7 @@ impl SettingsApp {
         }
         s.reload_app();
         s.reload_fz();
+        s.reload_ft();
         s.refresh_monitors();
         if let Some(m) = s.monitors.iter().find(|m| m.primary).or(s.monitors.first()) {
             s.fz_selected = m.id.clone();
@@ -253,6 +343,36 @@ impl SettingsApp {
                 f.problems = validate_fancyzones(&self.fz);
             }
             Err(e) => self.fz_file.load_error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn reload_ft(&mut self) {
+        self.ft_file.mtime = mtime(&self.ft_path);
+        self.ft = file_tools::Config::load_from(&self.ft_path);
+        let v = serde_json::to_value(FtEdit::of(&self.ft)).unwrap_or_default();
+        let f = &mut self.ft_file;
+        f.written = v.to_string();
+        f.seen = v;
+        f.changed_at = None;
+        f.problems.clear();
+    }
+
+    fn save_ft(&mut self) {
+        let f = &mut self.ft_file;
+        f.changed_at = None;
+        let edit = FtEdit::of(&self.ft);
+        let v = canonical(&edit);
+        if v == f.written {
+            return;
+        }
+        match save_file_tools(&self.ft_path, &edit) {
+            Ok(()) => {
+                f.written = v;
+                f.mtime = mtime(&self.ft_path);
+                f.save_error = None;
+                self.saved_now();
+            }
+            Err(e) => f.save_error = Some(format!("{e:#}")),
         }
     }
 
@@ -317,27 +437,39 @@ impl SettingsApp {
     /// Notice edits, save after the debounce, pick up changes made elsewhere.
     fn tick(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        if self.app_file.track(serde_json::to_value(&self.app).unwrap_or_default(), now) {
+        // FancyZones' shortcuts take part in the global conflict check.
+        let ext = fz_hotkey_uses(&self.fz, self.app.cfg.fancyzones.enabled);
+        let ext_changed = ext != self.app.external_hotkeys;
+        if ext_changed {
+            self.app.external_hotkeys = ext;
+        }
+        if self.app_file.track(serde_json::to_value(&self.app).unwrap_or_default(), now) || ext_changed {
             self.app_file.problems = self.app.build(Local::now()).err().unwrap_or_default();
         }
         if self.fz_file.track(serde_json::to_value(FzEdit::of(&self.fz)).unwrap_or_default(), now) {
             self.fz_file.problems = validate_fancyzones(&self.fz);
         }
-        for which in [0, 1] {
-            let f = if which == 0 { &self.app_file } else { &self.fz_file };
+        self.ft_file.track(serde_json::to_value(FtEdit::of(&self.ft)).unwrap_or_default(), now);
+        for which in [0, 1, 2] {
+            let f = match which {
+                0 => &self.app_file,
+                1 => &self.fz_file,
+                _ => &self.ft_file,
+            };
             if let Some(t) = f.changed_at {
                 let left = DEBOUNCE.saturating_sub(now - t);
                 if left.is_zero() {
-                    if which == 0 {
-                        self.save_app()
-                    } else {
-                        self.save_fz()
+                    match which {
+                        0 => self.save_app(),
+                        1 => self.save_fz(),
+                        _ => self.save_ft(),
                     }
                 } else {
                     ctx.request_repaint_after(left);
                 }
             }
         }
+        self.flush_display_request(false);
         if now - self.last_poll >= POLL {
             self.last_poll = now;
             if mtime(&self.config_path) != self.app_file.mtime && self.app_file.clean() {
@@ -346,11 +478,22 @@ impl SettingsApp {
             if mtime(&self.fz_path) != self.fz_file.mtime && self.fz_file.clean() {
                 self.reload_fz();
             }
+            if mtime(&self.ft_path) != self.ft_file.mtime && self.ft_file.clean() {
+                self.reload_ft();
+            }
             self.mwb_status = pm_config::MwbStatus::load_for(&self.config_path);
+            self.display_status = pm_config::DisplayStatus::load_for(&self.config_path);
+            self.display_local.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(4));
             if now - self.perms_at >= Duration::from_secs(2) {
                 self.perms_at = now;
                 self.perms = crate::platform::permissions();
                 self.accent = fancyzones::platform::system_accent_color();
+                self.screen_recording =
+                    text_extractor::screen_recording_permission() == text_extractor::Permission::Granted;
+                self.alt_tab_running = alt_tab_running();
+                if self.page == Page::ClipboardHistory {
+                    self.clip_count = clipboard_count(&self.config_path);
+                }
             }
         }
         ctx.request_repaint_after(POLL);
@@ -363,10 +506,14 @@ impl SettingsApp {
         if self.fz_file.changed_at.is_some() {
             self.save_fz();
         }
+        if self.ft_file.changed_at.is_some() {
+            self.save_ft();
+        }
+        self.flush_display_request(true);
     }
 
     fn problems(&self) -> impl Iterator<Item = &Problem> {
-        self.app_file.problems.iter().chain(&self.fz_file.problems)
+        self.app_file.problems.iter().chain(&self.fz_file.problems).chain(&self.ft_file.problems)
     }
 
     fn module_on(&self, p: Page) -> Option<bool> {
@@ -382,6 +529,14 @@ impl SettingsApp {
                 Some(mu.find_my_mouse.enabled || mu.highlighter.enabled || mu.crosshairs.enabled)
             }
             Page::KeyboardManager => Some(c.keyboard_manager.enabled),
+            Page::MouseTuning => Some(c.mouse_tuning.enabled),
+            Page::Displays => Some(c.display_control.enabled),
+            Page::ClipboardHistory => Some(c.clipboard_history.enabled),
+            Page::NotchShelf => Some(c.notch_shelf.enabled),
+            Page::ColorPicker => Some(c.color_picker.enabled),
+            Page::TextExtractor => Some(c.text_extractor.enabled),
+            Page::FileTools => None,
+            Page::WindowSwitcher => Some(c.window_switcher.enabled),
         }
     }
 
@@ -399,7 +554,14 @@ impl SettingsApp {
                 mu.highlighter.enabled = on;
                 mu.crosshairs.enabled = on;
             }
-            Page::General => {}
+            Page::MouseTuning => c.mouse_tuning.enabled = on,
+            Page::Displays => c.display_control.enabled = on,
+            Page::ClipboardHistory => c.clipboard_history.enabled = on,
+            Page::NotchShelf => c.notch_shelf.enabled = on,
+            Page::ColorPicker => c.color_picker.enabled = on,
+            Page::TextExtractor => c.text_extractor.enabled = on,
+            Page::WindowSwitcher => c.window_switcher.enabled = on,
+            Page::General | Page::FileTools => {}
         }
     }
 
@@ -430,23 +592,39 @@ impl SettingsApp {
         });
         ui.add_space(16.0);
         search_field(ui, &mut self.search);
-        ui.add_space(14.0);
+        ui.add_space(10.0);
         let searching = !self.search.trim().is_empty();
         let mut go = None;
-        for page in Page::ALL {
-            let bad = self.problems().any(|x| x.page == page);
-            let dim = searching && !hits.iter().any(|h| h.page == page);
-            let selected = self.page == page && !searching;
-            if nav_row(ui, page, selected, dim, bad, self.module_on(page)).clicked() {
-                go = Some(page);
-            }
-            ui.add_space(2.0);
-        }
+        // Save status at the bottom; the page list scrolls above it.
+        let list_h = (ui.available_height() - 48.0).max(80.0);
+        egui::ScrollArea::vertical()
+            .id_salt("nav-scroll")
+            .max_height(list_h)
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show(ui, |ui| {
+                let mut section = None;
+                for page in Page::ALL {
+                    if page.section() != section {
+                        section = page.section();
+                        if let Some(name) = section {
+                            nav_section(ui, name);
+                        }
+                    }
+                    let bad = self.problems().any(|x| x.page == page);
+                    let dim = searching && !hits.iter().any(|h| h.page == page);
+                    let selected = self.page == page && !searching;
+                    if nav_row(ui, page, selected, dim, bad, self.module_on(page)).clicked() {
+                        go = Some(page);
+                    }
+                    ui.add_space(1.0);
+                }
+                ui.add_space(6.0);
+            });
         if let Some(pg) = go {
             self.search.clear();
             self.go(pg);
         }
-        // Save status at the bottom.
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(16.0);
             self.save_status(ui);
@@ -817,7 +995,7 @@ impl SettingsApp {
         let m = meta(page);
         let p = pal(ui);
         ui.add_space(30.0);
-        let master = page != Page::General && page != Page::MouseUtils;
+        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools);
         let mut on = self.module_on(page).unwrap_or(false);
         card_frame(&p)
             .inner_margin(egui::Margin::same(20))
@@ -873,6 +1051,14 @@ impl SettingsApp {
             Page::ScrollReverser => self.scroll(ui),
             Page::MouseUtils => self.mouse_utils(ui),
             Page::KeyboardManager => self.keyboard(ui),
+            Page::MouseTuning => self.mouse_tuning(ui),
+            Page::Displays => self.displays(ui),
+            Page::ClipboardHistory => self.clipboard_history(ui),
+            Page::NotchShelf => self.notch_shelf(ui),
+            Page::ColorPicker => self.color_picker(ui),
+            Page::TextExtractor => self.text_extractor(ui),
+            Page::FileTools => self.file_tools(ui),
+            Page::WindowSwitcher => self.window_switcher(ui),
         }
     }
 
@@ -890,10 +1076,24 @@ impl SettingsApp {
             |ui| {
                 for page in Page::ALL.into_iter().skip(1) {
                     let m = meta(page);
+                    let has_switch = self.module_on(page).is_some();
                     let mut on = self.module_on(page).unwrap_or(false);
                     let (_, label) =
                         icon_row(ui, m.icon, m.tint, page.title(), Some(m.blurb), |ui| {
-                            toggle_labeled(ui, &mut on, page.title())
+                            if has_switch {
+                                toggle_labeled(ui, &mut on, page.title());
+                            } else if ui
+                                .add(
+                                    egui::Button::new(
+                                        theme::icon_text(icon::CARET_RIGHT).size(14.0).color(pal(ui).text2),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text("Open its settings")
+                                .clicked()
+                            {
+                                go = Some(page);
+                            }
                         });
                     if label
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -901,7 +1101,7 @@ impl SettingsApp {
                     {
                         go = Some(page);
                     }
-                    if Some(on) != self.module_on(page) {
+                    if has_switch && Some(on) != self.module_on(page) {
                         set = Some((page, on));
                     }
                 }
@@ -941,6 +1141,7 @@ impl SettingsApp {
                     for (name, desc, ok, pane) in [
                         ("Accessibility", "Needed to move and resize windows and to send keys.", ax, "Privacy_Accessibility"),
                         ("Input Monitoring", "Needed to see the mouse and keyboard for hotkeys and gestures.", input, "Privacy_ListenEvent"),
+                        ("Screen Recording", "Needed by Text Extractor to read the screen, and for window thumbnails in the Window Switcher.", self.screen_recording, "Privacy_ScreenCapture"),
                     ] {
                         row(ui, name, Some(desc), |ui| {
                             status_pill(ui, ok, if ok { "Granted" } else { "Not granted" });
@@ -956,6 +1157,7 @@ impl SettingsApp {
             for (name, path) in [
                 ("Settings", self.config_path.clone()),
                 ("FancyZones layouts", self.fz_path.clone()),
+                ("PowerRename and New+", self.ft_path.clone()),
             ] {
                 row(ui, name, Some(&path.display().to_string()), |ui| {
                     if icon_button(ui, icon::COPY, "Copy the path").clicked() {
@@ -967,7 +1169,7 @@ impl SettingsApp {
             row(
                 ui,
                 "Folder",
-                Some("Both files are watched; edits made by hand are picked up too."),
+                Some("The files are watched; edits made by hand are picked up too."),
                 |ui| {
                     if icon_text_button(ui, icon::FOLDER_OPEN, "Open folder").clicked() {
                         if let Some(d) = self.config_path.parent() {
@@ -2238,6 +2440,50 @@ impl SettingsApp {
                 );
             }
         });
+        card_with(
+            ui,
+            "Smooth scrolling",
+            Some("Turns each notch of a mouse wheel into a short glide. Trackpads and the Magic Mouse already scroll smoothly and are left alone."),
+            |ui| {
+                toggle_row(ui, "Smooth scrolling for mouse wheels", None, &mut s.smooth_scrolling);
+                ui.add_enabled_ui(s.smooth_scrolling, |ui| {
+                    toggle_row(
+                        ui,
+                        "Smooth horizontal scrolling too",
+                        Some("For tilt wheels and side wheels."),
+                        &mut s.smooth_horizontal,
+                    );
+                    row(ui, "Distance per notch", Some("How far one notch scrolls."), |ui| {
+                        slider(ui, &mut s.smooth_step_px, 10..=300, " px")
+                    });
+                    row(ui, "Glide duration", None, |ui| {
+                        slider(ui, &mut s.smooth_duration_ms, 50..=1000, " ms")
+                    });
+                    row(
+                        ui,
+                        "Acceleration",
+                        Some("Spinning the wheel quickly scrolls further. 0 % turns it off."),
+                        |ui| slider(ui, &mut s.smooth_acceleration, 0..=scroll_reverser::SMOOTH_ACCEL_MAX, " %"),
+                    );
+                    row(ui, "Curve", Some("How each glide speeds up and slows down."), |ui| {
+                        easing_preview(ui, s.smooth_easing, s.smooth_scrolling);
+                        let items: Vec<(scroll_reverser::Easing, &str)> =
+                            scroll_reverser::Easing::ALL.iter().map(|e| (*e, easing_label(*e))).collect();
+                        combo(ui, "smooth-easing", &mut s.smooth_easing, &items)
+                    });
+                    block(ui, |ui| {
+                        hint(
+                            ui,
+                            if cfg!(target_os = "macos") {
+                                "Hold Shift, Control, Option or Command while scrolling to scroll without smoothing (for zooming and sideways scrolling)."
+                            } else {
+                                "Hold Shift, Ctrl, Alt or Win while scrolling to scroll without smoothing."
+                            },
+                        )
+                    });
+                });
+            },
+        );
         if cfg!(target_os = "macos") {
             let natural = scroll_reverser::system_natural_scrolling();
             card(ui, "macOS natural scrolling", |ui| {
@@ -2549,7 +2795,7 @@ impl SettingsApp {
                 .iter()
                 .filter_map(|r| r.shortcut_remap().ok())
                 .collect(),
-            ..Default::default()
+            ..d.cfg.keyboard_manager.clone()
         };
         let warnings = km.validate();
         if !warnings.is_empty() {
@@ -2557,6 +2803,58 @@ impl SettingsApp {
             for w in warnings {
                 warn_label(ui, &w);
             }
+        }
+
+        let mac = cfg!(target_os = "macos");
+        let ws = &mut d.cfg.keyboard_manager.windows_style;
+        card_with(
+            ui,
+            "Windows-style keys",
+            Some(if mac {
+                "Make Home, End, Ctrl+arrows and Finder behave the way they do on Windows. Your own remaps win over these."
+            } else {
+                "Windows already behaves this way, so these only apply on macOS."
+            }),
+            |ui| {
+                toggle_row(ui, "Windows-style keys", None, &mut ws.enabled);
+                ui.add_enabled_ui(ws.enabled && mac, |ui| {
+                    for it in keyboard_manager::windows_style::ITEMS.iter().filter(|i| !i.finder) {
+                        let mut on = ws.get(it.key).unwrap_or(it.default);
+                        if toggle_row(ui, it.label, Some(it.description), &mut on).changed() {
+                            ws.set(it.key, on);
+                        }
+                    }
+                    block(ui, |ui| {
+                        let p = pal(ui);
+                        ui.horizontal(|ui| {
+                            ui.label(theme::icon_text(icon::FOLDER_OPEN).size(15.0).color(p.accent));
+                            ui.label(RichText::new("In Finder").font(theme::font_semibold(13.0)).color(p.text));
+                        });
+                        hint(ui, "Only while Finder is in front, and never while you rename a file or type in a field.");
+                    });
+                    for it in keyboard_manager::windows_style::ITEMS.iter().filter(|i| i.finder) {
+                        let mut on = ws.get(it.key).unwrap_or(it.default);
+                        let label = it.label.strip_prefix("Finder: ").unwrap_or(it.label);
+                        if toggle_row(ui, label, Some(it.description), &mut on).changed() {
+                            ws.set(it.key, on);
+                        }
+                    }
+                });
+            },
+        );
+        if mac {
+            let new_app = self.new_app.entry("windows-style").or_default();
+            let running = &mut self.running_apps;
+            card_with(
+                ui,
+                "Windows-style keys: excluded apps",
+                Some("The keys outside Finder are left alone in these apps (terminals and remote desktops, where they already work or must reach the other computer)."),
+                |ui| {
+                    ui.add_enabled_ui(ws.enabled, |ui| {
+                        pages_apps_list(ui, &mut ws.excluded_apps, new_app, running, "com.example.App")
+                    });
+                },
+            );
         }
 
         card(ui, "Paste as plain text", |ui| {
@@ -2620,6 +2918,12 @@ impl SettingsApp {
     }
     pub fn set_search_for_test(&mut self, s: &str) {
         self.search = s.into();
+    }
+    pub fn reload_status_for_test(&mut self) {
+        self.display_status = pm_config::DisplayStatus::load_for(&self.config_path);
+    }
+    pub fn set_devices_for_test(&mut self, d: Vec<mouse_tuning::DeviceInfo>) {
+        self.devices = Some(d);
     }
 }
 
@@ -3827,6 +4131,56 @@ fn modifiers_edit(
     });
 }
 
+/// A small plot of an easing curve (progress over time).
+fn easing_preview(ui: &mut Ui, e: scroll_reverser::Easing, on: bool) {
+    let p = pal(ui);
+    let (r, _) = ui.allocate_exact_size(vec2(44.0, 26.0), Sense::hover());
+    ui.painter().rect(r, 5.0, p.control, Stroke::new(1.0, p.control_border.gamma_multiply(0.6)), StrokeKind::Inside);
+    let inner = r.shrink2(vec2(6.0, 5.0));
+    let pts: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let t = i as f64 / 24.0;
+            let y = e.apply(t) as f32;
+            pos2(inner.left() + inner.width() * t as f32, inner.bottom() - inner.height() * y)
+        })
+        .collect();
+    let c = if on && ui.is_enabled() { p.accent } else { p.text3 };
+    ui.painter().add(egui::Shape::line(pts, Stroke::new(1.6, c)));
+}
+
+fn pages_apps_list(
+    ui: &mut Ui,
+    list: &mut Vec<String>,
+    new_app: &mut String,
+    running: &mut Option<Vec<(String, String)>>,
+    placeholder: &str,
+) {
+    pages::apps_list_pub(ui, list, new_app, running, placeholder)
+}
+
+/// A group heading in the sidebar.
+fn nav_section(ui: &mut Ui, name: &str) {
+    let p = pal(ui);
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        ui.label(RichText::new(name).font(theme::font_semibold(11.5)).color(p.text3));
+    });
+    ui.add_space(3.0);
+}
+
+/// Whether the AltTab app (which also uses Option+Tab) is running.
+fn alt_tab_running() -> bool {
+    crate::platform::running_apps().iter().any(|(_, id)| id == "com.lwouis.alt-tab-macos")
+}
+
+/// Items in the running clipboard history, asked over its local socket.
+fn clipboard_count(config_path: &Path) -> Option<usize> {
+    let dir = clipboard_history::data_dir_for_config(config_path);
+    let c = clipboard_history::ipc::Client::connect(&dir)?;
+    c.call_ok(&clipboard_history::ipc::Request::Status).ok().map(|r| r.total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3840,7 +4194,7 @@ mod tests {
         let mut cfg = AppConfig::with_new_key();
         cfg.keyboard_manager = keyboard_manager::Config::from_json(
             r#"{"remapKeys":[{"from":"CapsLock","to":"Esc"}],
-                "remapShortcuts":[{"from":"Ctrl+Alt+T","to":{"run":{"path":"/bin/echo"}}}]}"#,
+                "remapShortcuts":[{"from":"Ctrl+Alt+Y","to":{"run":{"path":"/bin/echo"}}}]}"#,
         )
         .unwrap();
         cfg.mwb.settings.peers.insert("pc".into(), "10.0.0.2".into());
@@ -3935,6 +4289,15 @@ mod tests {
         // "Show on screen" writes a flash request next to the config.
         request_zone_flash(&path, None).unwrap();
         assert!(dir.join(fancyzones::FLASH_REQUEST_FILE).exists());
+
+        // The Windows-style keys preset survives a save from the window.
+        app.app.cfg.keyboard_manager.windows_style.enabled = true;
+        app.app.cfg.keyboard_manager.windows_style.home_end = false;
+        app.page = Page::KeyboardManager;
+        frame(&mut app);
+        app.flush();
+        let ws = AppConfig::load_or_default(&path).unwrap().keyboard_manager.windows_style;
+        assert!(ws.enabled && !ws.home_end && ws.finder_cut_paste);
 
         // An invalid edit blocks saving and is reported on its page.
         app.app.cfg.mwb.settings.key = "short".into();

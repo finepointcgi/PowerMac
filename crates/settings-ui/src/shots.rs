@@ -135,7 +135,7 @@ fn shots() {
     cfg.fancyzones.enabled = true;
     cfg.keyboard_manager = keyboard_manager::Config::from_json(
         r#"{"enabled": true, "remapKeys":[{"from":"CapsLock","to":"Esc"}],
-            "remapShortcuts":[{"from":"Ctrl+Alt+T","to":{"run":{"path":"/bin/echo"}}}]}"#,
+            "remapShortcuts":[{"from":"Ctrl+Alt+Y","to":{"run":{"path":"/bin/echo"}}}]}"#,
     )
     .unwrap();
     cfg.mwb
@@ -148,8 +148,75 @@ fn shots() {
         "studio-pc".into(),
         "living-room".into(),
     ];
+    cfg.clipboard_history.enabled = true;
+    cfg.keyboard_manager.windows_style.enabled = true;
+    cfg.mouse_tuning.mouse.disable_acceleration = true;
+    cfg.mouse_tuning.mouse.speed = Some(0.6);
+    cfg.mouse_tuning.buttons.mappings.push(mouse_tuning::ButtonMapping {
+        button: mouse_tuning::button::MIDDLE,
+        action: mouse_tuning::ButtonAction::MissionControl,
+    });
+    cfg.mouse_tuning.buttons.mappings.push(mouse_tuning::ButtonMapping {
+        button: mouse_tuning::button::FORWARD,
+        action: mouse_tuning::ButtonAction::Keystroke { keys: "Cmd+Shift+T".into() },
+    });
+    cfg.scroll_reverser.smooth_scrolling = true;
+    cfg.color_picker.settings.custom_formats.push(color_picker::CustomFormat {
+        name: "CSS var".into(),
+        format: "--brand: #%Rex%Grx%Blx;".into(),
+    });
+    cfg.color_picker.settings.visible_formats.push("CSS var".into());
+    cfg.text_extractor.settings.languages = vec!["en-US".into(), "de-DE".into()];
+    cfg.display_control.hotkeys.brightness_up = display_control::Hotkey::new(false, true, true, false, 0x26);
+    cfg.display_control.hotkeys.brightness_down = display_control::Hotkey::new(false, true, true, false, 0x28);
     cfg.save(&path).unwrap();
     sample_fz(&fancyzones_path(&path));
+    // What a running app reports about the displays (re-stamped before
+    // each render so it stays fresh).
+    let display_status = pm_config::DisplayStatus {
+        running: true,
+        keys_active: true,
+        displays: vec![
+            display_control::DisplayInfo {
+                id: "Built-in Retina Display#0".into(),
+                name: "Built-in Retina Display".into(),
+                is_builtin: true,
+                enabled: true,
+                bounds: display_control::Rect { x: 0, y: 0, width: 1512, height: 982 },
+                supports_ddc: false,
+                brightness_method: display_control::BrightnessMethod::Native,
+                brightness: Some(72),
+                contrast: None,
+                volume: None,
+                muted: None,
+                input_source: None,
+                max_brightness: None,
+                max_contrast: None,
+                max_volume: None,
+            },
+            display_control::DisplayInfo {
+                id: "LG HDR 4K#8R2N".into(),
+                name: "LG HDR 4K".into(),
+                is_builtin: false,
+                enabled: true,
+                bounds: display_control::Rect { x: 1512, y: 0, width: 2560, height: 1440 },
+                supports_ddc: true,
+                brightness_method: display_control::BrightnessMethod::Ddc,
+                brightness: Some(45),
+                contrast: Some(70),
+                volume: Some(30),
+                muted: Some(false),
+                input_source: Some(0x0F),
+                max_brightness: Some(100),
+                max_contrast: Some(100),
+                max_volume: Some(100),
+            },
+        ],
+        ..Default::default()
+    }
+    ;
+    let fresh_status = || display_status.clone().stamp().save_for(&path).unwrap();
+    fresh_status();
     // What a running app reports: one machine found automatically and
     // connected, one found but reconnecting, one with another key.
     pm_config::MwbStatus {
@@ -179,7 +246,25 @@ fn shots() {
 
     for (theme, tn) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
         for (size, suffix) in [(win(1100.0, 780.0), ""), (win(1100.0, 3400.0), "-full")] {
-            let app = SettingsApp::new(path.clone());
+            let mut app = SettingsApp::new(path.clone());
+            app.set_devices_for_test(vec![
+                mouse_tuning::DeviceInfo {
+                    id: 1,
+                    name: "MX Master 3S".into(),
+                    vendor_id: 0x046D,
+                    product_id: 0xB034,
+                    kind: mouse_tuning::DeviceKind::Mouse,
+                    transport: "Bluetooth Low Energy".into(),
+                },
+                mouse_tuning::DeviceInfo {
+                    id: 2,
+                    name: "Apple Internal Keyboard / Trackpad".into(),
+                    vendor_id: 0,
+                    product_id: 0,
+                    kind: mouse_tuning::DeviceKind::Trackpad,
+                    transport: "FIFO".into(),
+                },
+            ]);
             let mut h = Harness::builder()
                 .with_size(size)
                 .with_theme(theme)
@@ -187,19 +272,12 @@ fn shots() {
                 .wgpu()
                 .build_ui_state(|ui, app: &mut SettingsApp| app.draw(ui), app);
             for p in Page::ALL {
-                if !suffix.is_empty()
-                    && !matches!(
-                        p,
-                        Page::FancyZones
-                            | Page::Mwb
-                            | Page::General
-                            | Page::MouseUtils
-                            | Page::KeyboardManager
-                    )
-                {
+                if !suffix.is_empty() && matches!(p, Page::Awake) {
                     continue;
                 }
+                fresh_status();
                 h.state_mut().set_page(p);
+                h.state_mut().reload_status_for_test();
                 let slug = format!("{p:?}").to_lowercase();
                 save(&mut h, &dir, &format!("settings-{slug}-{tn}{suffix}"));
             }

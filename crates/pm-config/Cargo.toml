@@ -13,3 +13,10 @@ awake = { path = "../awake" }
 scroll-reverser = { path = "../scroll-reverser" }
 mouse-utils = { path = "../mouse-utils" }
 keyboard-manager = { path = "../keyboard-manager" }
+mouse-tuning = { path = "../mouse-tuning" }
+display-control = { path = "../display-control" }
+clipboard-history = { path = "../clipboard-history" }
+notch-shelf = { path = "../notch-shelf" }
+color-picker = { path = "../color-picker" }
+text-extractor = { path = "../text-extractor" }
+window-switcher = { path = "../window-switcher" }

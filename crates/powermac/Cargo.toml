@@ -17,6 +17,14 @@ pm-config = { path = "../pm-config" }
 mouse-utils = { path = "../mouse-utils" }
 keyboard-manager = { path = "../keyboard-manager" }
 settings-ui = { path = "../settings-ui" }
+mouse-tuning = { path = "../mouse-tuning" }
+display-control = { path = "../display-control" }
+clipboard-history = { path = "../clipboard-history" }
+notch-shelf = { path = "../notch-shelf" }
+color-picker = { path = "../color-picker" }
+text-extractor = { path = "../text-extractor" }
+file-tools = { path = "../file-tools" }
+window-switcher = { path = "../window-switcher" }
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 ctrlc = "3"
