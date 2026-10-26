@@ -2,6 +2,8 @@
 
 A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as a menu-bar (macOS) or notification-area (Windows) app with a settings window.
 
+**Documentation:** the full guide (every feature, its settings, the architecture and the release checklist) is in [`docs/`](docs/index.md) and is published as a site by GitLab Pages (`.gitlab-ci.yml`) or GitHub Pages (`.github/workflows/docs.yml`). Preview it locally with `pip install -r requirements-docs.txt && mkdocs serve`.
+
 | Module | What it does |
 |---|---|
 | **Mouse Without Borders** | Share one keyboard and mouse (plus clipboard text) across up to 4 machines. It is wire-compatible with Windows PowerToys MWB, so a Mac running PowerMac can join a matrix of PCs running PowerToys. |

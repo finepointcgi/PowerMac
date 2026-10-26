@@ -1,0 +1,97 @@
+site_name: PowerMac
+site_description: PowerToys-style utilities for macOS and Windows, written in Rust.
+repo_url: https://github.com/finepointcgi/PowerMac
+repo_name: finepointcgi/PowerMac
+edit_uri: edit/master/docs/
+copyright: MIT licensed
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install and first run: getting-started/install.md
+      - Permissions (macOS): getting-started/permissions.md
+      - Command line: getting-started/cli.md
+      - Configuration files: getting-started/configuration.md
+  - Features:
+      - features/index.md
+      - Windows and desktop:
+          - FancyZones and edge snapping: features/fancyzones.md
+          - Window Switcher: features/window-switcher.md
+          - Dock Previews: features/dock-previews.md
+          - Menu Bar Manager: features/menu-bar.md
+          - Notch Shelf and widgets: features/notch-shelf.md
+      - Input:
+          - Mouse Without Borders: features/mouse-without-borders.md
+          - Mouse tuning: features/mouse-tuning.md
+          - Scrolling: features/scrolling.md
+          - Mouse Utilities: features/mouse-utils.md
+          - Keyboard Manager: features/keyboard-manager.md
+          - Text Expander: features/text-expander.md
+      - Hardware:
+          - Displays (brightness and volume): features/displays.md
+          - Display Scaling (HiDPI): features/display-scaling.md
+          - Sound: features/sound.md
+          - Battery charge limit: features/battery.md
+          - Awake: features/awake.md
+      - Tools:
+          - Clipboard History: features/clipboard-history.md
+          - Color Picker: features/color-picker.md
+          - Text Extractor: features/text-extractor.md
+          - File Tools: features/file-tools.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Crates: architecture/crates.md
+      - Process model and IPC: architecture/ipc.md
+  - Development:
+      - Building and testing: development/building.md
+      - Writing documentation: development/docs.md
+  - Production readiness: production-readiness.md

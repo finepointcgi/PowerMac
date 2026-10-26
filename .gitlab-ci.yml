@@ -1,0 +1,30 @@
+# Documentation site (MkDocs Material) for GitLab Pages.
+# Merge requests build the site with --strict; the default branch publishes it.
+
+default:
+  image: python:3.12-slim
+
+stages:
+  - docs
+
+.docs:
+  stage: docs
+  before_script:
+    - pip install --no-cache-dir -r requirements-docs.txt
+
+docs-check:
+  extends: .docs
+  script:
+    - mkdocs build --strict --site-dir site
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+pages:
+  extends: .docs
+  script:
+    - mkdocs build --strict --site-dir public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
