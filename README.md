@@ -11,16 +11,22 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
 | **Edge snapping** (Rectangle-style, part of FancyZones) | Drag a window to an edge to snap it: left/right edge for a half, top for maximize, bottom for the bottom half or thirds, corners for quarters. A preview shows first, and dragging the window out restores its size. On by default on macOS; off on Windows, which has its own Snap. |
 | **Awake** | Keep the computer (and optionally the display) awake: indefinitely, for a set time, until a set time, or while a process runs. |
 | **Window Switcher** | Windows-style Alt+Tab: Option+Tab cycles through **windows** (not apps) in most-recently-used order with live previews; Option+` cycles the front app's windows. Can also replace Cmd+Tab. Q/W/M/H/F quit, close, minimize, hide or full-screen the selected window. |
-| **Notch Shelf** | Turns the notch into a drop shelf: drag files, links, text or images to the top of the screen, park them, and drag them out again later. Macs without a notch can get a "virtual notch". |
+| **Notch Shelf** | Turns the notch into a drop shelf: drag files, links, text or images to the top of the screen, park them, and drag them out again later. Macs without a notch can get a "virtual notch". The Home view has widgets (Now Playing, Calendar, Weather, Battery, System Stats, Timer, Note, Mirror) and **Quick Controls**: Awake on/off, Pick color, Extract text, Clipboard history, Window switcher, Lock screen, Show desktop. |
+| **Dock Previews** | Rest the pointer on a Dock icon and a panel shows that app's windows (live thumbnails); click one to bring it forward, W/M to close/minimize, scroll to cycle. Optionally, clicking the front app's icon minimizes or cycles its windows, like the Windows taskbar (macOS). |
+| **Menu Bar** | Off by default. Hides menu bar icons behind a chevron (Ice/Bartender style), with an always-hidden section, show on hover, auto-rehide and a floating bar; warns about icons hidden behind the notch and moves icons between sections from Settings (macOS). |
 | **Mouse** (mouse tuning) | Turn pointer acceleration off and set the speed, separately for mice and trackpads, with per-device overrides (macOS). Side buttons go back/forward; the middle and side buttons can be remapped to Mission Control, App Exposé, Launchpad, copy/paste or any shortcut. |
 | **Scrolling** | Reverse the mouse wheel but keep natural scrolling on the trackpad, or any other combination (vertical and horizontal separately), plus **smooth scrolling** for mouse wheels with adjustable distance, duration, acceleration and easing curve. |
 | **Mouse Utilities** | Find My Mouse (double-tap Left Ctrl for a spotlight), a click highlighter (Cmd/Win+Shift+H) and crosshairs (Cmd+Option+P / Win+Alt+P). |
-| **Keyboard Manager** | Remap keys (e.g. CapsLock→Esc) and shortcuts (e.g. Ctrl+Left→Option+Left, optionally only in one app). A shortcut can also run a program, open a URL or type text. **Paste as plain text** is Cmd+Option+Shift+V (Win+Ctrl+Alt+V on Windows). **Windows-style keys** (macOS, off by default): Home/End, Ctrl+arrows, Ctrl+Backspace, and in Finder Cmd+X/Cmd+V to move files, Return to open, Delete to trash. |
+| **Keyboard Manager** | Remap keys (e.g. CapsLock→Esc) and shortcuts (e.g. Ctrl+Left→Option+Left, optionally only in one app). A shortcut can also run a program, open a URL or type text. **Paste as plain text** is Cmd+Option+Shift+V (Win+Ctrl+Alt+V on Windows). **Caps Lock** can become a Hyper key (Ctrl+Option+Shift+Cmd), Control or Escape, with tap-for-Escape. **Windows-style keys** (macOS, off by default): Home/End, Ctrl+arrows, Ctrl+Backspace, and in Finder Cmd+X/Cmd+V to move files, Return to open, Delete to trash. |
 | **Displays** | Brightness, contrast and volume of external monitors over DDC/CI (Apple Silicon; native brightness for Apple displays, software dimming for the rest). The brightness/volume keys act on the display under the pointer, with an on-screen level. Sliders in Settings and presets in the tray. |
+| **Resolution & HiDPI** (Displays page) | Off by default. Every mode of every display, switched with a "keep this resolution?" countdown that reverts on its own; **HiDPI on non-Retina external displays** (a mirrored virtual display, so a 1440p monitor can look like 1920×1080 at 2×), custom "looks like" sizes, and an optional permanent display-override plist (admin). The chosen mode is remembered. |
+| **Sound** | Preferred output / microphone priority lists, a "never switch to automatically" list (AirPods), keep the built-in mic with Bluetooth headphones, and **per-app volume** (experimental on macOS 14.4+, needs System Audio Recording). Tray: Sound menu with devices and per-app presets. |
+| **Battery** | Health, cycles, temperature and adapter at a glance. On Macs whose firmware allows it, a charge limit with sailing, discharge-to-limit, heat protection and "Charge to 100 % now" (through a small privileged helper); elsewhere a pointer to macOS's own Charge Limit. |
+| **Text Expansion** | Off by default. Type an abbreviation (`;date`, `btw`) anywhere and it becomes its snippet, with variables (`{date}`, `{clipboard}`, `{cursor}`, …), per-app snippets, Backspace to undo, excluded apps, and espanso import. |
 | **Clipboard History** | Off by default. Everything you copy (text, rich text, images, files), searchable in a picker on Cmd+Shift+V (Win+Shift+V); pin items, paste again. Password managers' concealed items and excluded apps are never recorded. The tray lists the 10 most recent items. |
 | **Color Picker** | Ctrl+Option+C (Win+Shift+C) picks a color anywhere on screen and copies it as HEX, RGB, HSL, … or a custom format; the editor shows history, variations and every format. |
 | **Text Extractor** | Ctrl+Option+T (Win+Shift+T): drag over any part of the screen and the text in it is copied (Vision OCR on macOS, Windows.Media.Ocr on Windows). |
-| **File Tools** | **PowerRename** (bulk rename with search/replace, regex and previews) and **New+** (new files and folders from your templates), both from Finder Quick Actions (Explorer context menu on Windows) once installed from Settings → File Tools or the tray. |
+| **File Tools** | **PowerRename** (bulk rename with search/replace, regex and previews), **New+** (new files and folders from your templates), **Image Resizer** and the **Finder basics**: Open in Terminal / Editor, Copy Path, Eject all drives, show hidden files, what is using a file. All from Finder Quick Actions (Explorer context menu on Windows) once installed from Settings → File Tools or the tray. |
 
 ## Quick start (macOS)
 
@@ -29,7 +35,7 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
 open target/release/PowerMac.app         # or move it to /Applications first
 ```
 
-The first launch creates a config with a new Mouse Without Borders key. Everything else is in the tray menu: **Settings…**, Awake modes, FancyZones layouts, scroll direction, mouse utilities, Paste as plain text, Copy security key, Launch at login, and a **Tools** section: Pick color, Extract text, Clipboard history (picker, recent items, pause, clear), Window switcher, Show shelf, Displays (brightness/volume presets per external display) and the Finder Quick Actions switch.
+The first launch creates a config with a new Mouse Without Borders key. Everything else is in the tray menu: **Settings…**, Awake modes, FancyZones layouts, scroll direction, mouse utilities, Paste as plain text, Copy security key, Launch at login, **Sound** (output and input devices, per-app volume presets), **Battery** (status, Charge to 100 % now), and a **Tools** section: Pick color, Extract text, Clipboard history (picker, recent items, pause, clear), Window switcher, Show shelf, Displays (brightness/volume presets per external display), Show hidden menu bar items, the Finder Quick Actions switch, Eject all drives and Show hidden files.
 
 ### Command line
 
@@ -45,9 +51,13 @@ cargo build --release
 ./target/release/powermac ocr shot.png           # text in an image (--clipboard: the clipboard image; neither: select on screen)
 ./target/release/powermac rename a.jpg b.jpg     # PowerRename (what the Finder Quick Action runs)
 ./target/release/powermac new --dir ~/Desktop    # New+ (what the Finder Quick Action runs)
+./target/release/powermac resize --size 50% *.jpg  # Image Resizer (without a size option: its window)
+./target/release/powermac finder eject-all       # also open-terminal, copy-path, show-hidden, who-uses, … (no arguments: help)
 ```
 
-Config lives at `~/Library/Application Support/PowerMac/config.json` (`%APPDATA%\PowerMac\config.json` on Windows), with FancyZones layouts in `fancyzones.json` and PowerRename/New+ settings in `file-tools.json` next to it. Changes take effect within about a second, whether they come from the settings window, the tray or a text editor. Config files from older versions keep loading; new sections get their defaults. The same folder holds the clipboard history (`clipboard/`), the notch shelf, the color history, and `display-status.json` / `display-set.json`, through which the settings window (a separate process that never talks to the monitors itself) shows and changes display values via the running app.
+`scripts/bundle-macos.sh` honors `CARGO_TARGET_DIR` and also builds `powermac-battery-helper` into `PowerMac.app/Contents/MacOS` (Settings → Battery installs it as a LaunchDaemon, with an admin prompt).
+
+Config lives at `~/Library/Application Support/PowerMac/config.json` (`%APPDATA%\PowerMac\config.json` on Windows), with FancyZones layouts in `fancyzones.json` and PowerRename/New+ settings in `file-tools.json` next to it. Changes take effect within about a second, whether they come from the settings window, the tray or a text editor. Config files from older versions keep loading; new sections get their defaults. The same folder holds the clipboard history (`clipboard/`), the notch shelf, the color history, and `display-status.json` / `display-set.json`, through which the settings window (a separate process that never talks to the monitors itself) shows and changes display values via the running app. Resolution & HiDPI, Sound, Battery and Menu Bar work the same way (`display-scaling-status.json` / `-request.json`, `audio-…`, `battery-…`, `menubar-…`); `display-scaling-state.json` records what Display Scaling changed, so a crash is undone on the next start.
 
 The settings window checks shortcuts across all modules and won't save two modules on the same keys.
 
@@ -62,10 +72,15 @@ The settings window checks shortcuts across all modules and won't save two modul
 
 | Permission | Needed by |
 |---|---|
-| **Accessibility** | Mouse Without Borders, FancyZones, Scrolling, Mouse Utilities, Keyboard Manager, Window Switcher, Clipboard History's hotkey, Mouse button mappings, Displays' brightness/volume keys |
+| **Accessibility** | Mouse Without Borders, FancyZones, Scrolling, Mouse Utilities, Keyboard Manager (incl. Caps Lock), Window Switcher, Clipboard History's hotkey, Mouse button mappings, Displays' brightness/volume keys, Dock Previews, Text Expansion, Menu Bar (moving icons from Settings; listing other apps' icons on macOS 26) |
 | **Input Monitoring** | Mouse Without Borders, FancyZones, Mouse Utilities, Keyboard Manager |
-| **Screen Recording** | Text Extractor (capturing the screen; files and clipboard images work without it) and Window Switcher previews (app icons are shown without it) |
-| none | Color Picker (system loupe, Carbon hotkey), Notch Shelf, Displays sliders, pointer speed/acceleration, File Tools |
+| **Screen Recording** | Text Extractor (capturing the screen; files and clipboard images work without it), Window Switcher and Dock Previews thumbnails (app icons are shown without it), Menu Bar's floating bar images on macOS 15 and older |
+| **System Audio Recording** | Sound → per-app volume (Core Audio process taps; asked from Settings → Sound) |
+| **Calendars** | Notch Shelf's Calendar widget (asked the first time it's shown) |
+| **Camera** | Notch Shelf's Mirror widget (asked when you click it) |
+| **Automation** | Notch Shelf's "Read Music and Spotify directly" (asked once per app); File Tools' "Use the front Finder window" (Finder) |
+| **Administrator password** (once) | Battery's charge-limit helper (a LaunchDaemon), Resolution & HiDPI's optional permanent display override (a plist in /Library/Displays) |
+| none | Color Picker (system loupe, Carbon hotkey), Notch Shelf, Displays sliders, resolutions and HiDPI, Sound's device rules, battery status, pointer speed/acceleration, File Tools |
 
 Settings → General (and each module's page) shows their status and links to the right panes. A module whose permission is missing logs a message and keeps the rest of PowerMac running.
 
@@ -89,6 +104,12 @@ crates/color-picker      NSColorSampler / magnifier pick, PowerToys color format
 crates/text-extractor    region capture + Vision / Windows.Media.Ocr
 crates/file-tools        PowerRename, New+, Finder Quick Actions / Explorer verbs
 crates/window-switcher   Alt+Tab-style window switcher (event tap, CGWindowList, overlay)
+crates/display-scaling   display modes with revert timer, HiDPI via CGVirtualDisplay mirroring, override plists
+crates/audio-control     default-device rules, device levels, per-app volume (process taps / audio sessions)
+crates/battery-limit     battery status, charge-limit policy, SMC helper (LaunchDaemon) and its installer
+crates/dock-previews     window previews on Dock icons (AX tree, ScreenCaptureKit, NSPanel)
+crates/text-expander     abbreviation expansion (event tap / LL hook), variables, espanso import
+crates/menubar-manager   hide menu bar icons behind separators, notch detection, floating bar
 crates/pm-ui             shared egui theme and widgets
 crates/pm-config         the shared config.json model, launch-at-login
 crates/settings-ui       egui settings window (runs as `powermac settings`)
@@ -97,7 +118,7 @@ crates/powermac          the app: tray, module lifecycle, config reload, clipboa
 
 ## Testing
 
-`cargo test --workspace` runs about 550 tests. `PM_UI_SHOTS=<dir> cargo test -p settings-ui shots` renders every settings page (light and dark) to PNGs. `crates/mwb/tests/interop.rs` builds a .NET harness from PowerToys' own encryption and packet code (it needs `dotnet`). That harness checks byte-for-byte test vectors and runs live TCP sessions in both directions.
+`cargo test --workspace` runs about 800 tests. `PM_UI_SHOTS=<dir> cargo test -p settings-ui shots` renders every settings page (light and dark) to PNGs. `crates/mwb/tests/interop.rs` builds a .NET harness from PowerToys' own encryption and packet code (it needs `dotnet`). That harness checks byte-for-byte test vectors and runs live TCP sessions in both directions.
 
 On a Mac with permissions granted, these were also run live:
 - Input capture and injection.
@@ -116,4 +137,9 @@ On a Mac with permissions granted, these were also run live:
 - **Other window snappers:** quit Rectangle (or turn off its edge snapping) and leave macOS's "Drag windows to screen edges to tile" off; otherwise windows get snapped twice.
 - **FancyZones on macOS:** a dragged window can't be made see-through (macOS offers no API for that). Zone assignments are kept in memory, so they're lost when PowerMac restarts. 
 - **Displays:** DDC/CI is implemented for Apple Silicon Macs; on Intel Macs only native and software brightness work.
+- **Resolution & HiDPI:** HiDPI uses the private `CGVirtualDisplay` API (macOS 11+); while it's on, the display shows up as "<name> (HiDPI)" and FancyZones keeps a separate layout for it. The permanent override needs a reconnect or restart. On Windows only modes are offered (Windows scales text itself).
+- **Sound:** per-app volume on macOS is experimental (process taps, macOS 14.4+); levels are kept per bundle id.
+- **Battery:** the charge limit needs a Mac whose SMC has a known charge-control key (`CHTE` or `CH0B`/`CH0C`); others (e.g. this development Mac) get a pointer to System Settings → Battery → Charging. Windows shows status only (charge limits are vendor tools).
+- **Text Expansion / Settings:** characters the bundled fonts lack (e.g. the ツ in the default `;shrug` snippet) are drawn as boxes in the settings window; they expand correctly.
+- **Menu Bar:** moving icons from Settings synthesizes a Cmd-drag and needs Accessibility; Cmd-dragging them yourself always works. Only one manager per process.
 - **Not ported yet:** Mouse Jump, Always On Top, Workspaces.
