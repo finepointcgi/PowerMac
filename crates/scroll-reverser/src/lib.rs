@@ -7,7 +7,7 @@
 //! use scroll_reverser::{Config, ScrollReverser};
 //!
 //! let mut handle = ScrollReverser::start(Config::default())?;
-//! handle.update(Config { reverse_mouse_horizontal: true, ..Config::default() });
+//! handle.update(Config { reverse_mouse_horizontal: true, smooth_scrolling: true, ..Config::default() });
 //! handle.stop();
 //! # Ok::<(), anyhow::Error>(())
 //! ```
@@ -47,8 +47,37 @@
 //!
 //! Events injected by `pm-input` (Mouse Without Borders) carry
 //! [`PM_INPUT_INJECTED_TAG`] and are always left alone, on both platforms.
+//!
+//! # Smooth scrolling
+//!
+//! With [`Config::smooth_scrolling`] on (off by default), mouse-wheel events
+//! (only those classified [`Device::Mouse`] and, on macOS, only discrete
+//! line-based ones) are turned into eased pixel scrolling in the spirit of Mos.
+//! It runs in the same tap/hook as reversal so the two never fight: the
+//! reversal decision is made first, then the (possibly reversed) notch is
+//! swallowed and replayed as a glide of small continuous scroll events by a
+//! frame thread (see [`smooth`]). Those synthetic events carry
+//! [`SELF_INJECTED_TAG`] and are skipped by our own tap/hook (they are never
+//! classified or reversed again). Trackpads, the Magic Mouse and smooth
+//! mouse drivers (continuous events) are untouched. While Shift, Control,
+//! Option/Alt or Command is held the wheel is passed through unsmoothed, so
+//! zoom and horizontal-scroll modifiers keep their line-based behaviour.
+//!
+//! * **macOS:** one notch = [`Config::smooth_step_px`] pixels, posted as
+//!   phase-less `kCGScrollEventUnitPixel` events at the same tap location the
+//!   tap was installed at (normally the HID tap, so the system's natural
+//!   scrolling flip still applies exactly as it would have to the original).
+//!   The line delta's magnitude (macOS's own wheel acceleration) is ignored;
+//!   only its sign counts, and [`Config::smooth_acceleration`] replaces it.
+//! * **Windows:** the wheel event is swallowed and replayed through
+//!   `SendInput` as many small (non-120) `WHEEL` deltas; Windows apps accept
+//!   fractional deltas. One 120-unit notch = `2 * smooth_step_px` wheel units
+//!   (the default 60 px is exactly one notch, normally 3 lines). The frame
+//!   thread raises the timer resolution to 1 ms (`timeBeginPeriod`) only
+//!   while a glide is running. Apps that round deltas to whole notches
+//!   (some older Win32 apps) scroll in coarser steps.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -66,12 +95,16 @@ use windows as platform;
 #[cfg(test)]
 mod tests;
 
+pub mod smooth;
+pub use smooth::Easing;
+
 /// `pm-input`'s injection tag ("PMMW"): `kCGEventSourceUserData` on macOS,
 /// `dwExtraInfo` on Windows. Scroll events carrying it are never touched.
 pub const PM_INPUT_INJECTED_TAG: usize = 0x504D_4D57;
 
-/// Tag ("SRVS") put in `dwExtraInfo` of the wheel events we re-inject on
-/// Windows, so our own hook (and anyone else who cares) can recognise them.
+/// Tag ("SRVS") put on the scroll events we inject ourselves (`dwExtraInfo`
+/// on Windows, `kCGEventSourceUserData` on macOS): reversed re-injections on
+/// Windows and smooth-scrolling frames on both. Our own tap/hook skips them.
 /// It is deliberately distinct from [`PM_INPUT_INJECTED_TAG`]: Mouse Without
 /// Borders skips events with that tag, and it must still see reversed scrolls.
 pub const SELF_INJECTED_TAG: usize = 0x5352_5653;
@@ -81,10 +114,14 @@ pub const SELF_INJECTED_TAG: usize = 0x5352_5653;
 // ---------------------------------------------------------------------------
 
 /// User settings. Live-updatable through [`Handle::update`].
+///
+/// Old config files (without the `smooth*` fields) still load: every missing
+/// field takes its default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
-    /// Master switch; when false every event passes through untouched.
+    /// Master switch; when false every event passes through untouched
+    /// (reversal and smoothing).
     pub enabled: bool,
     pub reverse_mouse_vertical: bool,
     pub reverse_mouse_horizontal: bool,
@@ -94,7 +131,28 @@ pub struct Config {
     /// `WHEEL_DELTA` (120) as touchpad input. Off by default because
     /// high-resolution mice also produce such deltas. Ignored on macOS.
     pub windows_touchpad_heuristic: bool,
+    /// Smooth scrolling for mouse wheels (see the crate docs). Default off.
+    pub smooth_scrolling: bool,
+    /// Also smooth horizontal wheel notches (tilt wheels). Default on.
+    pub smooth_horizontal: bool,
+    /// Distance of one notch in pixels ([`SMOOTH_STEP_RANGE`], default 60).
+    pub smooth_step_px: u32,
+    /// Glide duration of one notch in ms ([`SMOOTH_DURATION_RANGE`], default 250).
+    pub smooth_duration_ms: u32,
+    /// Acceleration on fast spins in percent: 0 = off, 100 = default
+    /// strength (up to 4x per notch on a fast spin), up to
+    /// [`SMOOTH_ACCEL_MAX`].
+    pub smooth_acceleration: u32,
+    /// Easing curve of each notch's glide.
+    pub smooth_easing: Easing,
 }
+
+/// Accepted range of [`Config::smooth_step_px`] (values are clamped).
+pub const SMOOTH_STEP_RANGE: std::ops::RangeInclusive<u32> = 4..=1000;
+/// Accepted range of [`Config::smooth_duration_ms`] (values are clamped).
+pub const SMOOTH_DURATION_RANGE: std::ops::RangeInclusive<u32> = 20..=2000;
+/// Maximum of [`Config::smooth_acceleration`] (values are clamped).
+pub const SMOOTH_ACCEL_MAX: u32 = 500;
 
 impl Default for Config {
     fn default() -> Self {
@@ -105,6 +163,12 @@ impl Default for Config {
             reverse_trackpad_vertical: false,
             reverse_trackpad_horizontal: false,
             windows_touchpad_heuristic: false,
+            smooth_scrolling: false,
+            smooth_horizontal: true,
+            smooth_step_px: 60,
+            smooth_duration_ms: 250,
+            smooth_acceleration: 100,
+            smooth_easing: Easing::EaseOutCubic,
         }
     }
 }
@@ -115,9 +179,13 @@ const BIT_MOUSE_H: u32 = 1 << 2;
 const BIT_PAD_V: u32 = 1 << 3;
 const BIT_PAD_H: u32 = 1 << 4;
 const BIT_WIN_HEUR: u32 = 1 << 5;
+const BIT_SMOOTH: u32 = 1 << 6;
+const BIT_SMOOTH_H: u32 = 1 << 7;
 
 impl Config {
-    /// Pack into a bitset (for lock-free sharing with the hook thread).
+    /// Pack the boolean settings into a bitset (for lock-free sharing with
+    /// the hook thread). The numeric smoothing settings are packed separately
+    /// by [`Config::smooth_word`].
     pub fn to_bits(self) -> u32 {
         let mut b = 0;
         for (on, bit) in [
@@ -127,6 +195,8 @@ impl Config {
             (self.reverse_trackpad_vertical, BIT_PAD_V),
             (self.reverse_trackpad_horizontal, BIT_PAD_H),
             (self.windows_touchpad_heuristic, BIT_WIN_HEUR),
+            (self.smooth_scrolling, BIT_SMOOTH),
+            (self.smooth_horizontal, BIT_SMOOTH_H),
         ] {
             if on {
                 b |= bit;
@@ -135,6 +205,8 @@ impl Config {
         b
     }
 
+    /// Inverse of [`to_bits`](Self::to_bits); numeric smoothing settings
+    /// take their defaults.
     pub fn from_bits(b: u32) -> Self {
         Self {
             enabled: b & BIT_ENABLED != 0,
@@ -143,7 +215,63 @@ impl Config {
             reverse_trackpad_vertical: b & BIT_PAD_V != 0,
             reverse_trackpad_horizontal: b & BIT_PAD_H != 0,
             windows_touchpad_heuristic: b & BIT_WIN_HEUR != 0,
+            smooth_scrolling: b & BIT_SMOOTH != 0,
+            smooth_horizontal: b & BIT_SMOOTH_H != 0,
+            ..Self::default()
         }
+    }
+
+    /// Clamp the numeric smoothing settings into their documented ranges.
+    pub fn clamped(mut self) -> Self {
+        self.smooth_step_px =
+            self.smooth_step_px.clamp(*SMOOTH_STEP_RANGE.start(), *SMOOTH_STEP_RANGE.end());
+        self.smooth_duration_ms = self
+            .smooth_duration_ms
+            .clamp(*SMOOTH_DURATION_RANGE.start(), *SMOOTH_DURATION_RANGE.end());
+        self.smooth_acceleration = self.smooth_acceleration.min(SMOOTH_ACCEL_MAX);
+        self
+    }
+
+    /// Pack the numeric smoothing settings (clamped) into one word.
+    pub fn smooth_word(self) -> u64 {
+        let c = self.clamped();
+        c.smooth_step_px as u64
+            | (c.smooth_duration_ms as u64) << 16
+            | (c.smooth_acceleration as u64) << 32
+            | (c.smooth_easing.to_u8() as u64) << 48
+    }
+
+    /// Rebuild a config from [`to_bits`](Self::to_bits) + [`smooth_word`](Self::smooth_word).
+    pub fn from_parts(bits: u32, smooth: u64) -> Self {
+        Self {
+            smooth_step_px: (smooth & 0xFFFF) as u32,
+            smooth_duration_ms: ((smooth >> 16) & 0xFFFF) as u32,
+            smooth_acceleration: ((smooth >> 32) & 0xFFFF) as u32,
+            smooth_easing: Easing::from_u8((smooth >> 48) as u8),
+            ..Self::from_bits(bits)
+        }
+    }
+
+    /// Smoothing parameters in output units. `units_per_px` is 1 on macOS
+    /// (pixels) and [`WIN_UNITS_PER_PX`] on Windows (wheel units).
+    pub fn smooth_params(&self, units_per_px: f64) -> smooth::SmoothParams {
+        let c = self.clamped();
+        smooth::SmoothParams {
+            step: c.smooth_step_px as f64 * units_per_px,
+            duration_ns: c.smooth_duration_ms as u64 * 1_000_000,
+            acceleration: c.smooth_acceleration as f64 / 100.0,
+            easing: c.smooth_easing,
+        }
+    }
+
+    /// Whether a scroll event from `device` on the given axis gets smoothed.
+    /// `modifiers_held`: Shift/Control/Option(Alt)/Command(Win) is down.
+    pub fn smooth_for(&self, device: Device, horizontal: bool, modifiers_held: bool) -> bool {
+        self.enabled
+            && self.smooth_scrolling
+            && device == Device::Mouse
+            && !modifiers_held
+            && (!horizontal || self.smooth_horizontal)
     }
 
     /// Which axes to reverse for an event from `device`.
@@ -164,20 +292,27 @@ impl Config {
     }
 }
 
-/// Config shared with the event thread: a single atomic word, so the tap
+/// Windows: wheel units per configured smoothing pixel (60 px = 120 units = one notch).
+pub const WIN_UNITS_PER_PX: f64 = 2.0;
+
+/// Config shared with the event thread: two atomic words, so the tap
 /// callback never blocks on a lock.
 #[derive(Debug)]
-pub(crate) struct SharedConfig(AtomicU32);
+pub(crate) struct SharedConfig {
+    bits: AtomicU32,
+    smooth: AtomicU64,
+}
 
 impl SharedConfig {
     pub(crate) fn new(c: Config) -> Self {
-        Self(AtomicU32::new(c.to_bits()))
+        Self { bits: AtomicU32::new(c.to_bits()), smooth: AtomicU64::new(c.smooth_word()) }
     }
     pub(crate) fn load(&self) -> Config {
-        Config::from_bits(self.0.load(Ordering::Relaxed))
+        Config::from_parts(self.bits.load(Ordering::Relaxed), self.smooth.load(Ordering::Relaxed))
     }
     pub(crate) fn store(&self, c: Config) {
-        self.0.store(c.to_bits(), Ordering::Relaxed)
+        self.smooth.store(c.smooth_word(), Ordering::Relaxed);
+        self.bits.store(c.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -333,6 +468,56 @@ pub fn windows_action(cfg: &Config, horizontal: bool, delta: i32, extra_info: us
     }
 }
 
+/// Full Windows decision for one wheel event, including smoothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WinPlan {
+    Pass,
+    /// Swallow it and inject this delta instead (reversal only).
+    Reinject(i32),
+    /// Swallow it and glide this many (signed, possibly fractional) notches,
+    /// already reversed if reversal applies.
+    Smooth(f64),
+}
+
+/// Windows decision for one wheel event, with smooth scrolling.
+/// `modifiers_held`: Shift/Ctrl/Alt/Win is down.
+pub fn windows_plan(
+    cfg: &Config,
+    horizontal: bool,
+    delta: i32,
+    extra_info: usize,
+    modifiers_held: bool,
+) -> WinPlan {
+    let action = windows_action(cfg, horizontal, delta, extra_info);
+    if extra_info == SELF_INJECTED_TAG || extra_info == PM_INPUT_INJECTED_TAG || delta == 0 {
+        return WinPlan::Pass;
+    }
+    let device = classify_windows_delta(delta, cfg.windows_touchpad_heuristic);
+    if cfg.smooth_for(device, horizontal, modifiers_held) {
+        let d = match action {
+            WinAction::Reinject(d) => d,
+            WinAction::Pass => delta,
+        };
+        return WinPlan::Smooth(d as f64 / 120.0);
+    }
+    match action {
+        WinAction::Pass => WinPlan::Pass,
+        WinAction::Reinject(d) => WinPlan::Reinject(d),
+    }
+}
+
+/// macOS: the direction (+1 / -1 / 0) of one discrete wheel event, from its
+/// (already reversed) line delta, falling back to the fixed-point delta.
+pub fn mac_notch_direction(line_delta: i64, fixed_delta: f64) -> f64 {
+    if line_delta != 0 {
+        (line_delta as f64).signum()
+    } else if fixed_delta != 0.0 && fixed_delta.is_finite() {
+        fixed_delta.signum()
+    } else {
+        0.0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime API
 // ---------------------------------------------------------------------------
@@ -350,6 +535,8 @@ pub struct ScrollEventInfo {
     pub continuous: bool,
     pub scroll_phase: i64,
     pub momentum_phase: i64,
+    /// The event was swallowed and replayed by smooth scrolling.
+    pub smoothed: bool,
 }
 
 /// Callback invoked on the event thread for each scroll event. Keep it fast

@@ -7,6 +7,10 @@
 //!   Option+Left), to a key, to nothing, to text, to a program, or to a URL.
 //!   Each can be limited to one app (macOS bundle id or app name, Windows
 //!   process name).
+//! - **Windows-style keys** (macOS): an opt-in preset (`"windowsStyle"`)
+//!   for people used to Windows: Home/End, Ctrl+Arrow word jumps, Ctrl+
+//!   Backspace, optional Ctrl+C/V/... → Cmd, and Finder cut/paste, Enter to
+//!   open, Delete to trash, Backspace to go up. See [`windows_style`].
 //! - **Paste as plain text**: a hotkey (Cmd+Option+Shift+V on macOS,
 //!   Win+Ctrl+Alt+V on Windows, as in PowerToys) that strips the clipboard
 //!   down to plain text and pastes it, optionally putting the original rich
@@ -53,7 +57,8 @@
 //!     "hotkey": "Cmd+Option+Shift+V",
 //!     "restoreClipboard": false,
 //!     "restoreDelayMs": 500
-//!   }
+//!   },
+//!   "windowsStyle": { "enabled": true, "ctrlShortcutsToCmd": false }
 //! }
 //! ```
 //!
@@ -121,6 +126,7 @@ pub mod engine;
 pub mod keys;
 pub mod launch;
 mod powertoys;
+pub mod windows_style;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -149,11 +155,15 @@ mod platform {
     pub fn has_permission(_: bool) -> bool {
         false
     }
+    pub fn focused_role() -> Option<String> {
+        None
+    }
 }
 
 pub use config::{Config, KeyRemap, PastePlainText, RunProgram, ShortcutRemap, Target};
 pub use engine::{Action, Engine, EngineOptions, Outcome};
 pub use keys::{Key, Shortcut};
+pub use windows_style::WindowsStylePreset;
 
 /// Tag stamped on every event Keyboard Manager injects (macOS
 /// `kCGEventSourceUserData`, Windows `dwExtraInfo`): "PMKM".
@@ -203,6 +213,20 @@ pub fn foreground_app() -> Vec<String> {
     platform::foreground_app()
 }
 
+/// Synthesize the platform paste shortcut (Cmd+V on macOS, Ctrl+V on
+/// Windows), tagged with [`INJECTED_TAG`] so Keyboard Manager doesn't remap
+/// it. macOS needs Accessibility permission.
+pub fn send_paste() -> Result<()> {
+    platform::send_paste()
+}
+
+/// `AXRole` of the focused UI element of the frontmost app (macOS; `None`
+/// elsewhere or when unknown). Used by the Windows-style preset's text-field
+/// exemption.
+pub fn focused_role() -> Option<String> {
+    platform::focused_role()
+}
+
 /// Entry point.
 pub struct KeyboardManager;
 
@@ -215,8 +239,10 @@ impl KeyboardManager {
             log::warn!("keyboard-manager: {w}");
         }
         let (tx, rx) = mpsc::channel::<Job>();
+        let mut engine = Engine::new(&config, EngineOptions::default());
+        engine.set_focus_probe(Arc::new(platform::focused_role));
         let shared = Arc::new(Shared {
-            engine: Mutex::new(Engine::new(&config, EngineOptions::default())),
+            engine: Mutex::new(engine),
             config: Mutex::new(config),
             jobs: Mutex::new(Some(tx)),
         });

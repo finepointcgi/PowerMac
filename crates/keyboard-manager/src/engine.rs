@@ -41,6 +41,8 @@
 //! release doesn't open the Start menu / menu bar.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt;
+use std::sync::Arc;
 
 use pm_input::vk::*;
 
@@ -49,6 +51,7 @@ use crate::keys::{
     concrete, is_modifier, mod_family, ModFamily, Mods, Shortcut, Side, VK_DISABLED, VK_DUMMY,
     VK_WIN_BOTH,
 };
+use crate::windows_style::{self, Effect};
 
 /// Something the backend must do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +90,9 @@ pub enum Outcome {
 pub struct EngineOptions {
     /// Emit `VK_DUMMY` around suppressed Win/Alt releases (Windows).
     pub dummy_key: bool,
+    /// Honour the config's "Windows-style keys" preset (macOS; the preset
+    /// is a no-op on Windows).
+    pub windows_style: bool,
 }
 
 #[allow(clippy::derivable_impls)] // not derivable on Windows
@@ -94,6 +100,7 @@ impl Default for EngineOptions {
     fn default() -> Self {
         Self {
             dummy_key: cfg!(windows),
+            windows_style: cfg!(target_os = "macos"),
         }
     }
 }
@@ -104,6 +111,47 @@ struct ShortcutEntry {
     to: Target,
     /// Normalized app name (see [`normalize_app`]).
     app: Option<String>,
+    /// From the Windows-style preset (user remaps take precedence).
+    preset: bool,
+    /// Normalized apps where this entry is off.
+    exclude: Arc<Vec<String>>,
+    /// Pass through while a text field is focused.
+    not_in_text: bool,
+    /// Only while a Finder cut is pending.
+    needs_cut: bool,
+    effect: Effect,
+}
+
+impl ShortcutEntry {
+    fn user(from: Shortcut, to: Target, app: Option<String>) -> Self {
+        Self {
+            from,
+            to,
+            app,
+            preset: false,
+            exclude: Arc::default(),
+            not_in_text: false,
+            needs_cut: false,
+            effect: Effect::None,
+        }
+    }
+}
+
+/// Returns the `AXRole` (or subrole) of the focused UI element, if known.
+/// Used for the preset's text-field exemption; injectable for tests.
+pub type FocusProbe = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+#[derive(Clone, Default)]
+struct Probe(Option<FocusProbe>);
+
+impl fmt::Debug for Probe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Probe(set)"
+        } else {
+            "Probe(none)"
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,6 +183,10 @@ struct Active {
     src_mods: Vec<u32>,
     /// Target key currently held at the OS level (shortcut/key targets).
     target_down: Option<u32>,
+    /// End the remap when the action key is released (preset entries whose
+    /// target keeps the source modifiers, e.g. Home -> Cmd+Left or
+    /// Shift+Home -> Cmd+Shift+Left), so injected modifiers don't linger.
+    end_on_release: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,6 +206,9 @@ pub struct Engine {
     logical: BTreeSet<u32>,
     os: BTreeSet<u32>,
     active: Option<Active>,
+    /// Finder "cut" pending (Windows-style preset).
+    cut_pending: bool,
+    focus: Probe,
 }
 
 /// Normalize an app identifier for comparison: lower-case, file name only,
@@ -186,7 +241,7 @@ fn normalize_target(t: &Target) -> Target {
     }
 }
 
-fn compile(cfg: &Config) -> Compiled {
+fn compile(cfg: &Config, opts: &EngineOptions) -> Compiled {
     let mut c = Compiled::default();
     if cfg.enabled {
         for r in &cfg.remap_keys {
@@ -203,24 +258,46 @@ fn compile(cfg: &Config) -> Compiled {
             }
         }
         for r in &cfg.remap_shortcuts {
-            c.shortcuts.push(ShortcutEntry {
-                from: r.from,
-                to: normalize_target(&r.to),
-                app: r
-                    .app
+            c.shortcuts.push(ShortcutEntry::user(
+                r.from,
+                normalize_target(&r.to),
+                r.app
                     .as_deref()
                     .map(normalize_app)
                     .filter(|a| !a.is_empty()),
-            });
+            ));
         }
     }
     let p = &cfg.paste_plain_text;
     if p.enabled {
-        c.shortcuts.push(ShortcutEntry {
-            from: p.hotkey,
-            to: Target::PastePlainText,
-            app: None,
-        });
+        c.shortcuts
+            .push(ShortcutEntry::user(p.hotkey, Target::PastePlainText, None));
+    }
+    if cfg.enabled && opts.windows_style {
+        let ws = &cfg.windows_style;
+        let exclude: Arc<Vec<String>> = Arc::new(
+            ws.excluded_apps
+                .iter()
+                .map(|a| normalize_app(a))
+                .filter(|a| !a.is_empty())
+                .collect(),
+        );
+        for e in windows_style::entries(ws) {
+            c.shortcuts.push(ShortcutEntry {
+                from: e.from,
+                to: normalize_target(&e.to),
+                app: e.app.map(normalize_app),
+                preset: true,
+                exclude: if e.honor_exclusions {
+                    exclude.clone()
+                } else {
+                    Arc::default()
+                },
+                not_in_text: e.not_in_text,
+                needs_cut: e.needs_cut,
+                effect: e.effect,
+            });
+        }
     }
     c
 }
@@ -271,19 +348,35 @@ impl Engine {
     pub fn new(cfg: &Config, opts: EngineOptions) -> Self {
         Self {
             opts,
-            compiled: compile(cfg),
+            compiled: compile(cfg, &opts),
             physical: BTreeSet::new(),
             single: HashMap::new(),
             logical: BTreeSet::new(),
             os: BTreeSet::new(),
             active: None,
+            cut_pending: false,
+            focus: Probe::default(),
         }
+    }
+
+    /// Set the focused-element role probe used by the Windows-style preset's
+    /// Finder items (they pass through while a text field has focus).
+    pub fn set_focus_probe(&mut self, probe: FocusProbe) {
+        self.focus = Probe(Some(probe));
+    }
+
+    /// Whether a Finder "cut" (Cmd+X) is waiting for its Cmd+V.
+    pub fn cut_pending(&self) -> bool {
+        self.cut_pending
     }
 
     /// Swap in a new config. Keys currently held keep the behaviour they were
     /// pressed with until released.
     pub fn set_config(&mut self, cfg: &Config) {
-        self.compiled = compile(cfg);
+        self.compiled = compile(cfg, &self.opts);
+        if !self.compiled.shortcuts.iter().any(|e| e.needs_cut) {
+            self.cut_pending = false;
+        }
     }
 
     /// Keys the user physically holds (as reported to [`process`](Self::process)).
@@ -425,6 +518,7 @@ impl Engine {
             self.emit(&mut out, k, false);
         }
         self.active = None;
+        self.cut_pending = false;
         self.single.clear();
         self.logical = self.physical.clone();
         out
@@ -467,6 +561,18 @@ impl Engine {
         } else {
             self.logical.remove(&vk);
         }
+        if down && !repeat && self.cut_pending {
+            // Esc or any other copy/cut cancels a pending Finder cut (a cut
+            // re-arms it when its remap activates).
+            let held = |f: ModFamily| {
+                let (l, r) = f.sided();
+                self.logical.contains(&l) || self.logical.contains(&r)
+            };
+            let copy_mod = held(ModFamily::Win) || held(ModFamily::Ctrl);
+            if vk == VK_ESCAPE || (copy_mod && (vk == VK_C || vk == VK_X)) {
+                self.cut_pending = false;
+            }
+        }
         match self.active.take() {
             Some(a) => self.on_active(a, vk, down, repeat, out, app),
             None => self.on_idle(vk, down, out, app),
@@ -503,29 +609,54 @@ impl Engine {
                 e.from.key == vk
                     && e.from.mods.matches_exactly(|k| self.logical.contains(&k))
                     && (others_clear || matches!(e.to, Target::Key(_)))
+                    && (!e.needs_cut || self.cut_pending)
             })
             .map(|(i, _)| i)
             .collect();
         if candidates.is_empty() {
             return None;
         }
-        if candidates
-            .iter()
-            .any(|&i| self.compiled.shortcuts[i].app.is_some())
-        {
-            let ids: Vec<String> = app().iter().map(|s| normalize_app(s)).collect();
-            if let Some(&i) = candidates.iter().find(|&&i| {
-                self.compiled.shortcuts[i]
-                    .app
+        // Lazily evaluated context: foreground app ids and "a text field is
+        // focused".
+        let mut ids: Option<Vec<String>> = None;
+        let mut ids = |app: &mut dyn FnMut() -> Vec<String>| -> Vec<String> {
+            ids.get_or_insert_with(|| app().iter().map(|s| normalize_app(s)).collect())
+                .clone()
+        };
+        let mut in_text: Option<bool> = None;
+        let focus = &self.focus;
+        let mut in_text = || {
+            *in_text.get_or_insert_with(|| {
+                focus
+                    .0
                     .as_ref()
-                    .is_some_and(|a| ids.contains(a))
-            }) {
-                return Some(i);
+                    .and_then(|p| p())
+                    .is_some_and(|r| windows_style::is_text_role(&r))
+            })
+        };
+        // Precedence: user app-specific, user global, preset app-specific,
+        // preset global.
+        let mut ordered = candidates;
+        ordered.sort_by_key(|&i| {
+            let e = &self.compiled.shortcuts[i];
+            (e.preset, e.app.is_none(), i)
+        });
+        for i in ordered {
+            let e = &self.compiled.shortcuts[i];
+            if let Some(a) = &e.app {
+                if !ids(app).contains(a) {
+                    continue;
+                }
             }
+            if !e.exclude.is_empty() && ids(app).iter().any(|id| e.exclude.contains(id)) {
+                continue;
+            }
+            if e.not_in_text && in_text() {
+                continue;
+            }
+            return Some(i);
         }
-        candidates
-            .into_iter()
-            .find(|&i| self.compiled.shortcuts[i].app.is_none())
+        None
     }
 
     fn held_mods(&self) -> Vec<u32> {
@@ -538,13 +669,25 @@ impl Engine {
 
     fn activate(&mut self, i: usize, vk: u32, out: &mut Vec<Action>) {
         let e = self.compiled.shortcuts[i].clone();
+        match e.effect {
+            Effect::None => {}
+            Effect::SetCut => self.cut_pending = true,
+            Effect::ClearCut => self.cut_pending = false,
+        }
         let src_mods = self.held_mods();
         let mut a = Active {
             from: e.from,
-            to: e.to,
+            to: e.to.clone(),
             action: vk,
             src_mods,
             target_down: None,
+            end_on_release: e.preset
+                && match &e.to {
+                    Target::Shortcut(t) => ModFamily::ALL
+                        .iter()
+                        .all(|&f| e.from.mods.get(f) == Side::None || t.mods.get(f) != Side::None),
+                    _ => e.from.mods.is_empty(),
+                },
         };
         // Fired by an auto-repeat of a key the OS already has down (the key was
         // held before the modifiers): release it, the remap consumes it now.
@@ -632,10 +775,16 @@ impl Engine {
                     Target::OpenUri(u) if !repeat => out.push(Action::OpenUri(u.clone())),
                     _ => {}
                 }
-            } else if let Some(t) = a.target_down.take() {
-                // Keep a target modifier the user also holds (via another key).
-                if self.os.contains(&t) && !(is_modifier(t) && self.logical.contains(&t)) {
-                    self.emit(out, t, false);
+            } else {
+                if let Some(t) = a.target_down.take() {
+                    // Keep a target modifier the user also holds (via another key).
+                    if self.os.contains(&t) && !(is_modifier(t) && self.logical.contains(&t)) {
+                        self.emit(out, t, false);
+                    }
+                }
+                if a.end_on_release {
+                    self.deactivate(&a, out, None, Dummy::AfterPress);
+                    return;
                 }
             }
             self.active = Some(a);

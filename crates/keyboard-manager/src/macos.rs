@@ -120,6 +120,18 @@ extern "C" {
 extern "C" {
     static kAXTrustedCheckOptionPrompt: CFStringRef;
     fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
+    fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
+    fn AXUIElementCreateSystemWide() -> CFTypeRef;
+    fn AXUIElementCopyAttributeValue(el: CFTypeRef, attr: CFStringRef, out: *mut CFTypeRef) -> i32;
+    fn AXUIElementSetMessagingTimeout(el: CFTypeRef, secs: f32) -> i32;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFStringCreateWithCString(alloc: *const c_void, s: *const c_char, enc: u32) -> CFStringRef;
+    fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, len: isize, enc: u32) -> u8;
+    fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFStringGetTypeID() -> usize;
 }
 
 #[link(name = "IOKit", kind = "framework")]
@@ -589,6 +601,79 @@ pub fn foreground_app() -> Vec<String> {
     })
 }
 
+const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+
+unsafe fn ax_copy(el: CFTypeRef, attr: &std::ffi::CStr) -> Option<CFTypeRef> {
+    let name = CFStringCreateWithCString(std::ptr::null(), attr.as_ptr(), kCFStringEncodingUTF8);
+    if name.is_null() {
+        return None;
+    }
+    let mut out: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(el, name, &mut out);
+    CFRelease(name);
+    (err == 0 && !out.is_null()).then_some(out)
+}
+
+/// Copy a string attribute and release it.
+unsafe fn ax_string(el: CFTypeRef, attr: &std::ffi::CStr) -> Option<String> {
+    let v = ax_copy(el, attr)?;
+    let mut res = None;
+    if CFGetTypeID(v) == CFStringGetTypeID() {
+        let mut buf = [0 as c_char; 128];
+        if CFStringGetCString(
+            v,
+            buf.as_mut_ptr(),
+            buf.len() as isize,
+            kCFStringEncodingUTF8,
+        ) != 0
+        {
+            res = Some(
+                std::ffi::CStr::from_ptr(buf.as_ptr())
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    CFRelease(v);
+    res
+}
+
+/// `AXRole` of the frontmost app's focused UI element; the `AXSubrole`
+/// instead when that is a text role (e.g. `AXSearchField`). `None` when it
+/// can't be determined (no permission, no focused element, timeout).
+pub fn focused_role() -> Option<String> {
+    unsafe {
+        // The system-wide element answers for whichever app has keyboard
+        // focus (always current, unlike window-list heuristics).
+        let sys = AXUIElementCreateSystemWide();
+        if sys.is_null() {
+            return None;
+        }
+        // Called from the event tap: never wait long for a busy app.
+        AXUIElementSetMessagingTimeout(sys, 0.15);
+        let mut focused = ax_copy(sys, c"AXFocusedUIElement");
+        CFRelease(sys);
+        if focused.is_none() {
+            // Fall back to asking the front-most window's app directly.
+            let app = AXUIElementCreateApplication(frontmost_pid()?);
+            if app.is_null() {
+                return None;
+            }
+            AXUIElementSetMessagingTimeout(app, 0.15);
+            focused = ax_copy(app, c"AXFocusedUIElement");
+            CFRelease(app);
+        }
+        let focused = focused?;
+        let role = ax_string(focused, c"AXRole");
+        let sub = ax_string(focused, c"AXSubrole");
+        CFRelease(focused);
+        match sub {
+            Some(s) if crate::windows_style::is_text_role(&s) => Some(s),
+            _ => role,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Permission
 // ---------------------------------------------------------------------------
@@ -850,6 +935,10 @@ unsafe fn key_event(
 
     let os_before = eng.os_keys().clone();
     let outcome = eng.process(k, down, &mut foreground_app);
+    log::trace!(
+        "keyboard-manager: {k:#x} {} -> {outcome:?}",
+        if down { "down" } else { "up" }
+    );
     let physical = eng.physical_keys().clone();
     match outcome {
         Outcome::Pass => {
@@ -976,6 +1065,12 @@ mod tests {
         assert_eq!(mac_keycode(VK_RMENU), Some(mac::RIGHT_OPTION));
         assert_eq!(mac_keycode(VK_LEFT), Some(mac::LEFT_ARROW));
         assert_eq!(mac_keycode(crate::keys::VK_DUMMY), None);
+    }
+
+    #[test]
+    fn focused_role_does_not_crash() {
+        // Value depends on what is in front (and on Accessibility trust).
+        let _ = focused_role();
     }
 
     #[test]

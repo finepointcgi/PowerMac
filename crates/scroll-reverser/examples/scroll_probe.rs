@@ -3,6 +3,7 @@
 //! ```text
 //! cargo run -p scroll-reverser --example scroll_probe -- 20          # observe + reverse (default config)
 //! cargo run -p scroll-reverser --example scroll_probe -- 20 --dry    # observe only, reverse nothing
+//! cargo run -p scroll-reverser --example scroll_probe -- 20 --smooth # also smooth the mouse wheel
 //! ```
 
 use std::sync::{mpsc, Arc};
@@ -15,7 +16,9 @@ fn main() {
     let secs: u64 = args.iter().find_map(|a| a.parse().ok()).unwrap_or(15);
     let dry = args.iter().any(|a| a == "--dry");
 
-    let config = if dry { Config { enabled: false, ..Config::default() } } else { Config::default() };
+    let smooth = args.iter().any(|a| a == "--smooth");
+    let mut config = if dry { Config { enabled: false, ..Config::default() } } else { Config::default() };
+    config.smooth_scrolling = smooth;
     println!("natural scrolling (system): {:?}", scroll_reverser::system_natural_scrolling());
     println!("needs permission: {}", scroll_reverser::needs_permission());
     println!("config: {config:?}");
@@ -42,7 +45,7 @@ fn main() {
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
         match rx.recv_timeout(left) {
             Ok(e) => println!(
-                "{:<9} v={:>8.2} h={:>8.2} cont={} phase={:<3} momentum={} reversed(v={}, h={})",
+                "{:<9} v={:>8.2} h={:>8.2} cont={} phase={:<3} momentum={} reversed(v={}, h={}) smoothed={}",
                 format!("{:?}", e.device),
                 e.vertical,
                 e.horizontal,
@@ -51,6 +54,7 @@ fn main() {
                 e.momentum_phase,
                 e.reversed.vertical as u8,
                 e.reversed.horizontal as u8,
+                e.smoothed as u8,
             ),
             Err(mpsc::RecvTimeoutError::Timeout) => break,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,

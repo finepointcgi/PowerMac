@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::keys::{key_name, parse_combo, Key, Shortcut, VK_DISABLED};
+pub use crate::windows_style::WindowsStylePreset;
 
 /// Top-level Keyboard Manager configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17,6 +18,8 @@ pub struct Config {
     pub remap_shortcuts: Vec<ShortcutRemap>,
     /// "Paste as plain text" (from PowerToys Advanced Paste).
     pub paste_plain_text: PastePlainText,
+    /// The "Windows-style keys" preset (off by default; macOS only).
+    pub windows_style: WindowsStylePreset,
 }
 
 impl Default for Config {
@@ -26,6 +29,7 @@ impl Default for Config {
             remap_keys: Vec::new(),
             remap_shortcuts: Vec::new(),
             paste_plain_text: PastePlainText::default(),
+            windows_style: WindowsStylePreset::default(),
         }
     }
 }

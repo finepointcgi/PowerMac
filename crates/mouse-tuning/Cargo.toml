@@ -8,3 +8,18 @@ anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Key injection for button actions (keystrokes) and the VK tables.
+pm-input = { path = "../pm-input" }
+
+# macOS: IOKit (IOHIDEventSystemClient), CoreFoundation, CoreGraphics and
+# ApplicationServices are bound directly via `extern "C"`.
+
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

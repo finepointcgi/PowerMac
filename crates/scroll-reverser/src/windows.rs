@@ -8,6 +8,10 @@
 //!
 //! LL hooks carry no device identity, so all wheel input is classified as
 //! `Device::Mouse` unless `Config::windows_touchpad_heuristic` is on.
+//!
+//! Smooth scrolling: a mouse wheel event is swallowed and its (possibly
+//! reversed) notches are handed to a frame thread that replays them as many
+//! small `SendInput` wheel deltas tagged `SELF_INJECTED_TAG`.
 
 use std::cell::RefCell;
 use std::mem::{size_of, zeroed};
@@ -20,8 +24,10 @@ use anyhow::{anyhow, Result};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
@@ -29,10 +35,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_APP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT,
 };
 
+use crate::smooth::Animator;
 use crate::{
-    classify_windows_delta, windows_action, Observer, ScrollEventInfo, SharedConfig, WinAction,
-    SELF_INJECTED_TAG,
+    classify_windows_delta, windows_plan, Observer, ScrollEventInfo, SharedConfig, WinPlan,
+    SELF_INJECTED_TAG, WIN_UNITS_PER_PX,
 };
+
+/// Smooth-scrolling frame interval (~125 Hz; needs the 1 ms timer period).
+const FRAME: Duration = Duration::from_millis(8);
 
 /// Posted to the hook thread: wParam = 1 for horizontal, lParam = new delta.
 const WM_REINJECT: u32 = WM_APP + 0x5352;
@@ -41,6 +51,20 @@ struct HookCtx {
     shared: Arc<SharedConfig>,
     observer: Option<Observer>,
     thread_id: u32,
+    animator: Option<Animator>,
+}
+
+fn timer_fine() {
+    unsafe { timeBeginPeriod(1) };
+}
+fn timer_coarse() {
+    unsafe { timeEndPeriod(1) };
+}
+
+fn modifiers_held() -> bool {
+    [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+        .iter()
+        .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0)
 }
 
 thread_local! {
@@ -77,7 +101,23 @@ pub(crate) fn start(shared: Arc<SharedConfig>, observer: Option<Observer>) -> Re
         .name("scroll-reverser-hook".into())
         .spawn(move || unsafe {
             let thread_id = GetCurrentThreadId();
-            CTX.with(|c| *c.borrow_mut() = Some(HookCtx { shared, observer, thread_id }));
+            let animator = Animator::start(
+                Box::new(|d: [i64; 2]| {
+                    let c = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    if d[0] != 0 {
+                        reinject(false, c(d[0]));
+                    }
+                    if d[1] != 0 {
+                        reinject(true, c(d[1]));
+                    }
+                }),
+                FRAME,
+                timer_fine,
+                timer_coarse,
+            )
+            .map_err(|e| log::error!("scroll-reverser: smooth scrolling thread: {e}"))
+            .ok();
+            CTX.with(|c| *c.borrow_mut() = Some(HookCtx { shared, observer, thread_id, animator }));
             let mut msg: MSG = zeroed();
             // Create the thread's message queue before publishing its id.
             PeekMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0, PM_NOREMOVE);
@@ -139,7 +179,10 @@ fn handle_wheel(horizontal: bool, delta: i32, extra: usize) -> bool {
         let c = c.borrow();
         let Some(ctx) = c.as_ref() else { return false };
         let cfg = ctx.shared.load();
-        let action = windows_action(&cfg, horizontal, delta, extra);
+        let mut plan = windows_plan(&cfg, horizontal, delta, extra, false);
+        if matches!(plan, WinPlan::Smooth(_)) && modifiers_held() {
+            plan = windows_plan(&cfg, horizontal, delta, extra, true);
+        }
         if let Some(obs) = &ctx.observer {
             if extra != SELF_INJECTED_TAG && extra != crate::PM_INPUT_INJECTED_TAG {
                 let device = classify_windows_delta(delta, cfg.windows_touchpad_heuristic);
@@ -156,14 +199,23 @@ fn handle_wheel(horizontal: bool, delta: i32, extra: usize) -> bool {
                     continuous: false,
                     scroll_phase: 0,
                     momentum_phase: 0,
+                    smoothed: matches!(plan, WinPlan::Smooth(_)),
                 });
             }
         }
-        match action {
-            WinAction::Pass => false,
-            WinAction::Reinject(d) => unsafe {
+        match plan {
+            WinPlan::Pass => false,
+            WinPlan::Reinject(d) => unsafe {
                 PostThreadMessageW(ctx.thread_id, WM_REINJECT, horizontal as WPARAM, d as LPARAM)
                     != 0
+            },
+            WinPlan::Smooth(notches) => match &ctx.animator {
+                Some(a) => {
+                    let n = if horizontal { [0.0, notches] } else { [notches, 0.0] };
+                    a.push(n, cfg.smooth_params(WIN_UNITS_PER_PX));
+                    true
+                }
+                None => false,
             },
         }
     })

@@ -35,6 +35,7 @@ fn cfg(keys: &[(u32, Target)], shortcuts: &[(&str, Target, Option<&str>)]) -> Co
             enabled: false,
             ..Default::default()
         },
+        windows_style: Default::default(),
     }
 }
 
@@ -49,7 +50,13 @@ struct Harness {
 
 impl Harness {
     fn new(c: Config) -> Self {
-        Self::with_opts(c, EngineOptions { dummy_key: false })
+        Self::with_opts(
+            c,
+            EngineOptions {
+                dummy_key: false,
+                windows_style: true,
+            },
+        )
     }
     fn with_opts(c: Config, o: EngineOptions) -> Self {
         Harness {
@@ -378,7 +385,10 @@ fn modifier_released_restores_other_held_modifiers() {
     // pressed again so the OS matches the keyboard.
     let mut h = Harness::with_opts(
         cfg(&[], &[("Win+Ctrl+A", Target::Shortcut(sc("Ctrl+V")), None)]),
-        EngineOptions { dummy_key: true },
+        EngineOptions {
+            dummy_key: true,
+            windows_style: true,
+        },
     );
     h.down(VK_LWIN);
     h.down(VK_LCONTROL);
@@ -640,7 +650,10 @@ fn shortcut_disabled() {
 fn shortcut_disabled_emits_dummy_on_windows() {
     let mut h = Harness::with_opts(
         cfg(&[], &[("Win+D", Target::Disabled, None)]),
-        EngineOptions { dummy_key: true },
+        EngineOptions {
+            dummy_key: true,
+            windows_style: true,
+        },
     );
     h.down(VK_LWIN);
     assert_eq!(h.down(VK_D), rep(vec![d(VK_DUMMY), u(VK_DUMMY)]));
@@ -956,7 +969,13 @@ fn fuzz_no_stuck_keys() {
     };
     for dummy in [false, true] {
         for round in 0..3000 {
-            let mut h = Harness::with_opts(c.clone(), EngineOptions { dummy_key: dummy });
+            let mut h = Harness::with_opts(
+                c.clone(),
+                EngineOptions {
+                    dummy_key: dummy,
+                    windows_style: true,
+                },
+            );
             h.app = if round % 2 == 0 {
                 vec!["app".into()]
             } else {
@@ -977,6 +996,513 @@ fn fuzz_no_stuck_keys() {
                 }
             }
             // release in random order
+            while !held.is_empty() {
+                let i = (next() % held.len() as u64) as usize;
+                let k = held.remove(i);
+                h.up(k);
+            }
+            h.assert_clean();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows-style keys preset
+// ---------------------------------------------------------------------------
+
+mod windows_style {
+    use super::*;
+    use crate::windows_style::WindowsStylePreset;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    const FINDER: &str = "com.apple.finder";
+
+    fn preset(f: impl FnOnce(&mut WindowsStylePreset)) -> Config {
+        let mut c = cfg(&[], &[]);
+        c.windows_style.enabled = true;
+        f(&mut c.windows_style);
+        c
+    }
+
+    /// Harness with a fake focused-role provider; returns the role cell and
+    /// a probe call counter.
+    fn harness(c: Config) -> (Harness, Arc<Mutex<Option<String>>>, Arc<AtomicUsize>) {
+        let mut h = Harness::new(c);
+        let role = Arc::new(Mutex::new(Some("AXOutline".to_string())));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (r2, c2) = (role.clone(), calls.clone());
+        h.e.set_focus_probe(Arc::new(move || {
+            c2.fetch_add(1, Ordering::SeqCst);
+            r2.lock().unwrap().clone()
+        }));
+        (h, role, calls)
+    }
+
+    #[test]
+    fn off_by_default() {
+        let c = Config::default();
+        assert!(!c.windows_style.enabled);
+        assert!(c.windows_style.home_end && !c.windows_style.ctrl_shortcuts_to_cmd);
+        let mut h = Harness::new(cfg(&[], &[]));
+        assert_eq!(h.tap(VK_HOME), (PASS, PASS));
+        h.down(VK_LCONTROL);
+        assert_eq!(h.tap(VK_LEFT), (PASS, PASS));
+        h.up(VK_LCONTROL);
+        h.assert_clean();
+    }
+
+    #[test]
+    fn engine_option_disables_it() {
+        let mut h = Harness::with_opts(
+            preset(|_| {}),
+            EngineOptions {
+                dummy_key: false,
+                windows_style: false,
+            },
+        );
+        assert_eq!(h.tap(VK_HOME), (PASS, PASS));
+        h.assert_clean();
+    }
+
+    #[test]
+    fn master_switch_of_keyboard_manager_disables_it() {
+        let mut c = preset(|_| {});
+        c.enabled = false;
+        let mut h = Harness::new(c);
+        assert_eq!(h.tap(VK_HOME), (PASS, PASS));
+    }
+
+    #[test]
+    fn home_end_line_and_document() {
+        let (mut h, _, calls) = harness(preset(|_| {}));
+        // Home -> Cmd+Left, and Cmd is released with Home (doesn't linger).
+        assert_eq!(h.down(VK_HOME), rep(vec![d(VK_LWIN), d(VK_LEFT)]));
+        assert_eq!(h.down(VK_HOME), rep(vec![d(VK_LEFT)]), "auto-repeat");
+        assert_eq!(h.up(VK_HOME), rep(vec![u(VK_LEFT), u(VK_LWIN)]));
+        assert!(!h.e.shortcut_active());
+        assert_eq!(h.tap(VK_END).0, rep(vec![d(VK_LWIN), d(VK_RIGHT)]));
+        h.assert_clean();
+        // Shift+Home selects to line start.
+        assert_eq!(h.down(VK_LSHIFT), PASS);
+        assert_eq!(h.down(VK_HOME), rep(vec![d(VK_LWIN), d(VK_LEFT)]));
+        assert_eq!(h.up(VK_HOME), rep(vec![u(VK_LEFT), u(VK_LWIN)]));
+        assert_eq!(h.up(VK_LSHIFT), PASS);
+        // Ctrl+End -> Cmd+Down (Ctrl swapped for Cmd while held).
+        h.down(VK_LCONTROL);
+        assert_eq!(
+            h.down(VK_END),
+            rep(vec![u(VK_LCONTROL), d(VK_LWIN), d(VK_DOWN)])
+        );
+        assert_eq!(h.up(VK_END), rep(vec![u(VK_DOWN)]));
+        assert_eq!(h.up(VK_LCONTROL), rep(vec![u(VK_LWIN)]));
+        // Ctrl+Shift+Home -> Cmd+Shift+Up
+        h.down(VK_LCONTROL);
+        h.down(VK_LSHIFT);
+        assert_eq!(
+            h.down(VK_HOME),
+            rep(vec![u(VK_LCONTROL), d(VK_LWIN), d(VK_UP)])
+        );
+        h.up(VK_HOME);
+        h.up(VK_LSHIFT);
+        h.up(VK_LCONTROL);
+        h.assert_clean();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no focus probe outside Finder items"
+        );
+    }
+
+    #[test]
+    fn home_then_other_key_while_held() {
+        let mut h = Harness::new(preset(|_| {}));
+        h.down(VK_HOME);
+        // Another key ends the remap: Cmd and Left are released first.
+        assert_eq!(h.down(VK_A), rep(vec![u(VK_LEFT), u(VK_LWIN), d(VK_A)]));
+        h.up(VK_A);
+        assert_eq!(h.up(VK_HOME), rep(vec![]));
+        h.assert_clean();
+    }
+
+    #[test]
+    fn page_keys_move_caret() {
+        let mut h = Harness::new(preset(|_| {}));
+        assert_eq!(h.down(VK_PRIOR), rep(vec![d(VK_LMENU), d(VK_PRIOR)]));
+        assert_eq!(h.up(VK_PRIOR), rep(vec![u(VK_PRIOR), u(VK_LMENU)]));
+        // Shift+PageDown already selects on macOS: untouched.
+        h.down(VK_LSHIFT);
+        assert_eq!(h.tap(VK_NEXT), (PASS, PASS));
+        h.up(VK_LSHIFT);
+        let mut h = Harness::new(preset(|p| p.page_up_down = false));
+        assert_eq!(h.tap(VK_NEXT), (PASS, PASS));
+        h.assert_clean();
+    }
+
+    #[test]
+    fn ctrl_word_nav_and_delete() {
+        let mut h = Harness::new(preset(|_| {}));
+        h.down(VK_LCONTROL);
+        assert_eq!(
+            h.down(VK_LEFT),
+            rep(vec![u(VK_LCONTROL), d(VK_LMENU), d(VK_LEFT)])
+        );
+        assert_eq!(h.up(VK_LEFT), PASS);
+        // Ctrl still held: Option stays down, the next Left repeats it.
+        assert_eq!(h.down(VK_LEFT), PASS);
+        h.up(VK_LEFT);
+        // A different key ends the remap first, then Ctrl+Backspace fires.
+        assert_eq!(
+            h.down(VK_BACK),
+            rep(vec![
+                u(VK_LMENU),
+                d(VK_LCONTROL),
+                u(VK_LCONTROL),
+                d(VK_LMENU),
+                d(VK_BACK)
+            ])
+        );
+        h.up(VK_BACK);
+        assert_eq!(h.up(VK_LCONTROL), rep(vec![u(VK_LMENU)]));
+        h.assert_clean();
+        // Ctrl+Shift+Right selects a word.
+        h.down(VK_LCONTROL);
+        h.down(VK_LSHIFT);
+        assert_eq!(
+            h.down(VK_RIGHT),
+            rep(vec![u(VK_LCONTROL), d(VK_LMENU), d(VK_RIGHT)])
+        );
+        h.up(VK_RIGHT);
+        h.up(VK_LCONTROL);
+        h.up(VK_LSHIFT);
+        h.assert_clean();
+        // Toggled off.
+        let mut h = Harness::new(preset(|p| {
+            p.ctrl_word_nav = false;
+            p.ctrl_word_delete = false
+        }));
+        h.down(VK_LCONTROL);
+        assert_eq!(h.tap(VK_LEFT), (PASS, PASS));
+        assert_eq!(h.tap(VK_BACK), (PASS, PASS));
+        h.up(VK_LCONTROL);
+        h.assert_clean();
+    }
+
+    #[test]
+    fn excluded_apps_are_left_alone() {
+        let mut h = Harness::new(preset(|_| {}));
+        h.app = vec!["com.apple.Terminal".into(), "Terminal".into()];
+        assert_eq!(h.tap(VK_HOME), (PASS, PASS));
+        h.down(VK_LCONTROL);
+        assert_eq!(h.tap(VK_LEFT), (PASS, PASS));
+        h.up(VK_LCONTROL);
+        h.app = vec!["com.apple.TextEdit".into()];
+        assert_ne!(h.tap(VK_HOME).0, PASS);
+        h.assert_clean();
+    }
+
+    #[test]
+    fn ctrl_shortcuts_to_cmd_is_opt_in() {
+        let mut h = Harness::new(preset(|_| {}));
+        h.down(VK_LCONTROL);
+        assert_eq!(h.tap(VK_C), (PASS, PASS), "off by default");
+        h.up(VK_LCONTROL);
+        let mut h = Harness::new(preset(|p| p.ctrl_shortcuts_to_cmd = true));
+        h.down(VK_LCONTROL);
+        assert_eq!(h.down(VK_C), rep(vec![u(VK_LCONTROL), d(VK_LWIN), d(VK_C)]));
+        h.up(VK_C);
+        h.up(VK_LCONTROL);
+        // Ctrl+Y -> Cmd+Shift+Z (redo)
+        h.down(VK_LCONTROL);
+        assert_eq!(
+            h.down(VK_Y),
+            rep(vec![u(VK_LCONTROL), d(VK_LWIN), d(VK_LSHIFT), d(VK_Z)])
+        );
+        h.up(VK_Y);
+        h.up(VK_LCONTROL);
+        h.assert_clean();
+        // Not in terminals (Ctrl+C is SIGINT there).
+        h.app = vec!["com.googlecode.iterm2".into()];
+        h.down(VK_LCONTROL);
+        assert_eq!(h.tap(VK_C), (PASS, PASS));
+        h.up(VK_LCONTROL);
+        h.assert_clean();
+    }
+
+    #[test]
+    fn user_remaps_win_over_the_preset() {
+        let mut c = preset(|_| {});
+        c.remap_shortcuts.push(ShortcutRemap {
+            from: sc("Ctrl+Left"),
+            to: Target::Shortcut(sc("Cmd+Left")),
+            app: None,
+        });
+        let mut h = Harness::new(c);
+        h.down(VK_LCONTROL);
+        assert_eq!(
+            h.down(VK_LEFT),
+            rep(vec![u(VK_LCONTROL), d(VK_LWIN), d(VK_LEFT)])
+        );
+        h.up(VK_LEFT);
+        h.up(VK_LCONTROL);
+        h.assert_clean();
+    }
+
+    #[test]
+    fn finder_enter_opens_and_f2_renames() {
+        let (mut h, role, calls) = harness(preset(|_| {}));
+        // Outside Finder: untouched, no probe.
+        h.app = vec!["com.apple.TextEdit".into()];
+        assert_eq!(h.tap(VK_RETURN), (PASS, PASS));
+        assert_eq!(h.tap(VK_F2), (PASS, PASS));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Finder file list.
+        h.app = vec![FINDER.into(), "Finder".into()];
+        assert_eq!(h.down(VK_RETURN), rep(vec![d(VK_LWIN), d(VK_O)]));
+        assert_eq!(h.up(VK_RETURN), rep(vec![u(VK_O), u(VK_LWIN)]));
+        assert_eq!(h.down(VK_F2), rep(vec![d(VK_RETURN)]));
+        assert_eq!(h.up(VK_F2), rep(vec![u(VK_RETURN)]));
+        h.assert_clean();
+        // Renaming (text field focused): Return confirms the rename.
+        *role.lock().unwrap() = Some("AXTextField".into());
+        assert_eq!(h.tap(VK_RETURN), (PASS, PASS));
+        assert_eq!(h.tap(VK_F2), (PASS, PASS));
+        assert_eq!(h.tap(VK_BACK), (PASS, PASS));
+        assert_eq!(h.tap(VK_DELETE), (PASS, PASS));
+        // Search field reported by subrole.
+        *role.lock().unwrap() = Some("AXSearchField".into());
+        assert_eq!(h.tap(VK_BACK), (PASS, PASS));
+        // Unknown focus: treated as not editing.
+        *role.lock().unwrap() = None;
+        assert_eq!(h.tap(VK_BACK).0, rep(vec![d(VK_LWIN), d(VK_UP)]));
+        h.assert_clean();
+    }
+
+    #[test]
+    fn finder_delete_and_backspace() {
+        let (mut h, _, _) = harness(preset(|_| {}));
+        h.app = vec![FINDER.into()];
+        assert_eq!(h.down(VK_DELETE), rep(vec![d(VK_LWIN), d(VK_BACK)]));
+        assert_eq!(h.up(VK_DELETE), rep(vec![u(VK_BACK), u(VK_LWIN)]));
+        assert_eq!(h.down(VK_BACK), rep(vec![d(VK_LWIN), d(VK_UP)]));
+        assert_eq!(h.up(VK_BACK), rep(vec![u(VK_UP), u(VK_LWIN)]));
+        // Cmd+Backspace (the Mac habit) still passes.
+        h.down(VK_LWIN);
+        assert_eq!(h.tap(VK_BACK), (PASS, PASS));
+        h.up(VK_LWIN);
+        h.assert_clean();
+        let (mut h, _, _) = harness(preset(|p| {
+            p.finder_delete_to_trash = false;
+            p.finder_backspace_up = false
+        }));
+        h.app = vec![FINDER.into()];
+        assert_eq!(h.tap(VK_DELETE), (PASS, PASS));
+        assert_eq!(h.tap(VK_BACK), (PASS, PASS));
+    }
+
+    fn cmd_tap(h: &mut Harness, k: u32) -> Outcome {
+        h.down(VK_LWIN);
+        let o = h.down(k);
+        h.up(k);
+        h.up(VK_LWIN);
+        o
+    }
+
+    #[test]
+    fn finder_cut_then_paste_moves() {
+        let (mut h, role, _) = harness(preset(|_| {}));
+        h.app = vec![FINDER.into()];
+        // Plain Cmd+V with nothing cut: a normal paste.
+        assert_eq!(cmd_tap(&mut h, VK_V), PASS);
+        // Cmd+X -> Cmd+C, cut pending.
+        assert_eq!(cmd_tap(&mut h, VK_X), rep(vec![d(VK_C)]));
+        assert!(h.e.cut_pending());
+        // Cmd+V -> Cmd+Option+V (move), pending cleared.
+        assert_eq!(cmd_tap(&mut h, VK_V), rep(vec![d(VK_LMENU), d(VK_V)]));
+        assert!(!h.e.cut_pending());
+        // A second Cmd+V is a normal paste again.
+        assert_eq!(cmd_tap(&mut h, VK_V), PASS);
+        h.assert_clean();
+
+        // Esc cancels.
+        cmd_tap(&mut h, VK_X);
+        assert!(h.e.cut_pending());
+        h.tap(VK_ESCAPE);
+        assert!(!h.e.cut_pending());
+        assert_eq!(cmd_tap(&mut h, VK_V), PASS);
+
+        // Another copy cancels (in any app).
+        cmd_tap(&mut h, VK_X);
+        h.app = vec!["com.apple.TextEdit".into()];
+        assert_eq!(cmd_tap(&mut h, VK_C), PASS);
+        assert!(!h.e.cut_pending());
+        h.app = vec![FINDER.into()];
+        assert_eq!(cmd_tap(&mut h, VK_V), PASS);
+
+        // Cut + paste while keeping Cmd held.
+        h.down(VK_LWIN);
+        assert_eq!(h.down(VK_X), rep(vec![d(VK_C)]));
+        h.up(VK_X);
+        assert_eq!(
+            h.down(VK_V),
+            rep(vec![u(VK_C)]
+                .into_iter()
+                .filter(|_| false)
+                .chain([d(VK_LMENU), d(VK_V)])
+                .collect())
+        );
+        h.up(VK_V);
+        h.up(VK_LWIN);
+        assert!(!h.e.cut_pending());
+        h.assert_clean();
+
+        // In a text field (rename / search) Cmd+X is a text cut: passes, and
+        // doesn't arm the file move.
+        *role.lock().unwrap() = Some("AXTextField".into());
+        assert_eq!(cmd_tap(&mut h, VK_X), PASS);
+        assert!(!h.e.cut_pending());
+        // Armed in the list, then Cmd+V inside a text field pastes text.
+        *role.lock().unwrap() = Some("AXOutline".into());
+        cmd_tap(&mut h, VK_X);
+        *role.lock().unwrap() = Some("AXTextField".into());
+        assert_eq!(cmd_tap(&mut h, VK_V), PASS);
+        assert!(h.e.cut_pending(), "still pending for the file list");
+        *role.lock().unwrap() = Some("AXOutline".into());
+        assert_eq!(cmd_tap(&mut h, VK_V), rep(vec![d(VK_LMENU), d(VK_V)]));
+        h.assert_clean();
+    }
+
+    #[test]
+    fn finder_cut_with_ctrl_when_ctrl_shortcuts_on() {
+        let (mut h, _, _) = harness(preset(|p| p.ctrl_shortcuts_to_cmd = true));
+        h.app = vec![FINDER.into()];
+        h.down(VK_LCONTROL);
+        assert_eq!(h.down(VK_X), rep(vec![u(VK_LCONTROL), d(VK_LWIN), d(VK_C)]));
+        h.up(VK_X);
+        h.up(VK_LCONTROL);
+        assert!(h.e.cut_pending());
+        h.down(VK_LCONTROL);
+        assert_eq!(
+            h.down(VK_V),
+            rep(vec![u(VK_LCONTROL), d(VK_LWIN), d(VK_LMENU), d(VK_V)])
+        );
+        h.up(VK_V);
+        h.up(VK_LCONTROL);
+        assert!(!h.e.cut_pending());
+        h.assert_clean();
+    }
+
+    #[test]
+    fn finder_cut_toggle_off_and_config_update_clears() {
+        let (mut h, _, _) = harness(preset(|p| p.finder_cut_paste = false));
+        h.app = vec![FINDER.into()];
+        assert_eq!(cmd_tap(&mut h, VK_X), PASS);
+        assert!(!h.e.cut_pending());
+        let c = preset(|_| {});
+        h.e.set_config(&c);
+        cmd_tap(&mut h, VK_X);
+        assert!(h.e.cut_pending());
+        h.e.set_config(&preset(|p| p.finder_cut_paste = false));
+        assert!(!h.e.cut_pending());
+    }
+
+    #[test]
+    fn config_json() {
+        let c = Config::from_json(
+            r#"{"windowsStyle": {"enabled": true, "finderEnterOpens": false, "excludedApps": ["Foo"]}}"#,
+        )
+        .unwrap();
+        let w = &c.windows_style;
+        assert!(w.enabled && w.home_end && !w.finder_enter_opens && !w.ctrl_shortcuts_to_cmd);
+        assert_eq!(w.excluded_apps, vec!["Foo".to_string()]);
+        assert_eq!(Config::from_json(&c.to_json()).unwrap(), c);
+        let json = Config::default().to_json();
+        assert!(
+            json.contains("\"windowsStyle\"") && json.contains("\"ctrlShortcutsToCmd\": false")
+        );
+        // get/set by key cover every item.
+        let mut p = WindowsStylePreset::default();
+        for it in crate::windows_style::ITEMS {
+            assert_eq!(p.get(it.key), Some(it.default), "{}", it.key);
+            assert!(p.set(it.key, !it.default));
+            assert_eq!(p.get(it.key), Some(!it.default));
+        }
+        assert!(!p.set("nope", true));
+        // describe lists the enabled mappings.
+        let mut p = WindowsStylePreset {
+            enabled: true,
+            ..Default::default()
+        };
+        let d = p.describe();
+        assert!(
+            d.iter()
+                .any(|(f, t, a)| f == "Home" && t == "Cmd+Left" && a.is_none()),
+            "{d:?}"
+        );
+        assert!(d
+            .iter()
+            .any(|(f, t, a)| f == "Enter" && t == "Cmd+O" && *a == Some(FINDER)));
+        p.enabled = false;
+        assert!(p.describe().is_empty());
+    }
+
+    #[test]
+    fn fuzz_preset_never_leaves_keys_stuck() {
+        let c = preset(|p| p.ctrl_shortcuts_to_cmd = true);
+        let keys = [
+            VK_LWIN,
+            VK_LCONTROL,
+            VK_RCONTROL,
+            VK_LSHIFT,
+            VK_LMENU,
+            VK_HOME,
+            VK_END,
+            VK_PRIOR,
+            VK_LEFT,
+            VK_BACK,
+            VK_DELETE,
+            VK_RETURN,
+            VK_F2,
+            VK_X,
+            VK_V,
+            VK_C,
+            VK_Y,
+            VK_ESCAPE,
+            VK_A,
+        ];
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..300 {
+            let (mut h, role, _) = harness(c.clone());
+            h.app = match round % 3 {
+                0 => vec![FINDER.into()],
+                1 => vec!["com.apple.Terminal".into()],
+                _ => vec!["com.apple.TextEdit".into()],
+            };
+            let mut held: Vec<u32> = Vec::new();
+            for _ in 0..60 {
+                let r = next();
+                *role.lock().unwrap() = if r % 5 == 0 {
+                    Some("AXTextField".into())
+                } else {
+                    Some("AXOutline".into())
+                };
+                let k = keys[((r >> 4) % keys.len() as u64) as usize];
+                if held.contains(&k) && (r >> 12) % 3 != 0 {
+                    held.retain(|&x| x != k);
+                    h.up(k);
+                } else {
+                    if !held.contains(&k) {
+                        held.push(k);
+                    }
+                    h.down(k);
+                }
+            }
             while !held.is_empty() {
                 let i = (next() % held.len() as u64) as usize;
                 let k = held.remove(i);

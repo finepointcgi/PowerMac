@@ -180,6 +180,11 @@ pub fn foreground_app() -> Vec<String> {
     }
 }
 
+/// The Windows-style preset (the only user of this) is a no-op on Windows.
+pub fn focused_role() -> Option<String> {
+    None
+}
+
 pub fn has_permission(_prompt: bool) -> bool {
     true
 }

@@ -1,5 +1,7 @@
 //! macOS backend: an active `CGEventTap` for `kCGEventScrollWheel` that
-//! negates the scroll delta fields in place (no re-posting).
+//! negates the scroll delta fields in place (no re-posting), and, with smooth
+//! scrolling on, swallows discrete mouse-wheel notches and replays them as
+//! eased pixel scroll events (tagged [`SELF_INJECTED_TAG`]) from a frame thread.
 //!
 //! CoreGraphics / CoreFoundation / ApplicationServices are bound directly.
 
@@ -15,9 +17,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
+use crate::smooth::Animator;
 use crate::{
-    Error, MacClassifier, MacDeltas, MacScrollFields, Observer, ScrollEventInfo, SharedConfig,
-    PM_INPUT_INJECTED_TAG,
+    mac_notch_direction, Error, MacClassifier, MacDeltas, MacScrollFields, Observer,
+    ScrollEventInfo, SharedConfig, PM_INPUT_INJECTED_TAG, SELF_INJECTED_TAG,
 };
 
 type CFTypeRef = *const c_void;
@@ -29,6 +32,7 @@ type CFRunLoopRef = *mut c_void;
 type CFRunLoopSourceRef = *mut c_void;
 type CGEventRef = *mut c_void;
 type CGEventTapProxy = *mut c_void;
+type CGEventSourceRef = *mut c_void;
 
 type CGEventTapCallBack =
     unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
@@ -85,6 +89,19 @@ extern "C" {
     fn CGEventGetDoubleValueField(event: CGEventRef, field: u32) -> f64;
     fn CGEventSetDoubleValueField(event: CGEventRef, field: u32, value: f64);
     fn CGEventGetTimestamp(event: CGEventRef) -> u64;
+    fn CGEventGetFlags(event: CGEventRef) -> u64;
+    fn CGEventCreateScrollWheelEvent2(
+        source: CGEventSourceRef,
+        units: u32,
+        wheel_count: u32,
+        wheel1: i32,
+        wheel2: i32,
+        wheel3: i32,
+    ) -> CGEventRef;
+    fn CGEventPost(tap: u32, event: CGEventRef);
+    fn CGEventSourceCreate(state: i32) -> CGEventSourceRef;
+    fn CGEventSourceSetUserData(source: CGEventSourceRef, data: i64);
+    fn CGEventSourceSetLocalEventsSuppressionInterval(source: CGEventSourceRef, secs: f64);
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -101,6 +118,16 @@ const kCGHeadInsertEventTap: u32 = 0;
 const kCGEventTapOptionDefault: u32 = 0;
 
 const kCGEventScrollWheel: u32 = 22;
+const kCGScrollEventUnitPixel: u32 = 0;
+const kCGEventSourceStateHIDSystemState: i32 = 1;
+const kCGEventFlagMaskShift: u64 = 0x0002_0000;
+const kCGEventFlagMaskControl: u64 = 0x0004_0000;
+const kCGEventFlagMaskAlternate: u64 = 0x0008_0000;
+const kCGEventFlagMaskCommand: u64 = 0x0010_0000;
+const MODIFIER_MASK: u64 =
+    kCGEventFlagMaskShift | kCGEventFlagMaskControl | kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand;
+/// Smooth-scrolling frame interval (120 Hz).
+const FRAME: Duration = Duration::from_micros(8_333);
 const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
 const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
@@ -174,7 +201,60 @@ struct TapCtx {
     observer: Option<Observer>,
     classifier: RefCell<MacClassifier>,
     tap: Cell<CFMachPortRef>,
+    /// Smooth-scrolling frame thread (posts at the tap's own location).
+    animator: RefCell<Option<Animator>>,
 }
+
+/// An event source tagged with [`SELF_INJECTED_TAG`], owned by the frame thread.
+struct PixelPoster {
+    source: CGEventSourceRef,
+    location: u32,
+}
+// SAFETY: the source is only used from the frame thread that owns the poster;
+// CGEventSource/CGEventPost are thread-safe.
+unsafe impl Send for PixelPoster {}
+
+impl PixelPoster {
+    fn new(location: u32) -> Option<Self> {
+        unsafe {
+            let source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+            if source.is_null() {
+                return None;
+            }
+            CGEventSourceSetUserData(source, SELF_INJECTED_TAG as i64);
+            // Otherwise our posts would suppress real mouse/keyboard input for 0.25 s.
+            CGEventSourceSetLocalEventsSuppressionInterval(source, 0.0);
+            Some(Self { source, location })
+        }
+    }
+
+    fn post(&mut self, d: [i64; 2]) {
+        let clamp = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        unsafe {
+            let e = CGEventCreateScrollWheelEvent2(
+                self.source,
+                kCGScrollEventUnitPixel,
+                2,
+                clamp(d[0]),
+                clamp(d[1]),
+                0,
+            );
+            if e.is_null() {
+                return;
+            }
+            CGEventPost(self.location, e);
+            CFRelease(e as CFTypeRef);
+        }
+    }
+}
+
+impl Drop for PixelPoster {
+    fn drop(&mut self) {
+        unsafe { CFRelease(self.source as CFTypeRef) };
+    }
+}
+
+fn noop() {}
 
 pub(crate) struct Tap {
     stop: Arc<AtomicBool>,
@@ -188,9 +268,11 @@ impl Tap {
     }
 
     fn shutdown(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        unsafe { CFRunLoopStop(self.run_loop.0) };
+        // Only once: after the join the run loop belongs to a dead thread, and
+        // CFRunLoopStop on it traps (stop() followed by Drop used to do that).
         if let Some(t) = self.thread.take() {
+            self.stop.store(true, Ordering::SeqCst);
+            unsafe { CFRunLoopStop(self.run_loop.0) };
             let _ = t.join();
         }
     }
@@ -224,9 +306,12 @@ pub(crate) fn start(shared: Arc<SharedConfig>, observer: Option<Observer>) -> Re
                 observer,
                 classifier: RefCell::new(MacClassifier::new()),
                 tap: Cell::new(std::ptr::null_mut()),
+                animator: RefCell::new(None),
             }));
             let mut tap = std::ptr::null_mut();
+            let mut location = kCGHIDEventTap;
             for loc in [kCGHIDEventTap, kCGSessionEventTap] {
+                location = loc;
                 tap = CGEventTapCreate(
                     loc,
                     kCGHeadInsertEventTap,
@@ -245,6 +330,18 @@ pub(crate) fn start(shared: Arc<SharedConfig>, observer: Option<Observer>) -> Re
                 return;
             }
             (*ctx).tap.set(tap);
+            if location != kCGHIDEventTap {
+                log::warn!("scroll-reverser: HID event tap unavailable, using the session tap");
+            }
+            match PixelPoster::new(location) {
+                Some(mut poster) => {
+                    match Animator::start(Box::new(move |d| poster.post(d)), FRAME, noop, noop) {
+                        Ok(a) => *(*ctx).animator.borrow_mut() = Some(a),
+                        Err(e) => log::error!("scroll-reverser: smooth scrolling thread: {e}"),
+                    }
+                }
+                None => log::error!("scroll-reverser: CGEventSourceCreate failed; no smooth scrolling"),
+            }
             let src = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
             let rl = CFRunLoopGetCurrent();
             CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
@@ -298,15 +395,21 @@ unsafe extern "C" fn tap_callback(
     if ty != kCGEventScrollWheel || event.is_null() {
         return event;
     }
-    if catch_unwind(AssertUnwindSafe(|| handle_scroll(ctx, event))).is_err() {
-        log::error!("scroll-reverser: panic in tap callback");
+    match catch_unwind(AssertUnwindSafe(|| handle_scroll(ctx, event))) {
+        Ok(true) => std::ptr::null_mut(), // swallowed; replayed by the smoother
+        Ok(false) => event,
+        Err(_) => {
+            log::error!("scroll-reverser: panic in tap callback");
+            event
+        }
     }
-    event
 }
 
-unsafe fn handle_scroll(ctx: &TapCtx, ev: CGEventRef) {
-    if CGEventGetIntegerValueField(ev, kCGEventSourceUserData) == PM_INPUT_INJECTED_TAG as i64 {
-        return;
+/// Returns true when the event is swallowed (smooth scrolling replays it).
+unsafe fn handle_scroll(ctx: &TapCtx, ev: CGEventRef) -> bool {
+    let tag = CGEventGetIntegerValueField(ev, kCGEventSourceUserData);
+    if tag == PM_INPUT_INJECTED_TAG as i64 || tag == SELF_INJECTED_TAG as i64 {
+        return false;
     }
     let fields = MacScrollFields {
         is_continuous: CGEventGetIntegerValueField(ev, kCGScrollWheelEventIsContinuous) != 0,
@@ -314,9 +417,15 @@ unsafe fn handle_scroll(ctx: &TapCtx, ev: CGEventRef) {
         momentum_phase: CGEventGetIntegerValueField(ev, kCGScrollWheelEventMomentumPhase),
     };
     let device = ctx.classifier.borrow_mut().classify(fields, CGEventGetTimestamp(ev));
-    let rev = ctx.shared.load().reverse_for(device);
-    if !rev.any() && ctx.observer.is_none() {
-        return;
+    let cfg = ctx.shared.load();
+    let rev = cfg.reverse_for(device);
+    // Only discrete (line-based) wheel notches are smoothed; continuous
+    // "mouse" events come from smooth-scrolling drivers and are smooth already.
+    let mods = CGEventGetFlags(ev) & MODIFIER_MASK != 0;
+    let smooth_v = !fields.is_continuous && cfg.smooth_for(device, false, mods);
+    let smooth_h = !fields.is_continuous && cfg.smooth_for(device, true, mods);
+    if !rev.any() && !smooth_v && !smooth_h && ctx.observer.is_none() {
+        return false;
     }
 
     let mut d = MacDeltas::default();
@@ -338,6 +447,25 @@ unsafe fn handle_scroll(ctx: &TapCtx, ev: CGEventRef) {
         }
     }
 
+    let mut smoothed = false;
+    if smooth_v || smooth_h {
+        let n = d.reversed(rev);
+        let dir = [
+            if smooth_v { mac_notch_direction(n.delta[0], n.fixed[0]) } else { 0.0 },
+            if smooth_h { mac_notch_direction(n.delta[1], n.fixed[1]) } else { 0.0 },
+        ];
+        // An axis that is not smoothed but moves must not be lost: then pass
+        // the whole event through (reversed) instead.
+        let unsmoothed_motion = (!smooth_v && (n.delta[0] != 0 || n.fixed[0] != 0.0))
+            || (!smooth_h && (n.delta[1] != 0 || n.fixed[1] != 0.0));
+        if !unsmoothed_motion && dir != [0.0, 0.0] {
+            if let Some(anim) = ctx.animator.borrow().as_ref() {
+                anim.push(dir, cfg.smooth_params(1.0));
+                smoothed = true;
+            }
+        }
+    }
+
     if let Some(obs) = &ctx.observer {
         let pick = |axis: usize| {
             if d.point[axis] != 0 {
@@ -354,6 +482,8 @@ unsafe fn handle_scroll(ctx: &TapCtx, ev: CGEventRef) {
             continuous: fields.is_continuous,
             scroll_phase: fields.scroll_phase,
             momentum_phase: fields.momentum_phase,
+            smoothed,
         });
     }
+    smoothed
 }

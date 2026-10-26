@@ -1,0 +1,274 @@
+//! Serializable settings (camelCase JSON, every field optional).
+
+use std::fmt;
+
+use pm_input::vk;
+use serde::{Deserialize, Serialize};
+
+/// Window switcher settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Config {
+    /// Master switch. On by default: the default shortcuts (Option+Tab /
+    /// Option+` on macOS, Alt+` on Windows) don't override system shortcuts.
+    pub enabled: bool,
+    /// Hold the modifier(s), press the key: switch between all windows.
+    /// Default Option+Tab on macOS; unset on Windows (its own Alt+Tab
+    /// already switches windows; see [`Config::replace_cmd_tab`]).
+    pub trigger: Hotkey,
+    /// Same, but only the windows of the frontmost app. Default Option+`
+    /// (macOS) / Alt+` (Windows).
+    pub app_windows_trigger: Hotkey,
+    /// Also take over Cmd+Tab (macOS; the system app switcher is disabled
+    /// while this is on) or Alt+Tab (Windows).
+    pub replace_cmd_tab: bool,
+    /// List minimized windows.
+    pub show_minimized: bool,
+    /// List windows of hidden apps.
+    pub show_hidden: bool,
+    /// List windows on other Spaces (macOS) / virtual desktops (Windows).
+    pub show_other_spaces: bool,
+    /// Only list windows on the screen that has the mouse pointer.
+    pub only_current_screen: bool,
+    /// Show live window thumbnails (macOS: needs Screen Recording; without it
+    /// the switcher shows large app icons instead).
+    pub thumbnails: bool,
+    /// How long the shortcut must be held before the switcher appears. A
+    /// quicker tap-and-release switches straight to the previous window
+    /// without showing anything ("fast switch").
+    pub show_delay_ms: u32,
+    /// Apps whose windows are never listed: bundle ids (`com.apple.Safari`),
+    /// app names (`Safari`) or executable names (`notepad.exe`),
+    /// case-insensitive.
+    pub excluded_apps: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            trigger: Hotkey::default_trigger(),
+            app_windows_trigger: Hotkey::default_app_trigger(),
+            replace_cmd_tab: false,
+            show_minimized: true,
+            show_hidden: true,
+            show_other_spaces: true,
+            only_current_screen: false,
+            thumbnails: true,
+            show_delay_ms: DEFAULT_SHOW_DELAY_MS,
+            excluded_apps: Vec::new(),
+        }
+    }
+}
+
+/// Default for [`Config::show_delay_ms`]: short enough to feel instant,
+/// long enough that a quick Option+Tab tap doesn't flash the overlay.
+pub const DEFAULT_SHOW_DELAY_MS: u32 = 90;
+
+impl Config {
+    /// Whether `app` (bundle id, name or path) is in [`Config::excluded_apps`].
+    pub fn is_excluded(&self, ids: &[&str]) -> bool {
+        self.excluded_apps.iter().any(|ex| {
+            let ex = ex.trim();
+            !ex.is_empty()
+                && ids.iter().any(|id| {
+                    let id = id.trim();
+                    if id.is_empty() {
+                        return false;
+                    }
+                    if id.eq_ignore_ascii_case(ex) {
+                        return true;
+                    }
+                    // Match the last path component of paths (`/Applications/Foo.app`, `C:\x\foo.exe`).
+                    let base = id.rsplit(['/', '\\']).next().unwrap_or(id);
+                    base.eq_ignore_ascii_case(ex)
+                        || base.strip_suffix(".app").is_some_and(|b| b.eq_ignore_ascii_case(ex))
+                        || base.strip_suffix(".exe").is_some_and(|b| b.eq_ignore_ascii_case(ex))
+                })
+        })
+    }
+}
+
+/// A global shortcut: modifiers plus a Windows virtual-key code — the same
+/// JSON shape as PowerToys / the other PowerMac modules
+/// (`{"win":false,"ctrl":false,"alt":true,"shift":false,"code":9}`).
+///
+/// * `win` is the Windows key on Windows and **Command** on macOS.
+/// * `alt` is Alt on Windows and **Option** on macOS.
+/// * `code` is a Windows `VK_*` code (Tab = 9, ` = 0xC0). `0` disables it.
+///
+/// For the switcher the modifiers are the ones you *hold*; Shift is extra
+/// (it reverses the direction) unless the hotkey itself includes Shift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Hotkey {
+    pub win: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub code: u32,
+}
+
+impl Hotkey {
+    pub const fn new(win: bool, ctrl: bool, alt: bool, shift: bool, code: u32) -> Self {
+        Self { win, ctrl, alt, shift, code }
+    }
+
+    pub const fn none() -> Self {
+        Self::new(false, false, false, false, 0)
+    }
+
+    /// Option+Tab (macOS) / unset (Windows).
+    pub const fn default_trigger() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::none()
+        } else {
+            Self::new(false, false, true, false, vk::VK_TAB)
+        }
+    }
+
+    /// Option+` (macOS) / Alt+` (Windows).
+    pub const fn default_app_trigger() -> Self {
+        Self::new(false, false, true, false, vk::VK_OEM_3)
+    }
+
+    /// Cmd+Tab (macOS) / Alt+Tab (Windows), used by `replace_cmd_tab`.
+    pub const fn system_switcher() -> Self {
+        if cfg!(target_os = "windows") {
+            Self::new(false, false, true, false, vk::VK_TAB)
+        } else {
+            Self::new(true, false, false, false, vk::VK_TAB)
+        }
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.code != 0
+    }
+
+    /// The modifiers that must stay held while the switcher is open
+    /// (Shift only if the hotkey includes it).
+    pub fn held(&self) -> Mods {
+        Mods { win: self.win, ctrl: self.ctrl, alt: self.alt, shift: self.shift }
+    }
+
+    /// Whether a key-down of `vk` with `mods` held fires this hotkey.
+    /// Shift may be added (it means "backwards") unless the hotkey uses it.
+    pub fn matches(&self, vk: u32, mods: Mods) -> bool {
+        self.is_set()
+            && vk == self.code
+            && mods.win == self.win
+            && mods.ctrl == self.ctrl
+            && mods.alt == self.alt
+            && (self.shift && mods.shift || !self.shift)
+    }
+}
+
+impl fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mac = cfg!(target_os = "macos");
+        let mut parts: Vec<String> = Vec::new();
+        if self.ctrl {
+            parts.push("Ctrl".into());
+        }
+        if self.alt {
+            parts.push(if mac { "Option" } else { "Alt" }.into());
+        }
+        if self.shift {
+            parts.push("Shift".into());
+        }
+        if self.win {
+            parts.push(if mac { "Cmd" } else { "Win" }.into());
+        }
+        let key = match self.code {
+            0 => "(none)".to_string(),
+            vk::VK_TAB => "Tab".into(),
+            vk::VK_OEM_3 => "`".into(),
+            vk::VK_SPACE => "Space".into(),
+            vk::VK_ESCAPE => "Esc".into(),
+            c @ (0x30..=0x39 | 0x41..=0x5A) => char::from_u32(c).unwrap_or('?').to_string(),
+            c @ 0x70..=0x87 => format!("F{}", c - 0x6F),
+            c => format!("VK 0x{c:02X}"),
+        };
+        parts.push(key);
+        write!(f, "{}", parts.join("+"))
+    }
+}
+
+/// Held modifiers at the time of an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct Mods {
+    pub win: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+impl Mods {
+    pub const NONE: Mods = Mods { win: false, ctrl: false, alt: false, shift: false };
+
+    pub const fn new(win: bool, ctrl: bool, alt: bool, shift: bool) -> Self {
+        Self { win, ctrl, alt, shift }
+    }
+
+    /// Every modifier set in `other` is also set here.
+    pub fn contains(&self, other: Mods) -> bool {
+        (!other.win || self.win) && (!other.ctrl || self.ctrl) && (!other.alt || self.alt) && (!other.shift || self.shift)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Mods::NONE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_roundtrip_camel_case() {
+        let c = Config::default();
+        let j = serde_json::to_value(&c).unwrap();
+        assert_eq!(j["enabled"], true);
+        assert_eq!(j["replaceCmdTab"], false);
+        assert_eq!(j["showMinimized"], true);
+        assert_eq!(j["showOtherSpaces"], true);
+        assert_eq!(j["onlyCurrentScreen"], false);
+        assert_eq!(j["appWindowsTrigger"]["code"], 0xC0);
+        let back: Config = serde_json::from_value(j).unwrap();
+        assert_eq!(back, c);
+        // Missing fields fall back to defaults.
+        let partial: Config = serde_json::from_str(r#"{"thumbnails":false}"#).unwrap();
+        assert!(!partial.thumbnails);
+        assert!(partial.enabled);
+        assert_eq!(partial.show_delay_ms, DEFAULT_SHOW_DELAY_MS);
+    }
+
+    #[test]
+    fn hotkey_shift_is_direction() {
+        let t = Hotkey::new(false, false, true, false, vk::VK_TAB);
+        assert!(t.matches(vk::VK_TAB, Mods::new(false, false, true, false)));
+        assert!(t.matches(vk::VK_TAB, Mods::new(false, false, true, true)));
+        assert!(!t.matches(vk::VK_TAB, Mods::new(true, false, true, false)));
+        assert!(!t.matches(vk::VK_TAB, Mods::NONE));
+        assert!(!Hotkey::none().matches(0, Mods::NONE));
+        let s = Hotkey::new(false, true, false, true, vk::VK_TAB);
+        assert!(!s.matches(vk::VK_TAB, Mods::new(false, true, false, false)));
+        assert!(s.matches(vk::VK_TAB, Mods::new(false, true, false, true)));
+    }
+
+    #[test]
+    fn exclusion_matching() {
+        let c = Config { excluded_apps: vec!["com.apple.Safari".into(), "Notes".into(), "notepad.exe".into()], ..Default::default() };
+        assert!(c.is_excluded(&["COM.APPLE.SAFARI"]));
+        assert!(c.is_excluded(&["", "/System/Applications/Notes.app"]));
+        assert!(c.is_excluded(&["C:\\Windows\\notepad.exe"]));
+        assert!(!c.is_excluded(&["com.apple.TextEdit", "TextEdit"]));
+        assert!(!Config::default().is_excluded(&["anything"]));
+    }
+
+    #[test]
+    fn display() {
+        let s = Hotkey::new(false, false, true, false, vk::VK_TAB).to_string();
+        assert!(s == "Option+Tab" || s == "Alt+Tab");
+    }
+}
