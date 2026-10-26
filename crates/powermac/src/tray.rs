@@ -30,6 +30,7 @@ const LAYOUTS: &[(&str, fancyzones::LayoutType, i32)] = &[
 
 struct Ui {
     _tray: TrayIcon,
+    settings: MenuItem,
     mwb_status: MenuItem,
     mwb_switch: Submenu,
     mwb_machines: Vec<String>,
@@ -59,6 +60,7 @@ thread_local! {
 /// Create the tray icon. Must be called on the main thread, before the loop runs.
 pub fn install() -> anyhow::Result<()> {
     let menu = Menu::new();
+    let settings = MenuItem::new("Settings…", true, None);
     let title = MenuItem::new("PowerMac", false, None);
 
     let mwb_status = MenuItem::new("Mouse Without Borders: off", false, None);
@@ -97,9 +99,11 @@ pub fn install() -> anyhow::Result<()> {
     mouse.append_items(&[&find_mouse, &highlighter, &crosshairs])?;
     let paste_plain = MenuItem::new("Paste as plain text", true, None);
     let open_config = MenuItem::new("Open config folder", true, None);
-    let login = CheckMenuItem::new("Launch at login", true, crate::login::is_enabled(), None);
+    let login = CheckMenuItem::new("Launch at login", true, pm_config::login::is_enabled(), None);
     let quit = MenuItem::new("Quit PowerMac", true, None);
     menu.append_items(&[
+        &settings,
+        &PredefinedMenuItem::separator(),
         &title,
         &PredefinedMenuItem::separator(),
         &mwb_status,
@@ -128,6 +132,7 @@ pub fn install() -> anyhow::Result<()> {
     UI.with(|u| {
         *u.borrow_mut() = Some(Ui {
             _tray: tray,
+            settings,
             mwb_status,
             mwb_switch,
             mwb_machines: Vec::new(),
@@ -172,6 +177,10 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
         shutdown();
         std::process::exit(0);
     }
+    if id == ui.settings.id() {
+        open_settings();
+        return;
+    }
     if id == ui.paste_plain.id() {
         // Paste into the app that was frontmost before the menu opened.
         std::thread::spawn(|| {
@@ -203,10 +212,11 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
         return;
     }
     if id == ui.login.id() {
-        if let Err(e) = crate::login::set_enabled(ui.login.is_checked()) {
-            log::warn!("launch at login: {e:#}");
+        match pm_config::login::set_enabled(ui.login.is_checked()) {
+            Ok(()) => log::info!("launch at login: {}", if ui.login.is_checked() { "on" } else { "off" }),
+            Err(e) => log::warn!("launch at login: {e:#}"),
         }
-        ui.login.set_checked(crate::login::is_enabled());
+        ui.login.set_checked(pm_config::login::is_enabled());
         return;
     }
     if id == ui.copy_key.id() {
@@ -293,6 +303,10 @@ fn refresh_ui(ui: &mut Ui) {
         )
     });
     let Some((mwb, awake, zones, monitors, scroll, mouse)) = snapshot else { return };
+
+    // The settings window can change this too (only cheap to check on macOS).
+    #[cfg(target_os = "macos")]
+    ui.login.set_checked(pm_config::login::is_enabled());
 
     // Mouse utilities
     let (hl, ch) = mouse.unwrap_or((false, false));
@@ -414,6 +428,57 @@ fn copy_key() {
         Err(e) => log::warn!("clipboard: {e}"),
     }
 }
+
+/// The settings window process, if one was started from the menu.
+static SETTINGS_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Start `powermac --config <path> settings` as a separate process (its
+/// event loop can't share this process' main loop), or bring the one that
+/// is already open to the front.
+fn open_settings() {
+    let mut child = SETTINGS_CHILD.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = child.as_mut() {
+        if let Ok(None) = c.try_wait() {
+            log::info!("settings window already open (pid {})", c.id());
+            activate_process(c.id());
+            return;
+        }
+    }
+    let Some(path) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path) else { return };
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("settings: {e}");
+            return;
+        }
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--config").arg(&path).arg("settings");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match cmd.spawn() {
+        Ok(c) => {
+            log::info!("settings window started (pid {})", c.id());
+            *child = Some(c);
+        }
+        Err(e) => log::warn!("settings: could not start the settings window: {e}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn activate_process(pid: u32) {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as i32) {
+        app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_process(_pid: u32) {}
 
 fn open_config_dir() {
     let Some(dir) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path).and_then(|p| p.parent().map(|d| d.to_path_buf())) else {

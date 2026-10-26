@@ -1,6 +1,8 @@
 //! The app's top-level config file: which modules run, plus MWB and Awake
 //! settings. FancyZones keeps its own file (`fancyzones.json`) next to it.
 
+pub mod login;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};

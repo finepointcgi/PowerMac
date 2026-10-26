@@ -1,4 +1,7 @@
 //! "Launch at login": a LaunchAgent plist on macOS, the HKCU `Run` key on Windows.
+//!
+//! Shared by the tray app and the settings window (both are the `powermac`
+//! binary, so `current_exe()` is the app either way).
 
 use anyhow::{Context, Result};
 
@@ -59,8 +62,7 @@ pub fn set_enabled(on: bool) -> Result<()> {
         };
         anyhow::ensure!(status.success() || !on, "reg.exe failed");
     }
-    let _ = exe;
-    log::info!("launch at login: {}", if on { "on" } else { "off" });
+    let _ = (exe, on);
     Ok(())
 }
 

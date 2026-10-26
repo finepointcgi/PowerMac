@@ -1,7 +1,6 @@
 //! PowerMac: Mouse Without Borders, FancyZones and Awake in one cross-platform app.
 
 mod clipboard;
-mod login;
 mod modules;
 mod tray;
 
@@ -45,6 +44,9 @@ enum Cmd {
         #[arg(long)]
         prompt: bool,
     },
+    /// Open the settings window (edits config.json and fancyzones.json; a running
+    /// PowerMac applies the changes within about a second).
+    Settings,
     /// Keep the computer awake (standalone, like PowerToys Awake's CLI).
     Awake {
         /// Keep the display on too.
@@ -134,6 +136,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Doctor { prompt } => doctor(&path, prompt),
+        Cmd::Settings => settings_ui::run(path),
         Cmd::Awake { display_on, time_limit, expire_at, pid } => {
             let mode = match (time_limit, expire_at) {
                 (Some(_), Some(_)) => bail!("use either --time-limit or --expire-at"),

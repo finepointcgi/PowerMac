@@ -16,6 +16,7 @@ scroll-reverser = { path = "../scroll-reverser" }
 pm-config = { path = "../pm-config" }
 mouse-utils = { path = "../mouse-utils" }
 keyboard-manager = { path = "../keyboard-manager" }
+settings-ui = { path = "../settings-ui" }
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 ctrlc = "3"
