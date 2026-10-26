@@ -10,3 +10,12 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 pm-input = { path = "../pm-input" }
+sha2 = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+aes = "0.8"
+rand = "0.8"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+gethostname = "0.4"
+
+[dev-dependencies]

@@ -1,7 +1,473 @@
-//! windows backend (to be implemented)
-pub struct WinBackend;
+//! Windows backend: `WH_MOUSE_LL` / `WH_KEYBOARD_LL` capture, `SendInput` injection.
+//!
+//! Coordinates are physical pixels in the virtual-desktop space (origin at the
+//! primary monitor's top-left; other monitors may have negative coordinates).
+//! `WinBackend::new` makes the process Per-Monitor-v2 DPI aware so that
+//! `GetCursorPos`, hook coordinates and monitor rects are all un-virtualized.
+//!
+//! Hook notes:
+//! - Low-level hooks run on the thread that installed them, which must pump
+//!   messages; we use a dedicated thread with a `GetMessageW` loop.
+//! - The callback must return quickly: if it exceeds `LowLevelHooksTimeout`
+//!   (~1s on Win10+) Windows silently removes the hook.
+//! - Swallowing `WM_MOUSEMOVE` in the hook freezes the real cursor, which is what
+//!   MWB relies on while controlling another machine.
+//! - Mouse deltas: `MSLLHOOKSTRUCT.pt` is where the cursor *would* go. We compute
+//!   `dx/dy = pt - GetCursorPos()` (the cursor has not moved yet when the hook
+//!   runs), which stays correct when moves are swallowed. Windows clamps `pt` to
+//!   the virtual desktop, so when the cursor is pinned against an outer edge the
+//!   outward delta is 0 — detect edge crossing from the position (as MWB does),
+//!   or keep the cursor away from the edge (park it) while forwarding.
+
+#![allow(clippy::upper_case_acronyms)]
+
+use std::cell::RefCell;
+use std::mem::{size_of, zeroed};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{mpsc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use anyhow::{anyhow, bail, Result};
+use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+};
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, CreateCursor, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
+    PeekMessageW, PostThreadMessageW, SetCursorPos, SetSystemCursor, SetWindowsHookExW,
+    SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+    LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_SETCURSORS,
+    SYSTEM_CURSOR_ID, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    WM_XBUTTONUP,
+};
+
+use crate::{
+    CaptureCallback, CaptureHandle, Disposition, InputBackend, InputEvent, KeyEvent, MouseButton,
+    MouseEvent, Rect, INJECTED_TAG,
+};
+
+const XBUTTON1: u32 = 1;
+const XBUTTON2: u32 = 2;
+
+// Standard system cursor ids (OCR_*), all replaced while the cursor is hidden.
+const SYSTEM_CURSORS: [SYSTEM_CURSOR_ID; 14] = [
+    32512, // OCR_NORMAL
+    32513, // OCR_IBEAM
+    32514, // OCR_WAIT
+    32515, // OCR_CROSS
+    32516, // OCR_UP
+    32642, // OCR_SIZENWSE
+    32643, // OCR_SIZENESW
+    32644, // OCR_SIZEWE
+    32645, // OCR_SIZENS
+    32646, // OCR_SIZEALL
+    32648, // OCR_NO
+    32649, // OCR_HAND
+    32650, // OCR_APPSTARTING
+    32651, // OCR_HELP
+];
+
+pub struct WinBackend {
+    cursor_hidden: Mutex<bool>,
+}
+
 impl WinBackend {
-    pub fn new() -> anyhow::Result<Self> {
-        anyhow::bail!("windows backend not implemented")
+    pub fn new() -> Result<Self> {
+        // Fails harmlessly if awareness was already set (e.g. by the manifest).
+        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        Ok(Self { cursor_hidden: Mutex::new(false) })
     }
+
+    fn send(inputs: &[INPUT]) -> Result<()> {
+        let n = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
+        if n as usize != inputs.len() {
+            // Typically UIPI: target is elevated, or the secure desktop is active.
+            bail!("SendInput injected {n}/{} events", inputs.len());
+        }
+        Ok(())
+    }
+
+    fn mouse_input(dx: i32, dy: i32, data: u32, flags: u32) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: data,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: INJECTED_TAG,
+                },
+            },
+        }
+    }
+
+    /// Map a virtual-desktop pixel to SendInput's normalized 0..=65535 space.
+    fn normalize(x: i32, y: i32) -> (i32, i32) {
+        let (vx, vy, vw, vh) = virtual_screen();
+        let nx = ((x - vx) as i64 * 65535 / (vw - 1).max(1) as i64) as i32;
+        let ny = ((y - vy) as i64 * 65535 / (vh - 1).max(1) as i64) as i32;
+        (nx, ny)
+    }
+}
+
+fn virtual_screen() -> (i32, i32, i32, i32) {
+    unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    }
+}
+
+fn restore_system_cursors() {
+    unsafe { SystemParametersInfoW(SPI_SETCURSORS, 0, std::ptr::null_mut(), 0) };
+}
+
+impl Drop for WinBackend {
+    fn drop(&mut self) {
+        if let Ok(h) = self.cursor_hidden.lock() {
+            if *h {
+                restore_system_cursors();
+            }
+        }
+    }
+}
+
+impl InputBackend for WinBackend {
+    fn start_capture(&self, cb: CaptureCallback) -> Result<Box<dyn CaptureHandle>> {
+        start_hooks(cb)
+    }
+
+    fn inject_mouse(&self, ev: MouseEvent) -> Result<()> {
+        let abs = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        let input = match ev {
+            MouseEvent::Move { x, y, .. } => {
+                let (nx, ny) = Self::normalize(x, y);
+                Self::mouse_input(nx, ny, 0, abs)
+            }
+            MouseEvent::Button { button, down, x, y } => {
+                let (nx, ny) = Self::normalize(x, y);
+                let (flag, data) = match (button, down) {
+                    (MouseButton::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),
+                    (MouseButton::Left, false) => (MOUSEEVENTF_LEFTUP, 0),
+                    (MouseButton::Right, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
+                    (MouseButton::Right, false) => (MOUSEEVENTF_RIGHTUP, 0),
+                    (MouseButton::Middle, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
+                    (MouseButton::Middle, false) => (MOUSEEVENTF_MIDDLEUP, 0),
+                    (MouseButton::X1, true) => (MOUSEEVENTF_XDOWN, XBUTTON1),
+                    (MouseButton::X1, false) => (MOUSEEVENTF_XUP, XBUTTON1),
+                    (MouseButton::X2, true) => (MOUSEEVENTF_XDOWN, XBUTTON2),
+                    (MouseButton::X2, false) => (MOUSEEVENTF_XUP, XBUTTON2),
+                };
+                // Windows synthesizes double clicks itself from timing/position.
+                Self::mouse_input(nx, ny, data, flag | abs)
+            }
+            MouseEvent::Wheel { delta } => Self::mouse_input(0, 0, delta as u32, MOUSEEVENTF_WHEEL),
+            MouseEvent::HWheel { delta } => {
+                Self::mouse_input(0, 0, delta as u32, MOUSEEVENTF_HWHEEL)
+            }
+        };
+        Self::send(&[input])
+    }
+
+    fn inject_key(&self, ev: KeyEvent) -> Result<()> {
+        let scan = unsafe { MapVirtualKeyW(ev.vk, MAPVK_VK_TO_VSC) } as u16;
+        let mut flags = 0;
+        if ev.extended {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        if !ev.down {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: ev.vk as u16,
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: INJECTED_TAG,
+                },
+            },
+        };
+        Self::send(&[input])
+    }
+
+    fn set_cursor_pos(&self, x: i32, y: i32) -> Result<()> {
+        if unsafe { SetCursorPos(x, y) } == 0 {
+            bail!("SetCursorPos failed");
+        }
+        Ok(())
+    }
+
+    fn cursor_pos(&self) -> Result<(i32, i32)> {
+        let mut p = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut p) } == 0 {
+            bail!("GetCursorPos failed");
+        }
+        Ok((p.x, p.y))
+    }
+
+    /// `ShowCursor` only affects windows of the calling thread, so it cannot hide
+    /// the cursor globally. MWB itself never truly hides it: it parks the cursor
+    /// (screen centre, or y=4 with "hide mouse" on) and draws a fake cursor.
+    /// We instead replace every standard system cursor with a blank 32x32 one via
+    /// `SetSystemCursor`, and restore them with
+    /// `SystemParametersInfoW(SPI_SETCURSORS)` (which reloads the user's scheme).
+    /// Caveat: if the process is killed while hidden, the cursor stays blank
+    /// until the next `SPI_SETCURSORS`, sign-out, or cursor-scheme change.
+    /// Apps that set a custom (non-system) cursor still show it.
+    fn set_cursor_visible(&self, visible: bool) -> Result<()> {
+        let mut hidden = self.cursor_hidden.lock().map_err(|_| anyhow!("poisoned"))?;
+        if visible {
+            if *hidden {
+                restore_system_cursors();
+                *hidden = false;
+            }
+            return Ok(());
+        }
+        if *hidden {
+            return Ok(());
+        }
+        let and_mask = [0xFFu8; 32 * 32 / 8];
+        let xor_mask = [0u8; 32 * 32 / 8];
+        let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
+        for id in SYSTEM_CURSORS {
+            unsafe {
+                let cur = CreateCursor(
+                    hinst,
+                    0,
+                    0,
+                    32,
+                    32,
+                    and_mask.as_ptr().cast(),
+                    xor_mask.as_ptr().cast(),
+                );
+                if cur.is_null() {
+                    continue;
+                }
+                // SetSystemCursor takes ownership of (and destroys) `cur`.
+                SetSystemCursor(cur, id);
+            }
+        }
+        *hidden = true;
+        Ok(())
+    }
+
+    fn screens(&self) -> Result<Vec<Rect>> {
+        unsafe extern "system" fn enum_proc(
+            mon: HMONITOR,
+            _hdc: HDC,
+            _rc: *mut RECT,
+            data: LPARAM,
+        ) -> BOOL {
+            let out = &mut *(data as *mut Vec<(bool, Rect)>);
+            let mut mi: MONITORINFO = zeroed();
+            mi.cbSize = size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(mon, &mut mi) != 0 {
+                let r = mi.rcMonitor;
+                out.push((
+                    mi.dwFlags & 1 != 0, // MONITORINFOF_PRIMARY
+                    Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
+                ));
+            }
+            1
+        }
+        let mut v: Vec<(bool, Rect)> = Vec::new();
+        let ok = unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(enum_proc),
+                &mut v as *mut _ as LPARAM,
+            )
+        };
+        if ok == 0 || v.is_empty() {
+            bail!("EnumDisplayMonitors failed");
+        }
+        v.sort_by_key(|(primary, _)| !*primary);
+        Ok(v.into_iter().map(|(_, r)| r).collect())
+    }
+
+    fn has_permissions(&self, _prompt: bool) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
+
+struct HookState {
+    cb: CaptureCallback,
+}
+
+thread_local! {
+    static HOOK_STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+}
+
+struct WinCapture {
+    thread_id: u32,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl CaptureHandle for WinCapture {}
+
+impl Drop for WinCapture {
+    fn drop(&mut self) {
+        unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+fn start_hooks(cb: CaptureCallback) -> Result<Box<dyn CaptureHandle>> {
+    let (tx, rx) = mpsc::channel::<std::result::Result<u32, String>>();
+    let thread = std::thread::Builder::new()
+        .name("pm-input-hooks".into())
+        .spawn(move || unsafe {
+            HOOK_STATE.with(|s| *s.borrow_mut() = Some(HookState { cb }));
+            // Make sure this thread has a message queue before reporting its id.
+            let mut msg: MSG = zeroed();
+            PeekMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0, PM_NOREMOVE);
+
+            let hmod = GetModuleHandleW(std::ptr::null());
+            let mouse: HHOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0);
+            let kbd: HHOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0);
+            if mouse.is_null() || kbd.is_null() {
+                if !mouse.is_null() {
+                    UnhookWindowsHookEx(mouse);
+                }
+                if !kbd.is_null() {
+                    UnhookWindowsHookEx(kbd);
+                }
+                let _ = tx.send(Err("SetWindowsHookExW failed".into()));
+                return;
+            }
+            let _ = tx.send(Ok(GetCurrentThreadId()));
+
+            while GetMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+
+            UnhookWindowsHookEx(mouse);
+            UnhookWindowsHookEx(kbd);
+            HOOK_STATE.with(|s| *s.borrow_mut() = None);
+        })?;
+
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(thread_id)) => Ok(Box::new(WinCapture { thread_id, thread: Some(thread) })),
+        Ok(Err(e)) => {
+            let _ = thread.join();
+            Err(anyhow!(e))
+        }
+        Err(_) => Err(anyhow!("hook thread did not start")),
+    }
+}
+
+fn dispatch(ev: InputEvent) -> Disposition {
+    HOOK_STATE.with(|s| {
+        let s = s.borrow();
+        let Some(st) = s.as_ref() else { return Disposition::Pass };
+        catch_unwind(AssertUnwindSafe(|| (st.cb)(&ev))).unwrap_or_else(|_| {
+            log::error!("pm-input: capture callback panicked");
+            Disposition::Pass
+        })
+    })
+}
+
+unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code < 0 {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+    let info = &*(lparam as *const MSLLHOOKSTRUCT);
+    if info.flags & LLMHF_INJECTED != 0 && info.dwExtraInfo == INJECTED_TAG {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+    let (x, y) = (info.pt.x, info.pt.y);
+    let hi = (info.mouseData >> 16) as u16;
+    let msg = wparam as u32;
+    let ev = match msg {
+        WM_MOUSEMOVE => {
+            let mut cur = POINT { x, y };
+            GetCursorPos(&mut cur);
+            Some(MouseEvent::Move { x, y, dx: x - cur.x, dy: y - cur.y })
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONUP => Some(MouseEvent::Button {
+            button: MouseButton::Left,
+            down: msg == WM_LBUTTONDOWN,
+            x,
+            y,
+        }),
+        WM_RBUTTONDOWN | WM_RBUTTONUP => Some(MouseEvent::Button {
+            button: MouseButton::Right,
+            down: msg == WM_RBUTTONDOWN,
+            x,
+            y,
+        }),
+        WM_MBUTTONDOWN | WM_MBUTTONUP => Some(MouseEvent::Button {
+            button: MouseButton::Middle,
+            down: msg == WM_MBUTTONDOWN,
+            x,
+            y,
+        }),
+        WM_XBUTTONDOWN | WM_XBUTTONUP => {
+            let button = if hi as u32 == XBUTTON2 { MouseButton::X2 } else { MouseButton::X1 };
+            Some(MouseEvent::Button { button, down: msg == WM_XBUTTONDOWN, x, y })
+        }
+        WM_MOUSEWHEEL => Some(MouseEvent::Wheel { delta: hi as i16 as i32 }),
+        WM_MOUSEHWHEEL => Some(MouseEvent::HWheel { delta: hi as i16 as i32 }),
+        _ => None,
+    };
+    if let Some(ev) = ev {
+        if dispatch(InputEvent::Mouse(ev)) == Disposition::Swallow {
+            return 1;
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+}
+
+unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code < 0 {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+    let info = &*(lparam as *const KBDLLHOOKSTRUCT);
+    if info.flags & LLKHF_INJECTED != 0 && info.dwExtraInfo == INJECTED_TAG {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+    let msg = wparam as u32;
+    if matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP) {
+        let ev = KeyEvent {
+            vk: info.vkCode,
+            down: info.flags & LLKHF_UP == 0,
+            extended: info.flags & LLKHF_EXTENDED != 0,
+        };
+        if dispatch(InputEvent::Key(ev)) == Disposition::Swallow {
+            return 1;
+        }
+    }
+    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }

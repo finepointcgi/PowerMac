@@ -123,7 +123,26 @@ pub trait InputBackend: Send + Sync {
     /// Whether the process has the OS permission needed for capture/injection
     /// (macOS: Accessibility + Input Monitoring). Always true on Windows.
     fn has_permissions(&self, prompt: bool) -> bool;
+
+    /// Freeze the local cursor in place while capture keeps reporting raw
+    /// `Move` deltas (`dx`/`dy`); `x`/`y` then stay constant.
+    ///
+    /// Use this while controlling a remote machine. On macOS swallowing mouse
+    /// moves in the tap does *not* stop the cursor, so this calls
+    /// `CGAssociateMouseAndMouseCursorPosition(false)`. On Windows, swallowing
+    /// `WM_MOUSEMOVE` in the low-level hook already freezes the cursor, so this
+    /// is a no-op there. Default implementation: no-op.
+    fn set_cursor_locked(&self, _locked: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
+
+/// Value stamped on every event this crate injects (macOS
+/// `kCGEventSourceUserData`, Windows `dwExtraInfo`) so capture can skip it.
+pub const INJECTED_TAG: usize = 0x504D_4D57; // "PMMW"
+
+/// Windows `WHEEL_DELTA`: one wheel notch.
+pub const WHEEL_DELTA: i32 = 120;
 
 /// Windows virtual-key code constants and mac keycode translation tables.
 pub mod vk;
@@ -137,11 +156,11 @@ mod windows;
 pub fn backend() -> anyhow::Result<Arc<dyn InputBackend>> {
     #[cfg(target_os = "macos")]
     {
-        let _ = macos::MacBackend::new()?; anyhow::bail!("todo");
+        return Ok(Arc::new(macos::MacBackend::new()?));
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = windows::WinBackend::new()?; anyhow::bail!("todo");
+        return Ok(Arc::new(windows::WinBackend::new()?));
     }
     #[allow(unreachable_code)]
     Err(anyhow::anyhow!("unsupported platform"))

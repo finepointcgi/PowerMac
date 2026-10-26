@@ -1,1 +1,3 @@
 /target
+crates/mwb/interop/bin
+crates/mwb/interop/obj
