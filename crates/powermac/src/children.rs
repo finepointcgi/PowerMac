@@ -28,23 +28,29 @@ pub static COLOR_EDITOR: Slot = Slot::new();
 /// Start `<this exe> --config <config> <args…>` in `slot`, or bring the
 /// process already running there to the front. Callable from any thread.
 pub fn open(slot: &Slot, args: &[&str]) {
+    open_checked(slot, args);
+}
+
+/// [`open`], returning true when the process was already running (it was
+/// brought to the front and keeps its own arguments).
+pub fn open_checked(slot: &Slot, args: &[&str]) -> bool {
     let what = args.join(" ");
     let mut child = slot.0.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(c) = child.as_mut() {
         if let Ok(None) = c.try_wait() {
             log::info!("{what}: already open (pid {})", c.id());
             activate_process(c.id());
-            return;
+            return true;
         }
     }
     let Some(path) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path) else {
-        return;
+        return false;
     };
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
             log::warn!("{what}: {e}");
-            return;
+            return false;
         }
     };
     let mut cmd = std::process::Command::new(exe);
@@ -62,6 +68,7 @@ pub fn open(slot: &Slot, args: &[&str]) {
         }
         Err(e) => log::warn!("{what}: could not start: {e}"),
     }
+    false
 }
 
 #[cfg(target_os = "macos")]

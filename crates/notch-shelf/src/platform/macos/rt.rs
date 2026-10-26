@@ -98,6 +98,99 @@ pub fn http_get(url: &str, timeout: f64) -> Result<Vec<u8>, String> {
     rx.recv_timeout(Duration::from_secs_f64(timeout + 2.0)).unwrap_or_else(|_| Err("timed out".into()))
 }
 
+/// A response of [`http_request`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+    pub etag: Option<String>,
+}
+
+/// HTTP GET with request headers and a timeout through NSURLSession (the
+/// system's TLS, proxies and trust store); any thread. Non-2xx statuses
+/// other than 304 are errors ("HTTP 404").
+pub fn http_request(url: &str, headers: &[(String, String)], timeout: f64) -> Result<HttpResponse, String> {
+    let (tx, rx) = mpsc::channel::<Result<HttpResponse, String>>();
+    autoreleasepool(|_| unsafe {
+        let u: Option<Retained<AnyObject>> = msg_send![class!(NSURL), URLWithString: &*ns(url)];
+        let Some(u) = u else {
+            let _ = tx.send(Err("Bad URL".into()));
+            return;
+        };
+        // NSURLRequestReloadIgnoringLocalCacheData = 1 (we do our own caching).
+        let req: Retained<AnyObject> = msg_send![class!(NSMutableURLRequest), requestWithURL: &*u, cachePolicy: 1usize, timeoutInterval: timeout];
+        for (k, v) in headers {
+            let _: () = msg_send![&*req, setValue: &*ns(v), forHTTPHeaderField: &*ns(k)];
+        }
+        let _: () = msg_send![&*req, setValue: &*ns("PowerMac/1.0 (notch widget)"), forHTTPHeaderField: &*ns("User-Agent")];
+        let session: Retained<AnyObject> = msg_send![class!(NSURLSession), sharedSession];
+        let tx2 = tx.clone();
+        let block = RcBlock::new(move |data: *mut AnyObject, resp: *mut AnyObject, err: *mut AnyObject| {
+            let r = if !err.is_null() {
+                let d: Retained<NSString> = msg_send![&*err, localizedDescription];
+                Err(d.to_string())
+            } else {
+                let code: isize = if resp.is_null() { 0 } else { msg_send![&*resp, statusCode] };
+                let etag = if resp.is_null() {
+                    None
+                } else {
+                    let v: Option<Retained<AnyObject>> = msg_send![&*resp, valueForHTTPHeaderField: &*ns("ETag")];
+                    v.map(|v| string_of(Some(&v))).filter(|s| !s.is_empty())
+                };
+                if !(200..300).contains(&code) && code != 304 {
+                    Err(format!("HTTP {code}"))
+                } else {
+                    let body = if data.is_null() { vec![] } else { (*(data as *const NSData)).to_vec() };
+                    Ok(HttpResponse { status: code as u16, body, etag })
+                }
+            };
+            let _ = tx2.send(r);
+        });
+        let task: Retained<AnyObject> = msg_send![&*session, dataTaskWithRequest: &*req, completionHandler: &*block];
+        let _: () = msg_send![&*task, resume];
+    });
+    drop(tx);
+    rx.recv_timeout(Duration::from_secs_f64(timeout + 2.0)).unwrap_or_else(|_| Err("Timed out".into()))
+}
+
+/// Does the user's locale use a 24-hour clock?
+pub fn uses_24h() -> bool {
+    autoreleasepool(|_| unsafe {
+        let loc: Retained<AnyObject> = msg_send![class!(NSLocale), currentLocale];
+        let f: Option<Retained<NSString>> = msg_send![class!(NSDateFormatter), dateFormatFromTemplate: &*ns("j"), options: 0usize, locale: &*loc];
+        f.map(|f| !f.to_string().contains('a')).unwrap_or(true)
+    })
+}
+
+/// Path of an app given as a path, a name ("Safari") or a bundle id
+/// ("com.apple.Safari").
+pub fn resolve_app(target: &str) -> Option<String> {
+    let t = target.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let expanded = crate::widgets::xbar::expand_tilde(t);
+    if t.contains('/') {
+        return expanded.exists().then(|| expanded.to_string_lossy().into_owned());
+    }
+    let name = if t.to_ascii_lowercase().ends_with(".app") { t.to_string() } else { format!("{t}.app") };
+    let home = std::env::var("HOME").unwrap_or_default();
+    for dir in ["/Applications", "/System/Applications", "/System/Applications/Utilities", "/Applications/Utilities", &format!("{home}/Applications"), "/System/Library/CoreServices"] {
+        let p = std::path::Path::new(dir).join(&name);
+        if p.exists() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    autoreleasepool(|_| unsafe {
+        let ws: Retained<AnyObject> = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let u: Option<Retained<AnyObject>> = msg_send![&*ws, URLForApplicationWithBundleIdentifier: &*ns(t)];
+        u.map(|u| {
+            let p: Retained<NSString> = msg_send![&*u, path];
+            p.to_string()
+        })
+    })
+}
+
 /// Open a URL with its default handler (main thread or not).
 pub fn open_url(url: &str) {
     autoreleasepool(|_| unsafe {
@@ -202,5 +295,10 @@ mod tests {
         let _ = prefers_fahrenheit();
         assert!(!app_running("com.example.not-running"));
         assert!(http_get("not a url", 1.0).is_err());
+        assert!(http_request("", &[], 1.0).is_err());
+        let _ = uses_24h();
+        assert!(resolve_app("Finder").is_some_and(|p| p.ends_with("Finder.app")));
+        assert!(resolve_app("com.apple.finder").is_some());
+        assert!(resolve_app("No Such App Hopefully").is_none());
     }
 }

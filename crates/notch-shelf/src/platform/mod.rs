@@ -1,12 +1,18 @@
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::{has_notch, Backend};
+pub(crate) use macos::{has_notch, run_widget_once, Backend};
 
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 pub(crate) use self::windows::{has_notch, Backend};
+
+/// The widgets platform is macOS-only for now.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn run_widget_once(_inst: &crate::widgets::instance::WidgetInstance) -> Result<crate::widgets::content::Content, String> {
+    Err("Widgets are only available on macOS".into())
+}
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod other;

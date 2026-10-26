@@ -47,6 +47,16 @@ pub fn open_folder(dir: &Path) {
     let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
 }
 
+/// Select `path` in a Finder (Explorer) window.
+pub fn reveal_path(path: &Path) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = path;
+}
+
 /// Show a Dock icon while the window is open and come to the front (the
 /// app bundle is `LSUIElement`, which would otherwise hide both).
 pub fn become_foreground_app() {

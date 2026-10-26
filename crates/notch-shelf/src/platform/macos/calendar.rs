@@ -157,7 +157,7 @@ impl Calendar {
     }
 }
 
-fn srgb(c: &AnyObject) -> Rgba {
+pub(super) fn srgb(c: &AnyObject) -> Rgba {
     unsafe {
         let cs: Retained<AnyObject> = msg_send![class!(NSColorSpace), sRGBColorSpace];
         let c: Option<Retained<AnyObject>> = msg_send![c, colorUsingColorSpace: &*cs];

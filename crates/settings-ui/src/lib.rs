@@ -23,6 +23,19 @@ use std::path::PathBuf;
 /// Open the settings window for the config file at `config_path` and block
 /// until it is closed. Must be called on the main thread.
 pub fn run(config_path: PathBuf) -> anyhow::Result<()> {
+    run_with_page(config_path, None)
+}
+
+/// [`run`], opening on the page named `page` ("notch-widgets", "sound",
+/// a page title, ...; unknown names open the General page).
+pub fn run_with_page(config_path: PathBuf, page: Option<String>) -> anyhow::Result<()> {
+    let start = page.as_deref().and_then(|n| {
+        let p = model::Page::from_name(n);
+        if p.is_none() {
+            log::warn!("settings: no page named {n:?}");
+        }
+        p
+    });
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("PowerMac Settings")
@@ -38,7 +51,11 @@ pub fn run(config_path: PathBuf) -> anyhow::Result<()> {
         options,
         Box::new(move |_cc| {
             platform::become_foreground_app();
-            Ok(Box::new(app::SettingsApp::new(config_path)))
+            let mut app = app::SettingsApp::new(config_path);
+            if let Some(p) = start {
+                app.set_page(p);
+            }
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!("settings window: {e}"))

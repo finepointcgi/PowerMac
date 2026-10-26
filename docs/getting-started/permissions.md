@@ -11,6 +11,7 @@ Many modules watch or change global input, move other apps' windows or capture t
 | **Automation (Music, Spotify)** | Notch Shelf's Now Playing widget when `useAppleScript` is on (opt-in). |
 | **Audio capture** | Sound's per-app volume (experimental, macOS 14.4+). |
 | **Calendars** | Notch Shelf's Calendar widget. |
+| **Reminders** | Notch Shelf's Reminders widget. |
 | **Camera** | Notch Shelf's Mirror widget. |
 | **Administrator password (once)** | Installing a display override plist. |
 | none | Color Picker, Notch Shelf's shelf, Displays sliders, pointer speed/acceleration, File Tools, Awake |

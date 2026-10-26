@@ -1,6 +1,8 @@
-//! The Home view (widget cards), the Home / Shelf switcher, live activities
-//! beside the collapsed notch, the note editor and the camera mirror.
+//! The Home view (widget cards on named pages), the Home / Shelf switcher,
+//! the page tabs, live activities beside the collapsed notch, the note
+//! editor and the camera mirror.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -15,11 +17,15 @@ use super::super::camera::Camera;
 use super::super::paint::{self, Canvas, Env, FontCache};
 use super::super::{calendar as mac_cal, rt, sysinfo};
 use super::*;
-use crate::widgets::draw::{self, Act, CardDraw, Control, Ctx, Live};
+use crate::widgets::catalog::{ClickAction, KindSettings};
+use crate::widgets::content::{ItemAction, Status};
+use crate::widgets::draw::{self, Act, Card, CardDraw, CardUi, Control, Ctx, ImageKey, ImageSource, Live};
+use crate::widgets::instance::{legacy_id, WidgetInstance};
 use crate::widgets::layout::{self as wl, CardSpec};
 use crate::widgets::media::Command;
-use crate::widgets::timer::{Timer, TimerEvent};
-use crate::widgets::{Access, DefaultView, View, WidgetData, WidgetKind};
+use crate::widgets::timer::TimerEvent;
+use crate::widgets::{Access, DefaultView, InstanceData, View, WidgetData, WidgetKind};
+use crate::SoundCmd;
 
 /// Ears of a live activity, each side of the notch.
 const LIVE_WING: f64 = 58.0;
@@ -37,89 +43,169 @@ pub fn mono() -> f64 {
 #[serde(rename_all = "camelCase", default)]
 struct Persisted {
     last_view: Option<View>,
+    last_page: Option<usize>,
+}
+
+/// One enabled widget instance and its UI state.
+pub(in super::super) struct CardModel {
+    pub inst: WidgetInstance,
+    pub settings: KindSettings,
+    pub ui: CardUi,
+    /// Where a Note instance keeps its text.
+    pub note_path: Option<PathBuf>,
+}
+
+impl CardModel {
+    fn card(&self) -> Card<'_> {
+        Card { id: &self.inst.id, kind: self.inst.kind, size: self.inst.effective_size(), settings: &self.settings, ui: &self.ui }
+    }
+}
+
+/// The volume slider being dragged.
+#[derive(Clone, Copy)]
+pub(in super::super) struct SliderDrag {
+    pub model: usize,
+    /// Track ends in global coordinates.
+    pub x0: f64,
+    pub x1: f64,
+    pub last_sent: f64,
+}
+
+/// A horizontal swipe in progress (page switching).
+#[derive(Default)]
+pub(in super::super) struct Gesture {
+    pub acc: f64,
+    pub switched: bool,
+    pub last: f64,
 }
 
 /// App-wide widget state.
 pub(in super::super) struct Widgets {
     pub view: View,
     pub last_view: View,
-    pub timer: Timer,
+    /// Home page on screen (index into `Config::pages`).
+    pub page: usize,
+    pub models: Vec<CardModel>,
+    models_src: Vec<WidgetInstance>,
     pub data: WidgetData,
     pub data_gen: u64,
     pub controls: Vec<Control>,
     pub controls_at: f64,
     pub artwork: Option<(u64, gfx::Image)>,
+    pub images: HashMap<ImageKey, Option<gfx::Image>>,
+    pub images_gen: u64,
     pub fonts: FontCache,
-    pub note: String,
     pub note_dirty: Option<f64>,
-    pub editing: Option<usize>,
+    /// (panel, model) of the note being edited.
+    pub editing: Option<(usize, usize)>,
     pub camera: Camera,
     pub camera_access: Access,
     pub utc_offset: f64,
     pub offset_at: f64,
+    pub hour24: bool,
     pub forced_hover: Option<Act>,
     pub state_path: PathBuf,
-    pub note_path: PathBuf,
+    pub data_dir: PathBuf,
     pub peek_timer: bool,
     pub demo: bool,
     pub battery_present: bool,
+    pub slider: Option<SliderDrag>,
+    pub gesture: Gesture,
+    /// The Home page tabs' click targets need the page list.
+    pub n_pages: usize,
 }
 
 impl Widgets {
     pub fn new(data_dir: &std::path::Path) -> Widgets {
         let state_path = data_dir.join(STATE_FILE);
-        let note_path = data_dir.join(NOTE_FILE);
         let p: Persisted = std::fs::read(&state_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let last_view = p.last_view.unwrap_or(View::Home);
         Widgets {
             view: last_view,
             last_view,
-            timer: Timer::default(),
+            page: p.last_page.unwrap_or(0),
+            models: vec![],
+            models_src: vec![],
             data: WidgetData::default(),
             data_gen: 0,
             controls: vec![],
             controls_at: f64::NEG_INFINITY,
             artwork: None,
+            images: HashMap::new(),
+            images_gen: 1,
             fonts: FontCache::default(),
-            note: std::fs::read_to_string(&note_path).unwrap_or_default(),
             note_dirty: None,
             editing: None,
             camera: Camera::new(),
             camera_access: Access::Unknown,
             utc_offset: rt::utc_offset(),
             offset_at: mono(),
+            hour24: rt::uses_24h(),
             forced_hover: None,
             state_path,
-            note_path,
+            data_dir: data_dir.to_path_buf(),
             peek_timer: false,
             demo: false,
             battery_present: sysinfo::battery().is_some(),
+            slider: None,
+            gesture: Gesture::default(),
+            n_pages: 1,
         }
     }
 
     fn save_state(&self) {
-        let p = Persisted { last_view: Some(self.last_view) };
+        let p = Persisted { last_view: Some(self.last_view), last_page: Some(self.page) };
         if let Ok(b) = serde_json::to_vec_pretty(&p) {
             let _ = std::fs::write(&self.state_path, b);
+        }
+    }
+
+    fn note_path_for(&self, id: &str) -> PathBuf {
+        // The note migrated from the single-note era keeps its file.
+        if id == legacy_id(WidgetKind::Note) {
+            self.data_dir.join(NOTE_FILE)
+        } else {
+            let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+            self.data_dir.join(format!("notch-note-{safe}.txt"))
         }
     }
 }
 
 pub(in super::super) struct CardView {
-    pub kind: WidgetKind,
+    pub model: usize,
     pub canvas: Canvas,
     pub draw: CardDraw,
 }
 
-pub(in super::super) struct HomePanel {
-    pub group: Layer,
-    /// Clips the cards (kept alive with the panel).
-    pub _row: Layer,
-    pub row_fade: Layer,
-    pub layout: geo::HomeLayout,
+/// One Home page: its clipped row and cards.
+pub(in super::super) struct PageView {
+    /// Index into `Config::pages`.
+    pub page: usize,
+    pub row: Layer,
+    pub fade: Layer,
+    pub layout: wl::CardsLayout,
     pub specs: Vec<CardSpec>,
     pub cards: Vec<CardView>,
-    pub hover: Option<Act>,
+    pub alpha: f64,
+}
+
+pub(in super::super) struct HomePanel {
+    pub group: Layer,
+    /// Clips the sliding pages to the card row.
+    pub _viewport: Layer,
+    /// The card row (global coordinates).
+    pub row: Rect,
+    pub pages: Vec<PageView>,
+    /// Index into `pages` of the page shown.
+    pub cur: usize,
+    /// Animated page position (fractional while sliding).
+    pub pos: Spring,
+    /// (card index on the current page, act) under the pointer.
+    pub hover: Option<(usize, Act)>,
+    pub tabs: Canvas,
+    /// Tab / dot frames (global coordinates), one per page.
+    pub tab_frames: Vec<Rect>,
+    pub dots: bool,
 }
 
 pub(in super::super) struct SwitchView {
@@ -143,34 +229,71 @@ pub(in super::super) struct NoteView {
 }
 
 impl App {
-    // ----- setup ------------------------------------------------------------
+    // ----- models -------------------------------------------------------------
 
-    /// Kinds that get a card (static per panel build).
-    pub(super) fn home_kinds(&self) -> Vec<WidgetKind> {
-        let mut data = WidgetData::default();
-        if self.w.battery_present || self.w.data.battery.is_some() {
-            data.battery = Some(Default::default());
+    /// Rebuild the card models after a config change (UI state of
+    /// unchanged instances is kept).
+    pub(super) fn sync_models(&mut self) {
+        let src: Vec<WidgetInstance> = self.cfg.widgets.iter().filter(|w| w.enabled && w.kind != WidgetKind::Unknown).cloned().collect();
+        self.w.n_pages = self.cfg.page_list().len();
+        if src == self.w.models_src {
+            return;
         }
-        draw::visible_kinds(&self.cfg.enabled_widgets(), &data, self.n_controls())
+        self.end_note_edit();
+        let mut old: HashMap<String, CardModel> = self.w.models.drain(..).map(|m| (m.inst.id.clone(), m)).collect();
+        let mut models = vec![];
+        for inst in &src {
+            let settings = KindSettings::parse(inst.kind, &inst.settings);
+            let m = match old.remove(&inst.id) {
+                Some(mut m) if m.inst.kind == inst.kind => {
+                    m.inst = inst.clone();
+                    m.settings = settings;
+                    m
+                }
+                _ => {
+                    let note_path = (inst.kind == WidgetKind::Note).then(|| self.w.note_path_for(&inst.id));
+                    let note = note_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+                    CardModel { inst: inst.clone(), settings, ui: CardUi { note, ..Default::default() }, note_path }
+                }
+            };
+            models.push(m);
+        }
+        self.w.models = models;
+        self.w.models_src = src;
+        self.rebuild_requested = true;
     }
 
     pub(super) fn n_controls(&self) -> usize {
         self.shared.host.toggles.len() + self.shared.host.actions.len()
     }
 
-    pub(super) fn home_specs(&self) -> Vec<CardSpec> {
-        let n = self.n_controls();
-        self.home_kinds().iter().map(|k| wl::spec(*k, n)).collect()
+    /// Pages with something to show: (page index, model indexes).
+    pub(super) fn home_pages(&self) -> Vec<(usize, Vec<usize>)> {
+        let n = self.cfg.page_list().len();
+        let has_batt = self.w.battery_present || self.w.data.battery.is_some();
+        let nc = self.n_controls();
+        (0..n)
+            .map(|p| {
+                let ms = self.w.models.iter().enumerate().filter(|(_, m)| m.inst.page.min(n - 1) == p && draw::kind_visible(m.inst.kind, has_batt, nc)).map(|(i, _)| i).collect::<Vec<_>>();
+                (p, ms)
+            })
+            .filter(|(_, ms)| !ms.is_empty())
+            .collect()
+    }
+
+    fn specs_of(&self, models: &[usize]) -> Vec<CardSpec> {
+        models.iter().map(|&i| wl::fixed(self.w.models[i].inst.effective_size().width())).collect()
     }
 
     /// The Home view's panel rect for a collapsed rect, if there's a Home view.
     pub(super) fn home_rect_for(&self, collapsed: &Rect, screen: &Rect) -> Option<Rect> {
-        let specs = self.home_specs();
-        if specs.is_empty() {
+        let pages = self.home_pages();
+        if pages.is_empty() {
             return None;
         }
+        let specs: Vec<Vec<CardSpec>> = pages.iter().map(|(_, ms)| self.specs_of(ms)).collect();
         let m = self.metrics;
-        Some(geo::home_rect(collapsed, screen, &m, wl::home_width(&specs, m.side_pad, m.panel_width)))
+        Some(geo::home_rect(collapsed, screen, &m, wl::pages_width(&specs, m.side_pad, m.panel_width)))
     }
 
     /// Layers of the Home view, the switcher and the live activity.
@@ -198,21 +321,43 @@ impl App {
         p.live = Some(LiveView { canvas: live, alpha: 0.0, live: None, rect: None });
 
         let Some(home_rect) = p.home_rect else { return };
-        let specs = self.home_specs();
-        let kinds = self.home_kinds();
         let group = mk(&p.inner);
         gfx::set_frame(&group, bounds);
-        let layout = geo::home_layout(&home_rect, &p.collapsed, &specs, 0.0, &self.metrics);
-        let row = mk(&group);
-        gfx::set_frame(&row, Self::local(p, layout.row));
-        gfx::set_masks_to_bounds(&row, true);
-        let row_fade = gfx::gradient_layer();
-        gfx::set_frame(&row_fade, Rect::new(0.0, 0.0, layout.row.w, layout.row.h));
-        gfx::set_gradient_h(&row_fade, 0.0, 0.0);
-        gfx::set_mask(&row, &row_fade);
-        let cards = kinds.iter().map(|k| CardView { kind: *k, canvas: Canvas::new(&row, scale), draw: CardDraw::default() }).collect();
-        let mut hp = HomePanel { group, _row: row, row_fade, layout, specs, cards, hover: None };
-        Self::place_cards(p, &mut hp);
+        let pages_src = self.home_pages();
+        let base = geo::home_layout(&home_rect, &p.collapsed, &[], 0.0, &self.metrics);
+        let row = base.row;
+        let viewport = mk(&group);
+        // A little room above / below so card edges and shadows aren't cut.
+        gfx::set_frame(&viewport, Self::local(p, row.inflate(0.0, 2.0)));
+        gfx::set_masks_to_bounds(&viewport, true);
+        let mut pages = vec![];
+        for (page, models) in &pages_src {
+            let specs = self.specs_of(models);
+            let layout = wl::layout_cards(row, &specs, 0.0);
+            let r = mk(&viewport);
+            gfx::set_frame(&r, Rect::new(0.0, 2.0, row.w, row.h));
+            gfx::set_masks_to_bounds(&r, true);
+            let fade = gfx::gradient_layer();
+            gfx::set_frame(&fade, Rect::new(0.0, 0.0, row.w, row.h));
+            gfx::set_gradient_h(&fade, 0.0, 0.0);
+            gfx::set_mask(&r, &fade);
+            let cards = models.iter().map(|&mi| CardView { model: mi, canvas: Canvas::new(&r, scale), draw: CardDraw::default() }).collect();
+            pages.push(PageView { page: *page, row: r, fade, layout, specs, cards, alpha: 1.0 });
+        }
+        let cur = pages.iter().position(|pv| pv.page == self.w.page).unwrap_or(0);
+        if let Some(pv) = pages.get(cur) {
+            self.w.page = pv.page;
+        }
+        let k = 260.0;
+        let mut pos = Spring::new(k, Spring::damping_for_ratio(k, 0.86), cur as f64);
+        pos.target = cur as f64;
+        let tabs = Canvas::new(&group, scale);
+        let mut hp = HomePanel { group, _viewport: viewport, row, pages, cur, pos, hover: None, tabs, tab_frames: vec![], dots: false };
+        for k in 0..hp.pages.len() {
+            Self::place_cards(&mut hp, k);
+        }
+        Self::place_pages(&mut hp);
+        self.layout_tabs(p, &mut hp);
         p.home = Some(hp);
 
         // Switcher.
@@ -229,17 +374,103 @@ impl App {
         p.switch = Some(SwitchView { bg, knob, icons, shown: None });
     }
 
-    fn place_cards(p: &Panel, hp: &mut HomePanel) {
-        let row = hp.layout.row;
-        for (c, r) in hp.cards.iter_mut().zip(&hp.layout.cards.cards) {
+    /// Card frames of page `k` inside its row, and the row's edge fades.
+    fn place_cards(hp: &mut HomePanel, k: usize) {
+        let row = hp.row;
+        let pv = &mut hp.pages[k];
+        for (c, r) in pv.cards.iter_mut().zip(&pv.layout.cards) {
             c.canvas.set_frame(r.offset(-row.x, -row.y));
         }
         let fade = 22.0 / row.w.max(1.0);
-        let l = &hp.layout.cards;
+        let l = &pv.layout;
         let left = if l.scroll > 0.5 { fade } else { 0.0 };
         let right = if l.scroll < l.max_scroll - 0.5 { fade } else { 0.0 };
-        transaction(None, || gfx::set_gradient_h(&hp.row_fade, left, right));
-        let _ = p;
+        transaction(None, || gfx::set_gradient_h(&pv.fade, left, right));
+    }
+
+    /// Slide the page rows to the animated page position.
+    fn place_pages(hp: &mut HomePanel) {
+        let pos = hp.pos.value;
+        let w = hp.row.w;
+        let h = hp.row.h;
+        let mut alphas = vec![];
+        transaction(None, || {
+            for (k, pv) in hp.pages.iter().enumerate() {
+                let (x, a) = wl::page_offset(k, pos, w);
+                gfx::set_frame(&pv.row, Rect::new(x, 2.0, w, h));
+                gfx::set_opacity(&pv.row, a);
+                gfx::set_hidden(&pv.row, a <= 0.001);
+                alphas.push(a);
+            }
+        });
+        for (pv, a) in hp.pages.iter_mut().zip(alphas) {
+            pv.alpha = a;
+        }
+    }
+
+    /// Tab (or dot) frames for the pages, right of the notch.
+    fn layout_tabs(&self, p: &Panel, hp: &mut HomePanel) {
+        hp.tab_frames.clear();
+        hp.dots = false;
+        if hp.pages.len() < 2 {
+            return;
+        }
+        let Some(home) = p.home_rect else { return };
+        let hh = geo::header_height(&p.collapsed, &self.metrics);
+        let x0 = p.collapsed.right() + 14.0;
+        let area = Rect::new(x0, home.y, (home.right() - self.metrics.side_pad - x0).max(0.0), hh);
+        let names = self.cfg.page_list();
+        let widths: Vec<f64> = hp.pages.iter().map(|pv| gfx::text_width(&names[pv.page].name, 11.0, gfx::W_SEMIBOLD)).collect();
+        match wl::page_tabs(area, &widths) {
+            Some(t) => hp.tab_frames = t,
+            None => {
+                hp.dots = true;
+                hp.tab_frames = wl::page_dots(area, hp.pages.len());
+            }
+        }
+        let bounds = hp.tab_frames.iter().skip(1).fold(hp.tab_frames[0], |a, b| a.union(b));
+        hp.tabs.set_frame(Self::local(p, bounds.inflate(2.0, 2.0)));
+    }
+
+    /// Draw the tabs / dots with the knob at the animated page position.
+    fn draw_tabs(&mut self, i: usize) {
+        let names = self.cfg.page_list();
+        let p = &mut self.panels[i];
+        let Some(hp) = p.home.as_mut() else { return };
+        if hp.tab_frames.is_empty() {
+            return;
+        }
+        let bounds = hp.tab_frames.iter().skip(1).fold(hp.tab_frames[0], |a, b| a.union(b)).inflate(2.0, 2.0);
+        let o = Point::new(bounds.x, bounds.y);
+        let pos = hp.pos.value.clamp(0.0, (hp.pages.len() - 1) as f64);
+        let lo = pos.floor() as usize;
+        let hi = (lo + 1).min(hp.pages.len() - 1);
+        let t = pos - lo as f64;
+        let lerp = |a: Rect, b: Rect| Rect::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.w + (b.w - a.w) * t, a.h + (b.h - a.h) * t);
+        let hover = hp.hover.is_none();
+        let _ = hover;
+        let mut prims = vec![];
+        let w = crate::widgets::Rgba::white;
+        if hp.dots {
+            for (k, f) in hp.tab_frames.iter().enumerate() {
+                let near = (1.0 - (k as f64 - pos).abs()).clamp(0.0, 1.0);
+                let d = 6.0 + 8.0 * near;
+                let r = Rect::new(f.center_x() - d / 2.0, f.center_y() - 3.0, d, 6.0).offset(-o.x, -o.y);
+                prims.push(draw::Prim::Rect { r, radius: 3.0, fill: w(0.3 + 0.62 * near), stroke: None });
+            }
+        } else {
+            let bg = bounds.offset(-o.x, -o.y).inflate(-2.0, -2.0);
+            prims.push(draw::Prim::Rect { r: bg, radius: bg.h / 2.0, fill: w(0.09), stroke: None });
+            let knob = lerp(hp.tab_frames[lo], hp.tab_frames[hi]).offset(-o.x, -o.y).inflate(-2.0, -2.0);
+            prims.push(draw::Prim::Rect { r: knob, radius: knob.h / 2.0, fill: w(0.2), stroke: None });
+            for (k, f) in hp.tab_frames.iter().enumerate() {
+                let near = (1.0 - (k as f64 - pos).abs()).clamp(0.0, 1.0);
+                let name = names.get(hp.pages[k].page).map(|p| p.name.clone()).unwrap_or_default();
+                prims.push(draw::Prim::Text { r: f.offset(-o.x, -o.y), text: name, font: draw::font(11.0, draw::Weight::Semibold), color: w(0.5 + 0.45 * near), align: draw::Align::Center, wrap: false });
+            }
+        }
+        let mut env = Env { scale: p.scale, symbols: &mut self.symbols, fonts: &mut self.w.fonts, artwork: None, artwork_key: 0, camera: None, images: None, images_gen: 0 };
+        hp.tabs.paint(&prims, &mut env);
     }
 
     // ----- data -------------------------------------------------------------
@@ -249,6 +480,7 @@ impl App {
         let g = self.shared.data_gen.load(Ordering::Relaxed);
         if g != self.w.data_gen {
             self.w.data_gen = g;
+            let battery_before = self.w.data.battery.is_some();
             self.w.data = self.shared.data().clone();
             self.w.data.camera_access = self.w.camera_access;
             let key = self.w.data.now_playing.as_ref().map(|n| n.artwork_key()).unwrap_or(0);
@@ -256,11 +488,16 @@ impl App {
                 let img = self.w.data.now_playing.as_ref().and_then(|n| n.artwork.as_ref()).and_then(|b| paint::decode_image(b));
                 self.w.artwork = img.map(|i| (key, i));
             }
+            if !battery_before && self.w.data.battery.is_some() && !self.w.battery_present {
+                self.w.battery_present = true;
+                self.rebuild_requested = true;
+            }
         }
         let t = mono();
         if t - self.w.offset_at > 60.0 {
             self.w.offset_at = t;
             self.w.utc_offset = rt::utc_offset();
+            self.w.hour24 = rt::uses_24h();
         }
         if self.w.controls.len() != self.n_controls() || (self.shared.home_visible.load(Ordering::Relaxed) && t - self.w.controls_at > 1.0) {
             self.read_controls();
@@ -274,8 +511,15 @@ impl App {
                 self.save_note();
             }
         }
-        // Timer.
-        if self.w.timer.tick(t) == Some(TimerEvent::Finished) {
+        // Timers.
+        let mut finished = false;
+        for m in &mut self.w.models {
+            if m.inst.kind == WidgetKind::Timer && m.ui.timer.tick(t) == Some(TimerEvent::Finished) {
+                finished = true;
+            }
+            m.ui.done.retain(|(_, at)| t - at < 30.0);
+        }
+        if finished {
             rt::play_sound("Glass");
             log::info!("notch-shelf: timer finished");
             if !self.cfg.live_activities {
@@ -291,21 +535,58 @@ impl App {
     pub(super) fn read_controls(&mut self) {
         self.w.controls_at = mono();
         let host = &self.shared.host;
-        let mut v: Vec<Control> = host.toggles.iter().map(|t| Control { title: t.title.clone(), symbol: t.sf_symbol.clone(), on: Some((t.get)()) }).collect();
-        v.extend(host.actions.iter().map(|a| Control { title: a.title.clone(), symbol: a.sf_symbol.clone(), on: None }));
+        let mut v: Vec<Control> = host.toggles.iter().map(|t| Control { id: t.id.clone(), title: t.title.clone(), symbol: t.sf_symbol.clone(), on: Some((t.get)()) }).collect();
+        v.extend(host.actions.iter().map(|a| Control { id: a.id.clone(), title: a.title.clone(), symbol: a.sf_symbol.clone(), on: None }));
         self.w.controls = v;
     }
 
     fn save_note(&mut self) {
         self.w.note_dirty = None;
-        if let Some(i) = self.w.editing {
-            if let Some(nv) = self.panels.get(i).and_then(|p| p.note_view.as_ref()) {
-                let s: Retained<AnyObject> = unsafe { msg_send![&*nv.text, string] };
-                self.w.note = rt::string_of(Some(&s)).chars().take(NOTE_MAX).collect();
+        let Some((i, mi)) = self.w.editing else { return };
+        if let Some(nv) = self.panels.get(i).and_then(|p| p.note_view.as_ref()) {
+            let s: Retained<AnyObject> = unsafe { msg_send![&*nv.text, string] };
+            if let Some(m) = self.w.models.get_mut(mi) {
+                m.ui.note = rt::string_of(Some(&s)).chars().take(NOTE_MAX).collect();
             }
         }
-        if let Err(e) = std::fs::write(&self.w.note_path, &self.w.note) {
-            log::warn!("notch-shelf: saving note: {e}");
+        if let Some(m) = self.w.models.get(mi) {
+            if let Some(path) = &m.note_path {
+                if let Err(e) = std::fs::write(path, &m.ui.note) {
+                    log::warn!("notch-shelf: saving note: {e}");
+                }
+            }
+        }
+    }
+
+    /// Decode / look up images cards asked for.
+    fn load_images(&mut self, reqs: &[(ImageKey, ImageSource)], scale: f64) {
+        for (k, src) in reqs {
+            if self.w.images.contains_key(k) {
+                continue;
+            }
+            let img = match src {
+                ImageSource::Data { bytes, template } => paint::nsimage_from_data(bytes).and_then(|ns| {
+                    let size: NSSize = unsafe { msg_send![&*ns, size] };
+                    let (w, h) = (size.width.max(1.0), size.height.max(1.0));
+                    let f = (32.0 / w.max(h)).min(2.0);
+                    gfx::rasterize(&ns, w * f, h * f, scale, template.then_some((1.0, 1.0, 1.0, 0.92)))
+                }),
+                ImageSource::Icon(s) => {
+                    let path = match s.strip_prefix("app:") {
+                        Some(app) => rt::resolve_app(app),
+                        None => Some(s.clone()),
+                    };
+                    path.and_then(|p| {
+                        // Through symlinks (Safari in /Applications is one),
+                        // so the icon has no alias badge.
+                        let real = std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(&p));
+                        let icon = pboard::file_icon(&real);
+                        gfx::rasterize(&icon, 64.0, 64.0, scale, None)
+                    })
+                }
+            };
+            self.w.images.insert(*k, img);
+            self.w.images_gen += 1;
         }
     }
 
@@ -349,12 +630,45 @@ impl App {
                 _ => p.shelf_rect,
             };
             if p.mode == Mode::Expanded {
+                p.switch_grace = Some(p.shape_now.rect);
                 p.from = p.shape_now;
                 p.to = geo::expanded_shape(&p.expanded, &m);
                 let k = 360.0;
                 p.spring = Spring::new(k, Spring::damping_for_ratio(k, 0.8), 0.0);
                 p.spring.target = 1.0;
             }
+        }
+    }
+
+    /// Show Home page `page` (index into the config's pages) on every
+    /// panel; the pages slide.
+    pub(super) fn set_page(&mut self, page: usize) {
+        let mut found = false;
+        for p in &mut self.panels {
+            if let Some(hp) = p.home.as_mut() {
+                if let Some(k) = hp.pages.iter().position(|pv| pv.page == page) {
+                    hp.cur = k;
+                    hp.pos.target = k as f64;
+                    hp.hover = None;
+                    found = true;
+                }
+            }
+        }
+        if (found || self.panels.is_empty()) && self.w.page != page {
+            self.end_note_edit();
+            self.w.page = page;
+            self.w.save_state();
+        }
+        self.shared.presence.lock().unwrap_or_else(|e| e.into_inner()).page = self.w.page;
+        self.shared.signal.notify();
+    }
+
+    fn step_page(&mut self, i: usize, dir: f64) {
+        let Some(hp) = self.panels.get(i).and_then(|p| p.home.as_ref()) else { return };
+        let k = wl::swipe_target(hp.cur, hp.pages.len(), dir);
+        if k != hp.cur {
+            let page = hp.pages[k].page;
+            self.set_page(page);
         }
     }
 
@@ -378,11 +692,8 @@ impl App {
         let (mono_now, unix_now) = self.ctx_parts();
         let live = if self.cfg.live_activities {
             let ctx = self.ctx(mono_now, unix_now, None);
-            let mut l = draw::live_activity(&ctx);
-            if matches!(l, Some(Live::Music { .. })) && !self.cfg.widget_enabled(WidgetKind::NowPlaying) {
-                l = None;
-            }
-            l
+            let cards: Vec<Card> = self.w.models.iter().map(|m| m.card()).collect();
+            draw::live_activity(&ctx, &cards)
         } else {
             None
         };
@@ -420,7 +731,16 @@ impl App {
         let prims = draw::live_prims(&live, left, right, self.accent_rgba(), mono_now);
         let p = &mut self.panels[i];
         let lv = p.live.as_mut().unwrap();
-        let mut env = Env { scale: p.scale, symbols: &mut self.symbols, fonts: &mut self.w.fonts, artwork: self.w.artwork.as_ref().map(|(_, i)| i), artwork_key: self.w.artwork.as_ref().map(|(k, _)| *k).unwrap_or(0), camera: None };
+        let mut env = Env {
+            scale: p.scale,
+            symbols: &mut self.symbols,
+            fonts: &mut self.w.fonts,
+            artwork: self.w.artwork.as_ref().map(|(_, i)| i),
+            artwork_key: self.w.artwork.as_ref().map(|(k, _)| *k).unwrap_or(0),
+            camera: None,
+            images: None,
+            images_gen: 0,
+        };
         lv.canvas.paint(&prims, &mut env);
     }
 
@@ -431,24 +751,29 @@ impl App {
     fn ctx<'a>(&'a self, mono_now: f64, unix_now: f64, hover: Option<&'a Act>) -> Ctx<'a> {
         Ctx {
             data: &self.w.data,
-            timer: &self.w.timer,
             mono_now,
             unix_now,
             utc_offset: self.w.utc_offset,
             accent: self.accent_rgba(),
             controls: &self.w.controls,
             hover,
-            note: &self.w.note,
-            editing_note: self.w.editing.is_some(),
             camera_on: self.w.camera.running(),
-            calendar_days: self.cfg.calendar.days.clamp(1, 7),
-            calendar_filter: &self.cfg.calendar.calendars,
-            weather_enabled: self.cfg.widget_enabled(WidgetKind::Weather),
-            use_applescript: self.cfg.now_playing.use_applescript,
+            hour24: self.w.hour24,
         }
     }
 
-    /// Hover, crossfade and card drawing of the Home view.
+    /// The card under `pt` on the current page of panel `i`: (card index,
+    /// card frame).
+    fn card_at(&self, i: usize, pt: Point) -> Option<(usize, Rect)> {
+        let hp = self.panels.get(i)?.home.as_ref()?;
+        if !hp.row.contains(pt) || (hp.pos.value - hp.cur as f64).abs() > 0.3 {
+            return None;
+        }
+        let pv = hp.pages.get(hp.cur)?;
+        pv.layout.cards.iter().enumerate().find(|(_, r)| r.contains(pt)).map(|(k, r)| (k, *r))
+    }
+
+    /// Hover, page slide, crossfade and card drawing of the Home view.
     pub(super) fn update_home(&mut self, i: usize, cur: Point, dt: f64) {
         let home_target = if self.w.view == View::Home && self.panels[i].home.is_some() { 1.0 } else { 0.0 };
         {
@@ -463,25 +788,65 @@ impl App {
                     gfx::set_hidden(&h.group, mix <= 0.0);
                 }
             });
+            if let Some(hp) = p.home.as_mut() {
+                let before = hp.pos.value;
+                hp.pos.step(dt);
+                if hp.pos.settled() {
+                    hp.pos.value = hp.pos.target;
+                    hp.pos.velocity = 0.0;
+                }
+                if hp.pos.value != before || hp.pages.iter().enumerate().any(|(k, pv)| (pv.alpha > 0.001) != ((k as f64 - hp.pos.value).abs() < 1.0)) {
+                    Self::place_pages(hp);
+                }
+            }
         }
         self.update_switch(i);
+        self.draw_tabs(i);
         let p = &self.panels[i];
-        let Some(hp) = &p.home else { return };
+        let Some(_) = &p.home else { return };
         if p.mode != Mode::Expanded && p.content_alpha <= 0.0 {
             return;
         }
-        // Hover.
-        let hover = if p.mode == Mode::Expanded && self.w.view == View::Home && self.press.is_none() {
-            hp.layout.cards.cards.iter().zip(&hp.cards).find(|(r, _)| r.contains(cur) && hp.layout.row.contains(cur)).and_then(|(r, c)| c.draw.hit_at(Point::new(cur.x - r.x, cur.y - r.y)).cloned())
-        } else {
-            None
-        };
-        let hover = self.w.forced_hover.clone().or(hover);
+        // Hover (current page only).
+        let mut hover = None;
+        if p.mode == Mode::Expanded && self.w.view == View::Home && self.press.is_none() {
+            if let Some((k, r)) = self.card_at(i, cur) {
+                let hp = p.home.as_ref().unwrap();
+                if let Some(a) = hp.pages[hp.cur].cards[k].draw.hit_at(Point::new(cur.x - r.x, cur.y - r.y)) {
+                    hover = Some((k, a.clone()));
+                }
+            }
+        }
+        if let Some(fh) = self.w.forced_hover.clone() {
+            hover = Some((0, fh));
+        }
+        if self.w.slider.is_some() {
+            hover = None;
+        }
         let (mono_now, unix_now) = self.ctx_parts();
-        let draws: Vec<CardDraw> = {
-            let ctx = self.ctx(mono_now, unix_now, hover.as_ref());
-            hp.cards.iter().zip(&hp.layout.cards.cards).map(|(c, r)| draw::card(c.kind, r.w, r.h, &ctx)).collect()
-        };
+        let hp = p.home.as_ref().unwrap();
+        let cur_page = hp.cur;
+        let mut draws: Vec<(usize, usize, CardDraw)> = vec![];
+        {
+            let base = self.ctx(mono_now, unix_now, None);
+            for (k, pv) in hp.pages.iter().enumerate() {
+                if pv.alpha <= 0.001 {
+                    continue;
+                }
+                for (ci, (cv, r)) in pv.cards.iter().zip(&pv.layout.cards).enumerate() {
+                    let mut ctx = base.clone();
+                    let h = hover.as_ref().filter(|(hk, _)| k == cur_page && *hk == ci).map(|(_, a)| a);
+                    ctx.hover = h;
+                    let m = &self.w.models[cv.model];
+                    draws.push((k, ci, draw::card(&m.card(), r.w, r.h, &ctx)));
+                }
+            }
+        }
+        let scale = p.scale;
+        let reqs: Vec<(ImageKey, ImageSource)> = draws.iter().flat_map(|(_, _, d)| d.images.iter().cloned()).collect();
+        if !reqs.is_empty() {
+            self.load_images(&reqs, scale);
+        }
         let camera = self.w.camera.preview.clone();
         let p = &mut self.panels[i];
         let hp = p.home.as_mut().unwrap();
@@ -493,13 +858,16 @@ impl App {
             artwork: self.w.artwork.as_ref().map(|(_, i)| i),
             artwork_key: self.w.artwork.as_ref().map(|(k, _)| *k).unwrap_or(0),
             camera: camera.as_deref(),
+            images: Some(&self.w.images),
+            images_gen: self.w.images_gen,
         };
-        for (c, d) in hp.cards.iter_mut().zip(draws) {
-            c.canvas.paint(&d.prims, &mut env);
-            c.draw = d;
+        for (k, ci, d) in draws {
+            let cv = &mut hp.pages[k].cards[ci];
+            cv.canvas.paint(&d.prims, &mut env);
+            cv.draw = d;
         }
         // Keep the note editor over its card.
-        if self.w.editing == Some(i) {
+        if self.w.editing.is_some_and(|(pi, _)| pi == i) {
             self.place_note_view(i);
         }
     }
@@ -563,36 +931,138 @@ impl App {
             return false;
         }
         let hp = p.home.as_ref().unwrap();
-        let act = hp
-            .layout
-            .cards
-            .cards
-            .iter()
-            .zip(&hp.cards)
-            .find(|(r, _)| r.contains(pt) && hp.layout.row.contains(pt))
-            .and_then(|(r, c)| c.draw.hit_at(Point::new(pt.x - r.x, pt.y - r.y)).cloned());
-        if let Some(a) = act {
-            self.perform(i, a);
-        } else if self.w.editing.is_some() {
-            self.end_note_edit();
+        if let Some(k) = hp.tab_frames.iter().position(|f| f.inflate(2.0, 4.0).contains(pt)) {
+            let page = hp.pages[k].page;
+            self.set_page(page);
+            return true;
+        }
+        let Some((k, r)) = self.card_at(i, pt) else {
+            if self.w.editing.is_some() {
+                self.end_note_edit();
+            }
+            return true;
+        };
+        let cv = &hp.pages[hp.cur].cards[k];
+        let model = cv.model;
+        let local = Point::new(pt.x - r.x, pt.y - r.y);
+        match cv.draw.hit_at(local).cloned() {
+            Some(a) => self.perform(i, model, a, local, r),
+            None => {
+                if self.w.editing.is_some() {
+                    self.end_note_edit();
+                }
+            }
         }
         true
     }
 
-    pub(super) fn on_home_scroll(&mut self, i: usize, d: f64) -> bool {
-        if self.w.view != View::Home {
+    /// Mouse dragged in the Home view (the volume slider).
+    pub(super) fn on_home_dragged(&mut self, pt: Point) -> bool {
+        let Some(s) = self.w.slider else { return false };
+        let v = crate::widgets::sound::slider_value(pt.x, s.x0, s.x1);
+        self.set_volume(s.model, v, false);
+        true
+    }
+
+    pub(super) fn on_home_mouse_up(&mut self, pt: Point) -> bool {
+        let Some(s) = self.w.slider.take() else { return false };
+        let v = crate::widgets::sound::slider_value(pt.x, s.x0, s.x1);
+        self.set_volume(s.model, v, true);
+        true
+    }
+
+    fn set_volume(&mut self, _model: usize, v: f32, final_value: bool) {
+        self.w.data.sound.volume = Some(v);
+        self.shared.data().sound.volume = Some(v);
+        let t = mono();
+        let due = self.w.slider.map(|s| t - s.last_sent > 0.05).unwrap_or(true);
+        if final_value || due {
+            if let Some(s) = self.w.slider.as_mut() {
+                s.last_sent = t;
+            }
+            if !self.w.demo {
+                let mut r = self.shared.reqs();
+                r.sound.retain(|c| !matches!(c, SoundCmd::Volume(_)));
+                r.sound.push(SoundCmd::Volume(v));
+                drop(r);
+                self.shared.signal.notify();
+            }
+        }
+    }
+
+    pub(super) fn on_home_scroll(&mut self, i: usize, dx: f64, dy: f64, precise: bool, began: bool, momentum: bool) -> bool {
+        if self.w.view != View::Home || self.panels.get(i).and_then(|p| p.home.as_ref()).is_none() {
             return false;
         }
+        let t = mono();
+        let cur = {
+            let loc = objc2_app_kit::NSEvent::mouseLocation();
+            Point::new(loc.x, self.primary_h - loc.y)
+        };
+        // A list card under the pointer scrolls vertically.
+        if dy.abs() >= dx.abs() {
+            if let Some((k, r)) = self.card_at(i, cur) {
+                let hp = self.panels[i].home.as_ref().unwrap();
+                let cv = &hp.pages[hp.cur].cards[k];
+                if let Some((area, max)) = cv.draw.scroll.filter(|(_, max)| *max > 0.0) {
+                    if area.offset(r.x, r.y).contains(cur) {
+                        let model = cv.model;
+                        let step = if precise { dy } else { dy * crate::widgets::cards::ROW_H };
+                        let m = &mut self.w.models[model];
+                        m.ui.scroll = (m.ui.scroll - step).clamp(0.0, max);
+                        return true;
+                    }
+                }
+            }
+        }
+        let horizontal = dx.abs() > dy.abs();
+        let mut d = if horizontal { dx } else { dy };
+        if !precise {
+            d *= 14.0;
+        }
         let m = self.metrics;
-        let p = &mut self.panels[i];
-        let Some(hp) = p.home.as_mut() else { return false };
-        let max = hp.layout.cards.max_scroll;
-        let s = (hp.layout.cards.scroll - d).clamp(0.0, max);
-        if s != hp.layout.cards.scroll {
-            hp.layout = geo::home_layout(&hp.layout.panel, &p.collapsed, &hp.specs, s, &m);
-            let mut hp2 = p.home.take().unwrap();
-            Self::place_cards(p, &mut hp2);
-            p.home = Some(hp2);
+        // Scroll an overflowing row first.
+        {
+            let p = &mut self.panels[i];
+            let hp = p.home.as_mut().unwrap();
+            let k = hp.cur;
+            let pv = &hp.pages[k];
+            let max = pv.layout.max_scroll;
+            let s = (pv.layout.scroll - d).clamp(0.0, max);
+            if max > 0.0 && (s - pv.layout.scroll).abs() > 0.01 {
+                let specs = pv.specs.clone();
+                hp.pages[k].layout = wl::layout_cards(hp.row, &specs, s);
+                Self::place_cards(hp, k);
+                self.w.gesture = Gesture { acc: 0.0, switched: false, last: t };
+                let _ = m;
+                return true;
+            }
+        }
+        // At the edge (or no overflow): swipe between pages.
+        if momentum {
+            return true;
+        }
+        let g = &mut self.w.gesture;
+        if began || t - g.last > 0.3 {
+            *g = Gesture::default();
+        }
+        g.last = t;
+        if !precise {
+            // A mouse wheel: one page per notch, with a cooldown.
+            if !g.switched && d.abs() > 0.0 {
+                g.switched = true;
+                self.step_page(i, if d < 0.0 { 1.0 } else { -1.0 });
+            }
+            return true;
+        }
+        if !horizontal {
+            return true;
+        }
+        g.acc += d;
+        if !g.switched && g.acc.abs() > 36.0 {
+            g.switched = true;
+            let dir = if g.acc < 0.0 { 1.0 } else { -1.0 };
+            self.step_page(i, dir);
         }
         true
     }
@@ -604,11 +1074,80 @@ impl App {
         }
     }
 
-    pub(super) fn perform(&mut self, i: usize, act: Act) {
+    fn refresh_instance(&mut self, id: &str) {
+        self.shared.reqs().refresh.push(id.to_string());
+        self.shared.signal.notify();
+    }
+
+    /// Run an item / card action of a custom widget. `trusted`: the action
+    /// came from the user's own command or plugin (commands allowed);
+    /// otherwise only http(s) links open.
+    fn run_action(&mut self, model: usize, a: ItemAction, trusted: bool) {
+        let id = self.w.models[model].inst.id.clone();
+        match a {
+            ItemAction::OpenUrl(u) => {
+                let l = u.to_ascii_lowercase();
+                if trusted || l.starts_with("https://") || l.starts_with("http://") {
+                    rt::open_url(&u);
+                    self.collapse_all();
+                }
+            }
+            ItemAction::Copy(text) => {
+                pboard::copy_to_clipboard(&[crate::store::ShelfItem { id: 0, kind: crate::store::ItemKind::Text { text }, added_at: 0 }]);
+                rt::play_sound("Pop");
+            }
+            ItemAction::Refresh => self.refresh_instance(&id),
+            ItemAction::Run { program, args, shell, terminal, refresh } => {
+                if !trusted {
+                    log::warn!("notch-shelf: ignored a command from untrusted content");
+                    return;
+                }
+                let argv: Vec<String> = if shell || args.is_empty() && program.contains(' ') && !std::path::Path::new(&program).exists() {
+                    vec!["/bin/zsh".into(), "-lc".into(), if args.is_empty() { program } else { format!("{program} {}", args.iter().map(|a| crate::widgets::run::shell_quote(a)).collect::<Vec<_>>().join(" ")) }]
+                } else {
+                    std::iter::once(program).chain(args).collect()
+                };
+                if terminal {
+                    match crate::widgets::run::terminal_script(&self.w.data_dir.join("notch-run"), &argv) {
+                        Ok(p) => rt::open_path(&p.to_string_lossy()),
+                        Err(e) => log::warn!("notch-shelf: terminal script: {e}"),
+                    }
+                } else if let Err(e) = crate::widgets::run::spawn_detached(&argv, std::env::var_os("HOME").map(PathBuf::from).as_deref()) {
+                    log::warn!("notch-shelf: {e}");
+                }
+                if refresh {
+                    // Give the command a moment, then re-run the widget.
+                    let s = self.shared.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                        s.reqs().refresh.push(id);
+                        s.signal.notify();
+                    });
+                }
+            }
+        }
+    }
+
+    /// Text of a card's content for "Copy".
+    fn content_text(&self, model: usize) -> String {
+        let id = &self.w.models[model].inst.id;
+        match self.w.data.content(id).and_then(|s| s.content()) {
+            Some(c) => match &c.value {
+                Some(v) => format!("{v}{}", if c.unit.is_empty() { String::new() } else { format!(" {}", c.unit) }).trim().to_string(),
+                None if !c.body.is_empty() => format!("{}\n{}", c.title, c.body).trim().to_string(),
+                None => c.title.clone(),
+            },
+            None => String::new(),
+        }
+    }
+
+    pub(super) fn perform(&mut self, i: usize, model: usize, act: Act, local: Point, card: Rect) {
         let t = mono();
         if !matches!(act, Act::EditNote) {
             self.end_note_edit();
         }
+        let kind = self.w.models[model].inst.kind;
+        let id = self.w.models[model].inst.id.clone();
         match act {
             Act::Media(cmd) => {
                 if cmd == Command::PlayPause {
@@ -629,8 +1168,8 @@ impl App {
                     self.shared.signal.notify();
                 }
             }
-            Act::OpenEvent(id) => {
-                let ev = self.w.data.events.iter().find(|e| e.id == id).cloned();
+            Act::OpenEvent(eid) => {
+                let ev = self.w.data.events.iter().find(|e| e.id == eid).cloned();
                 match ev.and_then(|e| crate::widgets::calendar::open_url(&e)) {
                     Some(url) => rt::open_url(&url),
                     None => mac_cal::open_app(),
@@ -642,11 +1181,11 @@ impl App {
                 self.shared.signal.notify();
             }
             Act::OpenPrivacy(pane) => rt::open_url(&format!("x-apple.systempreferences:com.apple.preference.security?Privacy_{pane}")),
-            Act::TimerPreset(secs) => self.w.timer.start(secs as f64, t),
-            Act::TimerStopwatch => self.w.timer.start_stopwatch(t),
-            Act::TimerPause => self.w.timer.toggle_pause(t),
-            Act::TimerReset => self.w.timer.reset(),
-            Act::TimerAdd(secs) => self.w.timer.add(secs as f64, t),
+            Act::TimerPreset(secs) => self.w.models[model].ui.timer.start(secs as f64, t),
+            Act::TimerStopwatch => self.w.models[model].ui.timer.start_stopwatch(t),
+            Act::TimerPause => self.w.models[model].ui.timer.toggle_pause(t),
+            Act::TimerReset => self.w.models[model].ui.timer.reset(),
+            Act::TimerAdd(secs) => self.w.models[model].ui.timer.add(secs as f64, t),
             Act::Control(k) => {
                 let nt = self.shared.host.toggles.len();
                 if k < nt {
@@ -663,7 +1202,7 @@ impl App {
                     dispatch_main(move || (a.run)());
                 }
             }
-            Act::EditNote => self.begin_note_edit(i),
+            Act::EditNote => self.begin_note_edit(i, model),
             Act::Mirror => {
                 if self.w.camera.running() || self.w.camera.want {
                     self.w.camera.stop();
@@ -677,7 +1216,135 @@ impl App {
                 self.shared.reqs().refresh_weather = true;
                 self.shared.signal.notify();
             }
+            Act::Refresh => self.refresh_instance(&id),
+            Act::CardAction => {
+                // The content's own action wins; then the settings' click.
+                let content_action = self.w.data.content(&id).and_then(|s| s.content()).and_then(|c| c.action.clone());
+                let trusted = kind != WidgetKind::Web;
+                if let Some(a) = content_action {
+                    return self.run_action(model, a, trusted);
+                }
+                if let KindSettings::Script(s) = &self.w.models[model].settings {
+                    {
+                        let target = s.click_target.trim().to_string();
+                        match s.click {
+                            ClickAction::None => {}
+                            ClickAction::Refresh => self.refresh_instance(&id),
+                            ClickAction::OpenUrl => self.run_action(model, ItemAction::OpenUrl(target), true),
+                            ClickAction::Run => {
+                                let argv = crate::widgets::run::argv_for(s.interpreter, &s.interpreter_path, &target);
+                                let (program, args) = (argv[0].clone(), argv[1..].to_vec());
+                                self.run_action(model, ItemAction::Run { program, args, shell: false, terminal: false, refresh: true }, true)
+                            }
+                            ClickAction::Copy => {
+                                let txt = self.content_text(model);
+                                self.run_action(model, ItemAction::Copy(txt), true)
+                            }
+                        }
+                    }
+                }
+            }
+            Act::Item(k) => {
+                let a = self.w.data.content(&id).and_then(|s| s.content()).and_then(|c| crate::widgets::cards::item_action(c, k).cloned());
+                let refresh = self.w.data.content(&id).and_then(|s| s.content()).and_then(|c| c.items.get(k)).is_some_and(|it| it.refresh);
+                if let Some(a) = a {
+                    self.run_action(model, a, kind != WidgetKind::Web);
+                }
+                if refresh {
+                    self.refresh_instance(&id);
+                }
+            }
+            Act::Shortcut(k) => {
+                let name = match &self.w.models[model].settings {
+                    KindSettings::Shortcuts(s) => s.shortcuts.get(k).cloned(),
+                    _ => None,
+                };
+                self.w.models[model].ui.pressed = Some((k, t));
+                if let Some(name) = name {
+                    if self.w.demo {
+                        let st = crate::widgets::ShortcutsState { running: None, last: Some((name.clone(), Ok(format!("Ran \u{201c}{name}\u{201d}")), crate::widgets::unix_now())) };
+                        self.shared.data().instances.insert(id.clone(), InstanceData::Shortcuts(st));
+                        self.shared.data_gen.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.shared.reqs().shortcuts.push((id.clone(), name));
+                        self.shared.signal.notify();
+                    }
+                }
+            }
+            Act::Launch(k) => {
+                let item = match &self.w.models[model].settings {
+                    KindSettings::Launcher(s) => s.items.get(k).cloned(),
+                    _ => None,
+                };
+                self.w.models[model].ui.pressed = Some((k, t));
+                if let Some(it) = item {
+                    self.launch(&it);
+                }
+            }
+            Act::SoundDevice(k) => {
+                if let Some(dev) = self.w.data.sound.devices.get(k).cloned() {
+                    self.w.data.sound.current = Some(dev.id.clone());
+                    self.shared.data().sound.current = Some(dev.id.clone());
+                    if !self.w.demo {
+                        self.shared.reqs().sound.push(SoundCmd::Device(dev.id));
+                        self.shared.signal.notify();
+                    }
+                }
+            }
+            Act::SoundSlider(x0, x1) => {
+                let (gx0, gx1) = (card.x + x0, card.x + x1);
+                self.w.slider = Some(SliderDrag { model, x0: gx0, x1: gx1, last_sent: 0.0 });
+                let v = crate::widgets::sound::slider_value(card.x + local.x, gx0, gx1);
+                self.set_volume(model, v, false);
+            }
+            Act::SoundMute => {
+                let m = !self.w.data.sound.muted;
+                self.w.data.sound.muted = m;
+                self.shared.data().sound.muted = m;
+                if !self.w.demo {
+                    self.shared.reqs().sound.push(SoundCmd::Mute(m));
+                    self.shared.signal.notify();
+                }
+            }
+            Act::ReminderDone(rid) => {
+                let ui = &mut self.w.models[model].ui;
+                if !ui.done.iter().any(|(x, _)| *x == rid) {
+                    ui.done.push((rid.clone(), t));
+                    rt::play_sound("Tink");
+                    if !self.w.demo {
+                        self.shared.reqs().reminders_complete.push(rid);
+                        self.shared.signal.notify();
+                    }
+                }
+            }
+            Act::OpenReminders => rt::open_path("/System/Applications/Reminders.app"),
+            Act::RemindersAllow => {
+                self.shared.reqs().reminders_ask = true;
+                self.shared.signal.notify();
+            }
+            Act::OpenUrl(u) => rt::open_url(&u),
         }
+    }
+
+    fn launch(&mut self, it: &crate::widgets::catalog::LaunchItem) {
+        use crate::widgets::catalog::LaunchKind;
+        let target = it.target.trim().to_string();
+        match it.kind {
+            LaunchKind::App => match rt::resolve_app(&target) {
+                Some(p) => rt::open_path(&p),
+                None => log::info!("notch-shelf: app not found: {target}"),
+            },
+            LaunchKind::File | LaunchKind::Folder => rt::open_path(&crate::widgets::xbar::expand_tilde(&target).to_string_lossy()),
+            LaunchKind::Url => rt::open_url(&target),
+            LaunchKind::Command => {
+                let argv = vec!["/bin/zsh".to_string(), "-lc".to_string(), target];
+                if let Err(e) = crate::widgets::run::spawn_detached(&argv, std::env::var_os("HOME").map(PathBuf::from).as_deref()) {
+                    log::warn!("notch-shelf: {e}");
+                }
+                return;
+            }
+        }
+        self.collapse_all();
     }
 
     /// The panel collapsed / went away: stop the camera, end editing.
@@ -685,22 +1352,28 @@ impl App {
         if self.panels.iter().all(|p| p.mode != Mode::Expanded) {
             self.w.camera.stop();
             self.end_note_edit();
+            self.w.slider = None;
         }
     }
 
     // ----- note editor ----------------------------------------------------------
 
-    fn note_rect(&self, i: usize) -> Option<Rect> {
+    fn note_rect(&self, i: usize, model: usize) -> Option<Rect> {
         let p = self.panels.get(i)?;
         let hp = p.home.as_ref()?;
-        let k = hp.cards.iter().position(|c| c.kind == WidgetKind::Note)?;
-        let r = hp.layout.cards.cards[k];
+        let pv = hp.pages.get(hp.cur)?;
+        let k = pv.cards.iter().position(|c| c.model == model)?;
+        let r = pv.layout.cards[k];
         let tr = draw::note_text_rect(r.w, r.h).offset(r.x, r.y);
         Some(Self::local(p, tr))
     }
 
     fn place_note_view(&mut self, i: usize) {
-        let Some(r) = self.note_rect(i) else { return };
+        let Some((_, model)) = self.w.editing else { return };
+        let Some(r) = self.note_rect(i, model) else {
+            self.end_note_edit();
+            return;
+        };
         let p = &self.panels[i];
         if let Some(nv) = &p.note_view {
             let f = NSRect::new(NSPoint::new(r.x, p.win.h - (r.y + r.h)), NSSize::new(r.w, r.h));
@@ -710,8 +1383,8 @@ impl App {
         }
     }
 
-    fn begin_note_edit(&mut self, i: usize) {
-        if self.w.editing.is_some() || self.note_rect(i).is_none() {
+    fn begin_note_edit(&mut self, i: usize, model: usize) {
+        if self.w.editing.is_some() || self.note_rect(i, model).is_none() {
             return;
         }
         let accent = self.accent;
@@ -721,7 +1394,7 @@ impl App {
         }
         let nv = p.note_view.as_ref().unwrap();
         unsafe {
-            let _: () = msg_send![&*nv.text, setString: &*ns(&self.w.note)];
+            let _: () = msg_send![&*nv.text, setString: &*ns(&self.w.models[model].ui.note)];
             let _: () = msg_send![&*nv.scroll, setHidden: false];
         }
         p.window.set_key_ok(true);
@@ -733,15 +1406,19 @@ impl App {
             let len: usize = msg_send![&*s, length];
             let _: () = msg_send![&*nv.text, setSelectedRange: objc2_foundation::NSRange::new(len, 0)];
         }
-        self.w.editing = Some(i);
+        self.w.editing = Some((i, model));
+        self.w.models[model].ui.editing = true;
         self.place_note_view(i);
         log::info!("notch-shelf: editing note (panel key: {})", self.panels[i].window.isKeyWindow());
     }
 
     pub fn end_note_edit(&mut self) {
-        let Some(i) = self.w.editing else { return };
+        let Some((i, model)) = self.w.editing else { return };
         self.save_note();
         self.w.editing = None;
+        if let Some(m) = self.w.models.get_mut(model) {
+            m.ui.editing = false;
+        }
         let Some(p) = self.panels.get(i) else { return };
         if let Some(nv) = &p.note_view {
             unsafe {
@@ -766,7 +1443,7 @@ impl App {
 
     /// While editing: stop when the window lost key status.
     pub(super) fn check_note_focus(&mut self) {
-        if let Some(i) = self.w.editing {
+        if let Some((i, _)) = self.w.editing {
             if self.panels.get(i).is_none_or(|p| !p.window.isKeyWindow()) {
                 self.end_note_edit();
             }
@@ -774,6 +1451,10 @@ impl App {
     }
 
     // ----- diagnostics ------------------------------------------------------------
+
+    fn first_model(&self, kind: WidgetKind) -> Option<usize> {
+        self.w.models.iter().position(|m| m.inst.kind == kind)
+    }
 
     /// Widget debug commands (see `Handle::debug`); true if handled.
     pub(super) fn debug_widgets(&mut self, cmd: &str) -> bool {
@@ -784,17 +1465,25 @@ impl App {
                 self.w.demo = true;
                 self.shared.demo.store(true, Ordering::Relaxed);
                 let art = demo_artwork();
-                let d = crate::widgets::demo::data(crate::widgets::unix_now(), self.w.utc_offset, art);
+                let mut d = crate::widgets::demo::data(crate::widgets::unix_now(), self.w.utc_offset, art);
+                // Keep what the custom widgets (scripts, plugins) produced.
+                d.instances = self.shared.data().instances.clone();
                 *self.shared.data() = d;
                 self.shared.data_gen.fetch_add(1, Ordering::Relaxed);
                 self.sync_widgets();
                 self.rebuild_requested = true;
             }
             "timerDone" => {
-                self.w.timer.start(1.0, t - 2.0);
+                if let Some(m) = self.first_model(WidgetKind::Timer) {
+                    self.w.models[m].ui.timer.start(1.0, t - 2.0);
+                }
                 self.sync_widgets();
             }
-            "timerReset" => self.w.timer.reset(),
+            "timerReset" => {
+                for m in &mut self.w.models {
+                    m.ui.timer.reset();
+                }
+            }
             "pause" => {
                 if let Some(n) = self.shared.data().now_playing.as_mut() {
                     n.playing = false;
@@ -802,8 +1491,10 @@ impl App {
                 self.shared.data_gen.fetch_add(1, Ordering::Relaxed);
             }
             "editNote" => {
-                if let Some(i) = (0..self.panels.len()).find(|i| self.note_rect(*i).is_some()) {
-                    self.begin_note_edit(i);
+                if let Some(m) = self.first_model(WidgetKind::Note) {
+                    if let Some(i) = (0..self.panels.len()).find(|i| self.note_rect(*i, m).is_some()) {
+                        self.begin_note_edit(i, m);
+                    }
                 }
             }
             "endEdit" => self.end_note_edit(),
@@ -813,17 +1504,36 @@ impl App {
                 let mut it = a.split(':').map(|v| v.parse::<f64>().unwrap_or(0.0));
                 let total = it.next().unwrap_or(300.0);
                 let el = it.next().unwrap_or(0.0);
-                self.w.timer.start(total, t - el);
+                if let Some(m) = self.first_model(WidgetKind::Timer) {
+                    self.w.models[m].ui.timer.start(total, t - el);
+                }
             }
             c if c.starts_with("stopwatch:") => {
                 let el: f64 = arg(c).parse().unwrap_or(0.0);
-                self.w.timer.start_stopwatch(t - el);
+                if let Some(m) = self.first_model(WidgetKind::Timer) {
+                    self.w.models[m].ui.timer.start_stopwatch(t - el);
+                }
             }
             c if c.starts_with("hoverControl:") => self.w.forced_hover = arg(c).parse().ok().map(Act::Control),
+            c if c.starts_with("hover:") => {
+                // hover:refresh / hover:item:N / hover:launch:N
+                let a = arg(c);
+                self.w.forced_hover = match a.split(':').collect::<Vec<_>>().as_slice() {
+                    ["refresh"] => Some(Act::Refresh),
+                    ["item", n] => n.parse().ok().map(Act::Item),
+                    ["launch", n] => n.parse().ok().map(Act::Launch),
+                    ["shortcut", n] => n.parse().ok().map(Act::Shortcut),
+                    _ => None,
+                };
+            }
             "noHover" => self.w.forced_hover = None,
             c if c.starts_with("note:") => {
-                self.w.note = arg(c).replace("\\n", "\n");
-                self.save_note();
+                if let Some(m) = self.first_model(WidgetKind::Note) {
+                    self.w.models[m].ui.note = arg(c).replace("\\n", "\n");
+                    if let Some(p) = &self.w.models[m].note_path {
+                        let _ = std::fs::write(p, &self.w.models[m].ui.note);
+                    }
+                }
             }
             c if c.starts_with("calendar:") => {
                 let a = match arg(c).as_str() {
@@ -833,6 +1543,72 @@ impl App {
                 };
                 self.shared.data().calendar_access = a;
                 self.shared.data_gen.fetch_add(1, Ordering::Relaxed);
+            }
+            c if c.starts_with("reminders:") => {
+                let a = match arg(c).as_str() {
+                    "denied" => Access::Denied,
+                    "ask" => Access::NotDetermined,
+                    _ => Access::Granted,
+                };
+                self.shared.data().reminders.access = a;
+                self.shared.data_gen.fetch_add(1, Ordering::Relaxed);
+            }
+            c if c.starts_with("page:") => {
+                if let Ok(n) = arg(c).parse() {
+                    self.set_page(n);
+                }
+            }
+            c if c.starts_with("scroll:") => {
+                // scroll:N — list scroll of the first list-like card on the page.
+                let v: f64 = arg(c).parse().unwrap_or(0.0);
+                for m in &mut self.w.models {
+                    m.ui.scroll = v;
+                }
+            }
+            c if c.starts_with("tick:") => {
+                // tick:N — tick the Nth shown reminder (demo).
+                if let Some(m) = self.first_model(WidgetKind::Reminders) {
+                    let n: usize = arg(c).parse().unwrap_or(0);
+                    let KindSettings::Reminders(s) = &self.w.models[m].settings else { return true };
+                    let ids: Vec<String> = crate::widgets::reminders::visible(&self.w.data.reminders.items, s, crate::widgets::unix_now(), self.w.utc_offset, &[]).iter().map(|r| r.id.clone()).collect();
+                    if let Some(id) = ids.get(n) {
+                        self.w.models[m].ui.done.push((id.clone(), t));
+                    }
+                }
+            }
+            c if c.starts_with("webBody:") => {
+                // webBody:INSTANCE_ID|BODY — run a canned response through
+                // the Web widget's templates (renders without network).
+                let a = arg(c);
+                if let Some((id, body)) = a.split_once('|') {
+                    if let Some(m) = self.w.models.iter().find(|m| m.inst.id == id) {
+                        if let KindSettings::Web(s) = &m.settings {
+                            let r = crate::widgets::web::to_content(body, s, self.w.utc_offset);
+                            let mut d = self.shared.data();
+                            let prev = match d.instances.remove(id) {
+                                Some(InstanceData::Content(s)) => s,
+                                _ => Status::Loading,
+                            };
+                            d.instances.insert(id.to_string(), InstanceData::Content(prev.next(r, crate::widgets::unix_now())));
+                            drop(d);
+                            self.shared.data_gen.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            c if c.starts_with("error:") => {
+                // error:INSTANCE_ID|MESSAGE — a failed refresh.
+                let a = arg(c);
+                if let Some((id, msg)) = a.split_once('|') {
+                    let mut d = self.shared.data();
+                    let prev = match d.instances.remove(id) {
+                        Some(InstanceData::Content(s)) => s,
+                        _ => Status::Loading,
+                    };
+                    d.instances.insert(id.to_string(), InstanceData::Content(prev.next(Err(msg.to_string()), crate::widgets::unix_now())));
+                    drop(d);
+                    self.shared.data_gen.fetch_add(1, Ordering::Relaxed);
+                }
             }
             "weatherOff" => {
                 self.shared.data().weather = crate::widgets::WeatherStatus::NoLocation;

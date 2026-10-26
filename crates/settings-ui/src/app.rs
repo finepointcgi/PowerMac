@@ -19,6 +19,7 @@ use crate::widgets::*;
 use crate::mu_color::color_edit;
 use crate::zone_style;
 
+mod notch_widgets;
 mod pages;
 mod pages2;
 
@@ -142,6 +143,11 @@ fn meta(p: Page) -> Meta {
             icon::TRAY,
             Color32::from_rgb(0x3A, 0x3A, 0x3C),
             "A drop shelf and widgets in the notch: park files, links and text, see what's playing, the weather and your next meeting.",
+        ),
+        Page::NotchWidgets => (
+            icon::LAYOUT,
+            Color32::from_rgb(0xAF, 0x52, 0xDE),
+            "The open notch's Home view: pages of widgets — clocks, scripts, web data, Shortcuts, launchers and more.",
         ),
         Page::ColorPicker => (
             icon::EYEDROPPER,
@@ -300,6 +306,12 @@ pub struct SettingsApp {
     menubar_list_at: Option<Instant>,
     /// Sound: the "add device" text fields, per list.
     new_device: std::collections::BTreeMap<&'static str, String>,
+    /// Notch Widgets page state.
+    nw: notch_widgets::WidgetsUi,
+    /// What the running Notch Shelf reports (widget results, reminder lists).
+    notch_status: Option<pm_config::bridge::NotchStatus>,
+    /// Page switches asked for by the tray menu while the window is open.
+    settings_requests: pm_config::bridge::RequestReader,
 }
 
 impl SettingsApp {
@@ -369,6 +381,9 @@ impl SettingsApp {
             new_device: Default::default(),
             menubar_status: None,
             menubar_list_at: None,
+            nw: Default::default(),
+            notch_status: pm_config::bridge::read_fresh(&config_path, pm_config::bridge::NOTCH_STATUS_FILE, pm_config::bridge::STATUS_FRESH_MS),
+            settings_requests: pm_config::bridge::RequestReader::new(&config_path, pm_config::bridge::SETTINGS_REQUEST_FILE),
             config_path,
         };
         if !s.config_path.exists() {
@@ -576,6 +591,14 @@ impl SettingsApp {
             self.display_status = pm_config::DisplayStatus::load_for(&self.config_path);
             self.display_local.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(4));
             self.poll_new_modules();
+            if let Some(pm_config::bridge::SettingsRequest::ShowPage { page }) =
+                self.settings_requests.poll::<pm_config::bridge::SettingsRequest>(&self.config_path, pm_config::bridge::SETTINGS_REQUEST_FILE)
+            {
+                match Page::from_name(&page) {
+                    Some(p) => self.set_page(p),
+                    None => log::warn!("settings: no page named {page:?}"),
+                }
+            }
             if now - self.perms_at >= Duration::from_secs(2) {
                 self.perms_at = now;
                 self.perms = crate::platform::permissions();
@@ -631,6 +654,7 @@ impl SettingsApp {
             Page::Displays => Some(c.display_control.enabled),
             Page::ClipboardHistory => Some(c.clipboard_history.enabled),
             Page::NotchShelf => Some(c.notch_shelf.enabled),
+            Page::NotchWidgets => None,
             Page::ColorPicker => Some(c.color_picker.enabled),
             Page::TextExtractor => Some(c.text_extractor.enabled),
             Page::FileTools => None,
@@ -667,13 +691,19 @@ impl SettingsApp {
             Page::DockPreviews => c.dock_previews.enabled = on,
             Page::TextExpander => c.text_expander.enabled = on,
             Page::MenuBar => c.menu_bar.enabled = on,
-            Page::General | Page::FileTools => {}
+            Page::General | Page::FileTools | Page::NotchWidgets => {}
         }
     }
 
     fn go(&mut self, p: Page) {
         self.page = p;
         self.recording = None;
+    }
+
+    /// Show page `p` (the `--page` argument, the tray's page requests).
+    pub fn set_page(&mut self, p: Page) {
+        self.search.clear();
+        self.go(p);
     }
 
     // -----------------------------------------------------------------------
@@ -1101,7 +1131,7 @@ impl SettingsApp {
         let m = meta(page);
         let p = pal(ui);
         ui.add_space(30.0);
-        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools);
+        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools | Page::NotchWidgets);
         let mut on = self.module_on(page).unwrap_or(false);
         card_frame(&p)
             .inner_margin(egui::Margin::same(20))
@@ -1161,6 +1191,7 @@ impl SettingsApp {
             Page::Displays => self.displays(ui),
             Page::ClipboardHistory => self.clipboard_history(ui),
             Page::NotchShelf => self.notch_shelf(ui),
+            Page::NotchWidgets => self.notch_widgets_page(ui),
             Page::ColorPicker => self.color_picker(ui),
             Page::TextExtractor => self.text_extractor(ui),
             Page::FileTools => self.file_tools(ui),
@@ -3078,9 +3109,6 @@ impl SettingsApp {
 
 #[cfg(test)]
 impl SettingsApp {
-    pub fn set_page(&mut self, p: Page) {
-        self.page = p;
-    }
     pub fn set_search_for_test(&mut self, s: &str) {
         self.search = s.into();
     }

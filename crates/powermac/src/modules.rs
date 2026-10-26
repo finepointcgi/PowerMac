@@ -445,16 +445,25 @@ fn apply_clipboard_history(running: &mut Running, cfg: &clipboard_history::Confi
     }
 }
 
+/// Start, update or stop the Notch Shelf. Widget, page and Home view
+/// changes from the settings window arrive here like any other setting and
+/// are applied live with [`notch_shelf::Handle::update`].
 fn apply_notch_shelf(running: &mut Running, cfg: &notch_shelf::Config) {
+    crate::notch_glue::set_config(cfg);
     match (cfg.enabled, running.shelf.as_ref()) {
         (true, Some(h)) => {
             h.update(cfg.clone());
-            log::info!("notch shelf: settings applied");
+            log::info!("notch shelf: settings applied ({})", widget_summary(cfg));
         }
         (true, None) => match notch_shelf::NotchShelf::start_with(cfg.clone(), data_dir(), crate::quick::notch_controls()) {
             Ok(h) => {
-                log::info!("notch shelf: running ({})", if notch_shelf::has_notch() { "notch" } else { "no notch on this Mac" });
+                log::info!(
+                    "notch shelf: running ({}; {})",
+                    if notch_shelf::has_notch() { "notch" } else { "no notch on this Mac" },
+                    widget_summary(cfg)
+                );
                 running.shelf = Some(h);
+                crate::notch_glue::start_once();
             }
             Err(e) => log::error!("notch shelf: {e:#}"),
         },
@@ -462,6 +471,7 @@ fn apply_notch_shelf(running: &mut Running, cfg: &notch_shelf::Config) {
             if let Some(h) = running.shelf.take() {
                 h.stop();
             }
+            crate::notch_glue::write_stopped();
             log::info!("notch shelf: stopped");
         }
         (false, None) => {}
@@ -838,6 +848,13 @@ pub fn watch(path: &Path, mut current: AppConfig) {
         .expect("spawn config-watch");
 }
 
+/// "5 widgets on 2 pages" for the log.
+fn widget_summary(cfg: &notch_shelf::Config) -> String {
+    let on = cfg.widgets.iter().filter(|w| w.enabled).count();
+    let pages = cfg.page_list().len();
+    format!("{on} widget{} on {pages} page{}", if on == 1 { "" } else { "s" }, if pages == 1 { "" } else { "s" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,3 +898,4 @@ mod tests {
         assert!(ch.layout_templates.is_none() && ch.settings.is_none());
     }
 }
+

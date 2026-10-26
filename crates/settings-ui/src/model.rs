@@ -32,6 +32,9 @@ pub enum Page {
     Displays,
     ClipboardHistory,
     NotchShelf,
+    /// The Notch Shelf's Home view: pages, widget instances and their
+    /// settings, the widget gallery, layout import / export.
+    NotchWidgets,
     ColorPicker,
     TextExtractor,
     FileTools,
@@ -45,11 +48,12 @@ pub enum Page {
 
 impl Page {
     /// Sidebar order (grouped by [`Page::section`]).
-    pub const ALL: [Page; 19] = [
+    pub const ALL: [Page; 20] = [
         Page::General,
         Page::FancyZones,
         Page::WindowSwitcher,
         Page::NotchShelf,
+        Page::NotchWidgets,
         Page::DockPreviews,
         Page::MenuBar,
         Page::MouseTuning,
@@ -80,6 +84,7 @@ impl Page {
             Page::Displays => "Displays",
             Page::ClipboardHistory => "Clipboard History",
             Page::NotchShelf => "Notch Shelf",
+            Page::NotchWidgets => "Notch Widgets",
             Page::ColorPicker => "Color Picker",
             Page::TextExtractor => "Text Extractor",
             Page::FileTools => "File Tools",
@@ -91,11 +96,31 @@ impl Page {
         }
     }
 
+    /// The page's name on the command line (`powermac settings --page
+    /// notch-widgets`): its title in lowercase with dashes.
+    pub fn slug(self) -> String {
+        self.title().to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join("-")
+    }
+
+    /// The page named `name`: its slug, its title or its internal name, in
+    /// any case, with or without dashes / spaces ("notch-widgets",
+    /// "Notch Widgets", "NotchWidgets", "notchwidgets").
+    pub fn from_name(name: &str) -> Option<Page> {
+        let squash = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+        let n = squash(name);
+        if n.is_empty() {
+            return None;
+        }
+        Page::ALL.into_iter().find(|p| squash(p.title()) == n || squash(&format!("{p:?}")) == n)
+    }
+
     /// The sidebar group the page is listed under (`None`: above the groups).
     pub fn section(self) -> Option<&'static str> {
         Some(match self {
             Page::General => return None,
-            Page::FancyZones | Page::WindowSwitcher | Page::NotchShelf | Page::DockPreviews | Page::MenuBar => "Windows & Desktop",
+            Page::FancyZones | Page::WindowSwitcher | Page::NotchShelf | Page::NotchWidgets | Page::DockPreviews | Page::MenuBar => {
+                "Windows & Desktop"
+            }
             Page::MouseTuning
             | Page::ScrollReverser
             | Page::MouseUtils
@@ -1222,6 +1247,23 @@ pub fn validate_fancyzones(c: &fancyzones::Config) -> Vec<Problem> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_names() {
+        use super::Page;
+        assert_eq!(Page::NotchWidgets.slug(), "notch-widgets");
+        assert_eq!(Page::Mwb.slug(), "mouse-without-borders");
+        for n in ["notch-widgets", "Notch Widgets", "NotchWidgets", "notchwidgets", " notch_widgets "] {
+            assert_eq!(Page::from_name(n), Some(Page::NotchWidgets), "{n}");
+        }
+        assert_eq!(Page::from_name("mwb"), Some(Page::Mwb));
+        assert_eq!(Page::from_name("sound"), Some(Page::Sound));
+        assert_eq!(Page::from_name(""), None);
+        assert_eq!(Page::from_name("teleporter"), None);
+        for p in Page::ALL {
+            assert_eq!(Page::from_name(&p.slug()), Some(p));
+        }
+    }
+
     #[test]
     fn matrix_drag_moves() {
         let mut m: [String; super::MAX_MACHINE] = ["a".into(), "b".into(), "c".into(), "".into()];

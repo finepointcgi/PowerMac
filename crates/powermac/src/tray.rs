@@ -79,6 +79,8 @@ struct Tools {
     clip_shown: Option<Vec<(u64, String)>>,
     switcher: MenuItem,
     shelf: MenuItem,
+    /// Opens the settings window on the Notch Widgets page.
+    notch_widgets: MenuItem,
     displays: Submenu,
     /// (id, name, has volume) of the displays shown.
     displays_shown: Option<Vec<(String, String, bool)>>,
@@ -167,6 +169,7 @@ pub fn install() -> anyhow::Result<()> {
     let clip_clear = MenuItem::new("Clear history", true, None);
     let switcher = MenuItem::new("Window switcher", false, None);
     let shelf = MenuItem::new("Show shelf", false, None);
+    let notch_widgets = MenuItem::new("Notch widgets…", cfg!(target_os = "macos"), None);
     let displays = Submenu::new("Displays", false);
     let finder = CheckMenuItem::new(
         if cfg!(windows) { "Explorer menu: PowerRename, New+, …" } else { "Finder Quick Actions: PowerRename, New+, …" },
@@ -209,6 +212,7 @@ pub fn install() -> anyhow::Result<()> {
         &clip,
         &switcher,
         &shelf,
+        &notch_widgets,
         &displays,
         &menubar_show,
         &finder,
@@ -266,6 +270,7 @@ pub fn install() -> anyhow::Result<()> {
                 clip_shown: None,
                 switcher,
                 shelf,
+                notch_widgets,
                 displays,
                 displays_shown: None,
                 display_items: Vec::new(),
@@ -603,6 +608,19 @@ fn open_settings() {
     crate::children::open(&crate::children::SETTINGS, &["settings"]);
 }
 
+/// Open the settings window on `page` ("notch-widgets"); an open window is
+/// brought to the front and asked to switch pages.
+fn open_settings_page(page: &str) {
+    if crate::children::open_checked(&crate::children::SETTINGS, &["settings", "--page", page]) {
+        if let Some(path) = crate::CONFIG_PATH.get().cloned().or_else(pm_config::AppConfig::default_path) {
+            let req = pm_config::bridge::SettingsRequest::ShowPage { page: page.to_string() };
+            if let Err(e) = pm_config::bridge::write(&path, pm_config::bridge::SETTINGS_REQUEST_FILE, &req) {
+                log::warn!("settings: {e:#}");
+            }
+        }
+    }
+}
+
 /// Start `powermac --config <path> editor` (the FancyZones layout editor),
 /// or bring the one that is already open to the front.
 fn open_editor() {
@@ -715,6 +733,8 @@ fn on_tools_click(t: &mut Tools, id: &tray_icon::menu::MenuId) -> bool {
         });
     } else if id == t.shelf.id() {
         with_running(|r| r.shelf.as_ref().map(|s| s.expand()));
+    } else if id == t.notch_widgets.id() {
+        open_settings_page("notch-widgets");
     } else if id == t.menubar_show.id() {
         std::thread::spawn(|| {
             if let Some(h) = crate::menubar_glue::handle() {

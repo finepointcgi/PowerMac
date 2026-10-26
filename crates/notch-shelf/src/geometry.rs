@@ -604,8 +604,8 @@ mod tests {
 
     #[test]
     fn switcher_and_home_layout() {
-        use crate::widgets::layout::{spec, CARD_H};
-        use crate::widgets::{View, WidgetKind};
+        use crate::widgets::layout::{fixed, CARD_H, MEDIUM_W, SMALL_W};
+        use crate::widgets::View;
         let m = Metrics::default();
         let s = mbp14();
         let n = s.notch.unwrap();
@@ -623,7 +623,7 @@ mod tests {
         assert_eq!(h.w, 760.0);
         assert_eq!(h.h, header_height(&n, &m) + m.strip_gap + CARD_H + m.bottom_pad);
         assert!((h.center_x() - n.center_x()).abs() < 1e-9 && h.y == 0.0);
-        let specs: Vec<_> = [WidgetKind::NowPlaying, WidgetKind::Timer].iter().map(|k| spec(*k, 0)).collect();
+        let specs = vec![fixed(MEDIUM_W), fixed(SMALL_W)];
         let hl = home_layout(&h, &n, &specs, 0.0, &m);
         assert_eq!(hl.cards.cards.len(), 2);
         assert!(hl.cards.cards.iter().all(|r| r.y == hl.row.y && r.x >= hl.row.x - 1e-9 && r.right() <= hl.row.right() + 1e-9));

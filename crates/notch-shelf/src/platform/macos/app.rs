@@ -158,6 +158,9 @@ struct Panel {
     hover: Hit,
     drop_hover: bool,
     hold: bool,
+    /// The panel's rect before a view switch: keeps it open while the
+    /// cursor (left behind on the switcher) is still inside it.
+    switch_grace: Option<Rect>,
     layout: Layout,
     ignoring: bool,
     header_key: String,
@@ -419,7 +422,9 @@ impl App {
                 || old.virtual_notch_on_non_notch_screens != self.cfg.virtual_notch_on_non_notch_screens
                 || old.panel_width != self.cfg.panel_width
                 || old.widgets != self.cfg.widgets
+                || old.pages != self.cfg.pages
                 || self.panels.is_empty() && self.cfg.enabled;
+            self.sync_models();
             if !self.cfg.show_clipboard {
                 self.clip = None;
             }
@@ -503,6 +508,7 @@ impl App {
                 }
                 Request::Debug(cmd) => self.debug(&cmd, t),
                 Request::SetView(v) => self.apply_view(v, true),
+                Request::SetPage(n) => self.set_page(n),
                 Request::RefreshWidgets => self.read_controls(),
             }
         }
@@ -511,6 +517,22 @@ impl App {
         let expanded = self.panels.iter().any(|p| p.mode != Mode::Collapsed);
         let home_visible = self.w.view == View::Home && self.panels.iter().any(|p| p.mode == Mode::Expanded && p.home.is_some());
         self.shared.home_visible.store(home_visible, std::sync::atomic::Ordering::Relaxed);
+        {
+            let open = self.panels.iter().any(|p| p.mode == Mode::Expanded);
+            let mut pr = self.shared.presence.lock().unwrap_or_else(|e| e.into_inner());
+            let was_open = pr.panel_open;
+            if was_open && !open {
+                pr.closed_at = crate::widgets::unix_now();
+            }
+            pr.panel_open = open;
+            pr.home = home_visible;
+            pr.page = self.w.page;
+            drop(pr);
+            if !was_open && open {
+                // Stale widgets refresh as the panel opens.
+                self.shared.signal.notify();
+            }
+        }
         self.schedule(animating || expanded);
     }
 
@@ -552,7 +574,14 @@ impl App {
                 let p = &mut self.panels[i];
                 let hover_rect = p.live.as_ref().and_then(|l| l.rect).filter(|_| p.mode == Mode::Collapsed).unwrap_or(p.collapsed);
                 let in_hover_zone = geo::hover_zone(&hover_rect).contains(cur);
-                let in_keep_zone = geo::keep_open_zone(&p.expanded, &self.metrics).contains(cur);
+                let mut in_keep_zone = geo::keep_open_zone(&p.expanded, &self.metrics).contains(cur);
+                if let Some(r) = p.switch_grace {
+                    if in_keep_zone || p.mode != Mode::Expanded || !geo::keep_open_zone(&r, &self.metrics).contains(cur) {
+                        p.switch_grace = None;
+                    } else {
+                        in_keep_zone = true;
+                    }
+                }
                 let in_drag_zone = geo::drag_zone(&p.expanded, &p.geom.frame).contains(cur);
                 let outside_click = pressed && !in_keep_zone && p.mode == Mode::Expanded;
                 if outside_click || in_keep_zone {
@@ -839,6 +868,7 @@ impl App {
             hover: Hit::Outside,
             drop_hover: false,
             hold: false,
+            switch_grace: None,
             layout: geo::layout_with(&shelf_rect, &collapsed, 0, 0.0, &m, has_home),
             ignoring: true,
             header_key: String::new(),
@@ -1442,6 +1472,9 @@ impl App {
     }
 
     pub fn on_mouse_dragged(&mut self, i: usize, pt: Point) -> Option<DragOut> {
+        if self.on_home_dragged(pt) {
+            return None;
+        }
         if self.w.view == View::Home && self.panels.get(i).is_some_and(|p| p.home.is_some()) {
             return None;
         }
@@ -1489,6 +1522,9 @@ impl App {
     }
 
     pub fn on_mouse_up(&mut self, i: usize, pt: Point) -> Option<Deferred> {
+        if self.on_home_mouse_up(pt) {
+            return None;
+        }
         let press = self.press.take()?;
         if press.dragged || press.panel != i {
             return None;
@@ -1603,17 +1639,17 @@ impl App {
         None
     }
 
-    pub fn on_scroll(&mut self, i: usize, dx: f64, dy: f64, precise: bool) {
+    pub fn on_scroll(&mut self, i: usize, dx: f64, dy: f64, precise: bool, began: bool, momentum: bool) {
         let m = self.metrics;
         if self.panels.get(i).is_none() {
+            return;
+        }
+        if self.on_home_scroll(i, dx, dy, precise, began, momentum) {
             return;
         }
         let mut d = if dx.abs() > dy.abs() { dx } else { dy };
         if !precise {
             d *= 14.0;
-        }
-        if self.on_home_scroll(i, d) {
-            return;
         }
         let p = &mut self.panels[i];
         let s = geo::clamp_scroll(p.scroll - d, p.layout.max_scroll);

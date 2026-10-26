@@ -24,7 +24,18 @@ pub fn spawn(shared: Arc<Shared>) {
     run("notch-stats", stats_loop, shared.clone());
     run("notch-media", media_loop, shared.clone());
     run("notch-calendar", calendar_loop, shared.clone());
-    run("notch-weather", weather_loop, shared);
+    run("notch-weather", weather_loop, shared.clone());
+    super::jobs::spawn(shared);
+}
+
+/// "Read Music and Spotify directly" is on in any Now Playing widget.
+fn use_applescript(cfg: &Config) -> bool {
+    cfg.instances_of(WidgetKind::NowPlaying).any(|w| crate::widgets::catalog::typed::<crate::widgets::catalog::NowPlayingSettings>(w.kind, &w.settings).use_applescript)
+}
+
+/// Days the calendar widgets look ahead (the most any of them wants).
+fn calendar_days(cfg: &Config) -> u32 {
+    cfg.instances_of(WidgetKind::Calendar).map(|w| crate::widgets::catalog::typed::<crate::widgets::catalog::CalendarSettings>(w.kind, &w.settings).days.clamp(1.0, 7.0) as u32).max().unwrap_or(2)
 }
 
 fn config(s: &Shared) -> Option<Config> {
@@ -139,7 +150,7 @@ fn sample_media(cfg: &Config, now: f64, art_for: &mut Option<NowPlaying>, art: &
     if let Some(np) = media::query_media_remote() {
         return np;
     }
-    if cfg.now_playing.use_applescript {
+    if use_applescript(cfg) {
         if let Some((mut np, url)) = media::query_applescript(now) {
             // Fetch artwork once per track.
             let same = art_for.as_ref().is_some_and(|a| crate::widgets::media::same_track(a, &np));
@@ -195,7 +206,7 @@ fn calendar_loop(s: Arc<Shared>) {
                 last_fetch = now;
                 let off = rt::utc_offset();
                 let from = crate::widgets::calendar::day_start(now, off);
-                let to = from + 86_400.0 * cfg.calendar.days.clamp(1, 7) as f64;
+                let to = from + 86_400.0 * calendar_days(&cfg) as f64;
                 events = Some(cal.events(from, to));
             }
         }
@@ -232,75 +243,116 @@ struct WeatherCache {
 
 const WEATHER_FILE: &str = "notch-weather.json";
 
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct WeatherFile {
+    entries: Vec<WeatherCache>,
+}
+
+/// One location's forecast state.
+struct WeatherSlot {
+    cache: WeatherCache,
+    last_attempt: f64,
+    last_error: Option<String>,
+}
+
+fn load_weather(path: &std::path::Path) -> Vec<WeatherCache> {
+    let Ok(b) = std::fs::read(path) else { return vec![] };
+    if let Ok(f) = serde_json::from_slice::<WeatherFile>(&b) {
+        if !f.entries.is_empty() {
+            return f.entries;
+        }
+    }
+    // The single-location file of older versions.
+    serde_json::from_slice::<WeatherCache>(&b).ok().filter(|c| !c.query.is_empty()).into_iter().collect()
+}
+
 fn weather_loop(s: Arc<Shared>) {
     let path: PathBuf = s.lock().store.data_dir().join(WEATHER_FILE);
-    let mut cache: WeatherCache = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    let mut last_attempt = f64::NEG_INFINITY;
-    let mut last_error: Option<String> = None;
+    let mut slots: Vec<WeatherSlot> = load_weather(&path).into_iter().map(|cache| WeatherSlot { cache, last_attempt: f64::NEG_INFINITY, last_error: None }).collect();
     while let Some(cfg) = config(&s) {
         let refresh = std::mem::take(&mut s.reqs().refresh_weather);
         if demo(&s) {
             s.signal.wait(Duration::from_secs(2));
             continue;
         }
-        let set = |st: WeatherStatus| {
-            if s.data().weather != st {
-                s.set_data(false, |d| d.weather = st);
+        let instances: Vec<(String, crate::widgets::catalog::WeatherSettings)> =
+            if cfg.enabled { cfg.instances_of(WidgetKind::Weather).map(|w| (w.id.clone(), crate::widgets::catalog::typed(w.kind, &w.settings))).collect() } else { vec![] };
+        let publish = |statuses: Vec<(String, WeatherStatus)>| {
+            let first = statuses.first().map(|(_, st)| st.clone()).unwrap_or(WeatherStatus::Off);
+            let changed = {
+                let d = s.data();
+                d.weather != first || statuses.len() != d.weathers.len() || statuses.iter().any(|(id, st)| d.weathers.get(id) != Some(st))
+            };
+            if changed {
+                s.set_data(false, |d| {
+                    d.weather = first;
+                    d.weathers = statuses.into_iter().collect();
+                });
             }
         };
-        if !on(&cfg, WidgetKind::Weather) {
-            set(WeatherStatus::Off);
+        if instances.is_empty() {
+            publish(vec![]);
             s.signal.wait(Duration::from_secs(2));
             continue;
         }
-        let query = cfg.weather.location.trim().to_string();
-        if query.is_empty() {
-            set(WeatherStatus::NoLocation);
-            s.signal.wait(Duration::from_secs(2));
-            continue;
-        }
-        let fahrenheit = match cfg.weather.units {
-            TempUnit::Fahrenheit => true,
-            TempUnit::Celsius => false,
-            TempUnit::Auto => autoreleasepool(|_| rt::prefers_fahrenheit()),
-        };
-        if cache.query != query || cache.fahrenheit != fahrenheit {
-            if cache.query != query {
-                cache.place = None;
+        let mut statuses = vec![];
+        let mut wrote = false;
+        for (id, ws) in &instances {
+            let query = ws.location.trim().to_string();
+            if query.is_empty() {
+                statuses.push((id.clone(), WeatherStatus::NoLocation));
+                continue;
             }
-            cache.now = None;
-            cache.query = query.clone();
-            cache.fahrenheit = fahrenheit;
-            last_attempt = f64::NEG_INFINITY;
-            last_error = None;
-        }
-        let now = unix_now();
-        let fresh = cache.now.as_ref().is_some_and(|w| weather::is_fresh(w.fetched_at, now));
-        let age = cache.now.as_ref().map(|w| now - w.fetched_at).unwrap_or(f64::INFINITY);
-        let retry_ok = now - last_attempt >= if last_error.is_some() { weather::RETRY_SECS } else { 0.0 };
-        if (!fresh && retry_ok) || (refresh && age > 300.0) {
-            last_attempt = now;
-            if cache.now.is_none() {
-                set(WeatherStatus::Loading);
-            }
-            match fetch_weather(&query, fahrenheit, &mut cache, now) {
-                Ok(()) => {
-                    last_error = None;
-                    if let Ok(b) = serde_json::to_vec_pretty(&cache) {
-                        let _ = std::fs::write(&path, b);
+            let fahrenheit = match ws.units {
+                TempUnit::Fahrenheit => true,
+                TempUnit::Celsius => false,
+                TempUnit::Auto => autoreleasepool(|_| rt::prefers_fahrenheit()),
+            };
+            let k = match slots.iter().position(|sl| sl.cache.query == query && sl.cache.fahrenheit == fahrenheit) {
+                Some(k) => k,
+                None => {
+                    // The same place in other units shares the geocoding.
+                    let place = slots.iter().find(|sl| sl.cache.query == query).and_then(|sl| sl.cache.place.clone());
+                    slots.push(WeatherSlot { cache: WeatherCache { query: query.clone(), fahrenheit, place, now: None }, last_attempt: f64::NEG_INFINITY, last_error: None });
+                    slots.len() - 1
+                }
+            };
+            let sl = &mut slots[k];
+            let now = unix_now();
+            let fresh = sl.cache.now.as_ref().is_some_and(|w| weather::is_fresh(w.fetched_at, now));
+            let age = sl.cache.now.as_ref().map(|w| now - w.fetched_at).unwrap_or(f64::INFINITY);
+            let retry_ok = now - sl.last_attempt >= if sl.last_error.is_some() { weather::RETRY_SECS } else { 0.0 };
+            if (!fresh && retry_ok) || (refresh && age > 300.0) {
+                sl.last_attempt = now;
+                match fetch_weather(&query, fahrenheit, &mut sl.cache, now) {
+                    Ok(()) => {
+                        sl.last_error = None;
+                        wrote = true;
+                    }
+                    Err(e) => {
+                        log::info!("notch-shelf: weather: {e}");
+                        sl.last_error = Some(e);
                     }
                 }
-                Err(e) => {
-                    log::info!("notch-shelf: weather: {e}");
-                    last_error = Some(e);
-                }
+            }
+            let st = match (&sl.last_error, &sl.cache.now) {
+                (None, Some(w)) => WeatherStatus::Ready(w.clone()),
+                (Some(e), w) => WeatherStatus::Error(e.clone(), w.clone()),
+                (None, None) => WeatherStatus::Loading,
+            };
+            statuses.push((id.clone(), st));
+        }
+        // Forget places no widget shows any more.
+        let wanted: Vec<String> = instances.iter().map(|(_, w)| w.location.trim().to_string()).collect();
+        slots.retain(|sl| wanted.contains(&sl.cache.query));
+        if wrote {
+            let f = WeatherFile { entries: slots.iter().map(|sl| sl.cache.clone()).collect() };
+            if let Ok(b) = serde_json::to_vec_pretty(&f) {
+                let _ = std::fs::write(&path, b);
             }
         }
-        match (&last_error, &cache.now) {
-            (None, Some(w)) => set(WeatherStatus::Ready(w.clone())),
-            (Some(e), w) => set(WeatherStatus::Error(e.clone(), w.clone())),
-            (None, None) => set(WeatherStatus::Loading),
-        }
+        publish(statuses);
         s.signal.wait(Duration::from_secs(5));
     }
 }

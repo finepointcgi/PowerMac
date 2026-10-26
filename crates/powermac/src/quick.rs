@@ -2,6 +2,9 @@
 //! (Pick color, Extract text, Clipboard history, Window switcher, Lock
 //! screen, Show desktop).
 //!
+//! The Sound widget gets PowerMac's audio control
+//! ([`crate::audio_glue::notch_sound`]).
+//!
 //! The shelf calls these on the main thread. The config watcher may hold
 //! `RUNNING` while it waits for the main thread (e.g. to register a Carbon
 //! hotkey), so nothing here waits for `RUNNING` on the main thread: `get`
@@ -142,5 +145,6 @@ pub fn notch_controls() -> StartOptions {
                 });
             }),
         ],
+        sound: Some(crate::audio_glue::notch_sound()),
     }
 }

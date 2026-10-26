@@ -4,6 +4,8 @@
 use std::sync::Arc;
 
 use super::stats::{Pressure, HISTORY};
+use super::bluetooth::{BtDevice, BtKind, Part};
+use super::sound::{AudioOutput, SoundState};
 use super::{Access, BatteryInfo, CalEvent, MediaSource, NowPlaying, Rgba, WeatherNow, WeatherStatus, WidgetData};
 
 pub fn data(unix_now: f64, utc_offset: f64, artwork: Option<Vec<u8>>) -> WidgetData {
@@ -24,8 +26,28 @@ pub fn data(unix_now: f64, utc_offset: f64, artwork: Option<Vec<u8>>) -> WidgetD
         events: vec![],
         weather: WeatherStatus::Ready(WeatherNow { place: "Cupertino".into(), temp: 21.4, high: 24.0, low: 13.0, code: 2, is_day: true, fahrenheit: false, fetched_at: unix_now }),
         battery: Some(BatteryInfo { percent: 82, on_ac: true, charging: true, minutes_to_empty: None, minutes_to_full: Some(38) }),
+        weathers: Default::default(),
         stats: Default::default(),
         camera_access: Access::NotDetermined,
+        instances: Default::default(),
+        bluetooth: Some(vec![
+            BtDevice { name: "Mitch\u{2019}s AirPods Pro".into(), kind: BtKind::AirPodsPro, address: String::new(), levels: vec![(Part::Left, 92), (Part::Right, 88), (Part::Case, 61)] },
+            BtDevice { name: "Magic Keyboard".into(), kind: BtKind::Keyboard, address: String::new(), levels: vec![(Part::Main, 74)] },
+            BtDevice { name: "Magic Trackpad".into(), kind: BtKind::Trackpad, address: String::new(), levels: vec![(Part::Main, 17)] },
+            BtDevice { name: "Magic Mouse".into(), kind: BtKind::Mouse, address: String::new(), levels: vec![(Part::Main, 46)] },
+        ]),
+        sound: SoundState {
+            devices: vec![AudioOutput::new("builtin", "MacBook Pro Speakers"), AudioOutput::new("airpods", "AirPods Pro"), AudioOutput::new("studio", "Studio Display"), AudioOutput::new("homepod", "HomePod")],
+            current: Some("airpods".into()),
+            volume: Some(0.62),
+            muted: false,
+            available: true,
+        },
+        reminders: super::reminders::RemindersState {
+            access: Access::Granted,
+            items: super::reminders::demo(unix_now),
+            lists: vec!["Groceries".into(), "Personal".into(), "Work".into()],
+        },
     };
     // Events relative to the next round half hour.
     let base = (unix_now / 1800.0).floor() * 1800.0;

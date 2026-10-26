@@ -101,6 +101,50 @@ fn monitors(w: i32, h: i32) -> Vec<fancyzones::Monitor> {
     ]
 }
 
+/// A Home layout with three pages and most widget kinds (stable ids).
+fn sample_widgets(n: &mut notch_shelf::Config) {
+    use notch_shelf::{WidgetInstance, WidgetKind as K, WidgetPage, WidgetSize as S};
+    use serde_json::json;
+    n.enabled = true;
+    n.pages = vec![
+        WidgetPage { name: "Home".into(), symbol: "house.fill".into() },
+        WidgetPage { name: "Work".into(), symbol: "briefcase.fill".into() },
+        WidgetPage { name: "Dev".into(), symbol: String::new() },
+    ];
+    let mk = |id: &str, kind: K, size: S, page: usize, settings: serde_json::Value| {
+        let mut w = WidgetInstance::new(kind).on_page(page).sized(size);
+        w.id = id.into();
+        if let (Some(o), serde_json::Value::Object(extra)) = (w.settings.as_object_mut(), settings) {
+            o.extend(extra);
+        }
+        w
+    };
+    n.widgets = vec![
+        mk("np", K::NowPlaying, S::Medium, 0, json!({})),
+        mk("clocks", K::WorldClock, S::Medium, 0, json!({"clocks": [
+            {"zone": "America/Los_Angeles", "label": "Cupertino"},
+            {"zone": "Europe/Berlin", "label": "Berlin"},
+            {"zone": "Asia/Tokyo", "label": ""}], "style": "analog"})),
+        mk("weather", K::Weather, S::Small, 0, json!({"location": "Portland, Oregon"})),
+        mk("battery", K::Battery, S::Small, 0, json!({})),
+        mk("launcher", K::Launcher, S::Medium, 0, json!({"title": "Favorites", "items": [
+            {"kind": "app", "target": "Safari", "label": "", "symbol": ""},
+            {"kind": "folder", "target": "~/Documents", "label": "Docs", "symbol": ""},
+            {"kind": "url", "target": "https://github.com", "label": "GitHub", "symbol": "link"},
+            {"kind": "command", "target": "open -a Terminal ~/Code", "label": "Code", "symbol": "terminal"}]})),
+        mk("cal", K::Calendar, S::Medium, 1, json!({"days": 3})),
+        mk("rem", K::Reminders, S::Medium, 1, json!({"lists": ["Work"]})),
+        mk("shortcuts", K::Shortcuts, S::Medium, 1, json!({"shortcuts": ["Start Focus Session", "Log Water"], "title": "Routines"})),
+        mk("timer", K::Timer, S::Medium, 1, json!({"presets": [5, 25, 50]})),
+        mk("disk", K::Script, S::Medium, 2, json!({"title": "Disk", "command": "df -h / | awk 'NR==2 {print $5}'", "symbol": "internaldrive", "interval": 300})),
+        mk("btc", K::Web, S::Medium, 2, json!({"title": "Bitcoin", "url": "https://api.coinbase.com/v2/prices/BTC-USD/spot",
+            "template": "{{data.amount | round:0}} {{data.currency}}", "subtitle": "Coinbase spot price", "symbol": "bitcoinsign.circle", "token": "sk-live-1234", "interval": 600})),
+        mk("xbar", K::Xbar, S::Large, 2, json!({"title": "Plugins"})),
+        mk("stats", K::SystemStats, S::Medium, 2, json!({})),
+    ];
+    n.widgets.last_mut().unwrap().enabled = false;
+}
+
 fn has_gpu() -> bool {
     let mut h = Harness::builder()
         .with_size([64.0, 64.0])
@@ -202,7 +246,7 @@ fn shots() {
         label: "Signature".into(),
         ..text_expander::Snippet::new(";sig", "Best regards,\nAda Lovelace")
     });
-    cfg.notch_shelf.weather.location = "Portland, Oregon".into();
+    sample_widgets(&mut cfg.notch_shelf);
     cfg.menu_bar.enabled = true;
     cfg.save(&path).unwrap();
     sample_fz(&fancyzones_path(&path));
@@ -500,4 +544,102 @@ fn shots() {
     // Nothing was saved by looking.
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&ed);
+}
+
+/// The Notch Widgets page: pages manager, gallery and the editors of the
+/// "build your own" widgets, light and dark.
+#[test]
+fn widget_shots() {
+    if std::env::var_os("PM_UI_SHOTS").is_none() && std::env::var_os("PM_UI_SHOTS_ALWAYS").is_none() {
+        return;
+    }
+    if !has_gpu() {
+        return;
+    }
+    use notch_shelf::widgets::content::Item;
+    use notch_shelf::WidgetContent;
+    let dir = out_dir();
+    let d = scratch("widgets");
+    let path = d.join("config.json");
+    let plugins = d.join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    for f in ["cpu.5s.sh", "github-prs.10m.py", "weather.1h.sh"] {
+        std::fs::write(plugins.join(f), "#!/bin/sh\necho hi\n").unwrap();
+    }
+    let mut cfg = pm_config::AppConfig::with_new_key();
+    sample_widgets(&mut cfg.notch_shelf);
+    if let Some(w) = cfg.notch_shelf.widget_mut("xbar") {
+        w.settings["path"] = serde_json::json!(plugins.to_string_lossy());
+    }
+    cfg.save(&path).unwrap();
+    let status = pm_config::bridge::NotchStatus {
+        running: true,
+        reminders: "granted".into(),
+        reminder_lists: vec!["Work".into(), "Groceries".into(), "Someday".into()],
+        ..Default::default()
+    };
+    for (theme, tn) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
+        let mut app = SettingsApp::new(path.clone());
+        app.set_page(Page::NotchWidgets);
+        app.nw_shortcuts_for_test(vec!["Log Water".into(), "Start Focus Session".into(), "Morning Routine".into(), "Resize Images".into()]);
+        app.nw_apps_for_test(vec!["Calendar".into(), "Mail".into(), "Safari".into(), "Terminal".into(), "Xcode".into()]);
+        app.nw_test_result_for_test(
+            "disk",
+            Ok(WidgetContent { title: "Disk".into(), value: Some("73".into()), number: Some(73.0), unit: "%".into(), progress: Some(0.73), subtitle: "142 GB free".into(), ..Default::default() }),
+        );
+        app.nw_test_result_for_test("btc", Err("HTTP 401: Unauthorized (check the API token)".into()));
+        app.nw_test_result_for_test(
+            "xbar",
+            Ok(WidgetContent {
+                title: "CPU 12%".into(),
+                items: ["cpu.5s.sh — CPU 12%", "github-prs.10m.py — 3 open PRs", "weather.1h.sh — 21° Sunny"].iter().map(|t| Item::text(t)).collect(),
+                ..Default::default()
+            }),
+        );
+        let mut h = Harness::builder()
+            .with_size(win(1100.0, 780.0))
+            .with_theme(theme)
+            .with_accessibility_check(false)
+            .wgpu()
+            .build_ui_state(|ui, app: &mut SettingsApp| app.draw(ui), app);
+        h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
+        let fresh = || pm_config::bridge::write(&path, pm_config::bridge::NOTCH_STATUS_FILE, &status).unwrap();
+        fresh();
+        h.state_mut().reload_status_for_test();
+        // The top of the page: pages manager and the widgets of "Home".
+        save(&mut h, &dir, &format!("notch-widgets-pages-{tn}"));
+        // The whole page, tall.
+        h.set_size(egui::vec2(1100.0 + 2.0 * MARGIN, 2300.0 + 2.0 * MARGIN));
+        save(&mut h, &dir, &format!("notch-widgets-full-{tn}"));
+        // The gallery.
+        h.state_mut().nw_gallery_for_test(true);
+        h.set_size(egui::vec2(1100.0 + 2.0 * MARGIN, 3000.0 + 2.0 * MARGIN));
+        save(&mut h, &dir, &format!("notch-widgets-gallery-{tn}"));
+        h.state_mut().nw_gallery_for_test(false);
+        // Editors.
+        for (page, id, slug) in [
+            (2, "disk", "script"),
+            (2, "btc", "web"),
+            (2, "xbar", "xbar"),
+            (0, "launcher", "launcher"),
+            (0, "clocks", "worldclock"),
+            (1, "shortcuts", "shortcuts"),
+            (1, "rem", "reminders"),
+        ] {
+            fresh();
+            h.state_mut().reload_status_for_test();
+            h.state_mut().nw_page_for_test(page);
+            h.state_mut().nw_select_for_test(Some(id));
+            h.set_size(egui::vec2(1100.0 + 2.0 * MARGIN, 3400.0 + 2.0 * MARGIN));
+            save(&mut h, &dir, &format!("notch-widgets-editor-{slug}-{tn}"));
+        }
+        h.state_mut().nw_select_for_test(None);
+        h.state_mut().nw_io_result_for_test(true, "Imported: now 14 widgets on 4 pages", vec!["A widget of an unknown kind was skipped".into()]);
+        h.state_mut().nw_page_for_test(0);
+        save(&mut h, &dir, &format!("notch-widgets-share-{tn}"));
+    }
+    // Looking didn't change the layout's widgets.
+    let back = pm_config::AppConfig::load_or_default(&path).unwrap();
+    assert_eq!(back.notch_shelf.widgets.len(), 13);
+    let _ = std::fs::remove_dir_all(&d);
 }

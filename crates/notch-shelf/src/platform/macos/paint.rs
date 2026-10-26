@@ -14,6 +14,8 @@ use super::ffi::*;
 use super::gfx::{self, Layer, SymbolCache};
 use crate::geometry::{Point, Rect};
 use crate::widgets::draw::{Align, Font, ImageKey, Prim, Weight};
+#[allow(unused_imports)]
+use crate::widgets::draw::ImageSource;
 use crate::widgets::Rgba;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -67,6 +69,10 @@ pub struct Env<'a> {
     pub artwork: Option<&'a gfx::Image>,
     pub artwork_key: u64,
     pub camera: Option<&'a AnyObject>,
+    /// Loaded icons / plugin images (`None`: failed to load).
+    pub images: Option<&'a HashMap<ImageKey, Option<gfx::Image>>>,
+    /// Bumps whenever `images` gains an entry.
+    pub images_gen: u64,
 }
 
 #[derive(Default)]
@@ -108,6 +114,7 @@ pub struct Canvas {
     slots: Vec<(Tag, Layer)>,
     last: Vec<Prim>,
     last_art: u64,
+    last_images: u64,
     size: (f64, f64),
 }
 
@@ -116,7 +123,7 @@ impl Canvas {
         let root = gfx::layer();
         gfx::set_scale(&root, scale);
         gfx::add(parent, &root);
-        Canvas { root, slots: vec![], last: vec![], last_art: 0, size: (0.0, 0.0) }
+        Canvas { root, slots: vec![], last: vec![], last_art: 0, last_images: 0, size: (0.0, 0.0) }
     }
 
     /// Position the canvas (top-left rect in the parent).
@@ -129,12 +136,15 @@ impl Canvas {
     }
 
     pub fn paint(&mut self, prims: &[Prim], env: &mut Env) {
-        let uses_art = prims.iter().any(|p| matches!(p, Prim::Image { .. }));
+        let uses_art = prims.iter().any(|p| matches!(p, Prim::Image { key: ImageKey::Artwork, .. }));
+        let uses_images = prims.iter().any(|p| matches!(p, Prim::Image { key: ImageKey::Data(_) | ImageKey::Icon(_), .. }));
         let uses_cam = prims.iter().any(|p| matches!(p, Prim::Camera { .. }));
-        if prims == self.last.as_slice() && (!uses_art || self.last_art == env.artwork_key) && !uses_cam {
+        if prims == self.last.as_slice() && (!uses_art || self.last_art == env.artwork_key) && (!uses_images || self.last_images == env.images_gen) && !uses_cam {
             return;
         }
+        let images_changed = self.last_images != env.images_gen;
         self.last_art = env.artwork_key;
+        self.last_images = env.images_gen;
         transaction(None, || {
             for (i, p) in prims.iter().enumerate() {
                 let t = tag(p);
@@ -151,7 +161,7 @@ impl Canvas {
                         self.slots.push((t, l));
                     }
                 }
-                let changed = self.last.get(i) != Some(p) || matches!(p, Prim::Image { .. } | Prim::Camera { .. }) || !reuse;
+                let changed = self.last.get(i) != Some(p) || matches!(p, Prim::Image { key: ImageKey::Artwork, .. } | Prim::Camera { .. }) || (images_changed && matches!(p, Prim::Image { .. })) || !reuse;
                 if changed {
                     let l = self.slots[i].1.clone();
                     gfx::set_hidden(&l, false);
@@ -273,12 +283,17 @@ fn apply(l: &AnyObject, p: &Prim, env: &mut Env) {
             gfx::set_masks_to_bounds(l, true);
             let img = match key {
                 ImageKey::Artwork => env.artwork,
+                k => env.images.and_then(|m| m.get(k)).and_then(|i| i.as_ref()),
             };
             gfx::set_image(l, img);
+            let (gravity, bg) = match key {
+                ImageKey::Artwork => ("resizeAspectFill", Some(Color::white(0.08))),
+                _ => ("resizeAspect", None),
+            };
             unsafe {
-                let _: () = msg_send![l, setContentsGravity: &*ns("resizeAspectFill")];
+                let _: () = msg_send![l, setContentsGravity: &*ns(gravity)];
             }
-            gfx::set_bg(l, Some(&Color::white(0.08)));
+            gfx::set_bg(l, bg.as_ref());
         }
         Prim::Line { pts, color: c, width, fill } => {
             let subs = sublayers(l);
@@ -390,6 +405,15 @@ fn sup_size(l: &AnyObject) -> (f64, f64) {
             }
             None => (0.0, 0.0),
         }
+    }
+}
+
+/// An `NSImage` from encoded bytes.
+pub fn nsimage_from_data(bytes: &[u8]) -> Option<Retained<AnyObject>> {
+    unsafe {
+        let data = objc2_foundation::NSData::with_bytes(bytes);
+        let a: objc2::rc::Allocated<AnyObject> = msg_send![class!(NSImage), alloc];
+        msg_send![a, initWithData: &*data]
     }
 }
 

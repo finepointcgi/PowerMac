@@ -9,7 +9,7 @@ Every module can be turned on or off on its own in **Settings** or in `config.js
 | [Window Switcher](window-switcher.md) | on | Option+Tab, Option+\` | Accessibility (+ Screen Recording for thumbnails) | Alt+\` |
 | [Dock Previews](dock-previews.md) | on | hover a Dock icon | Accessibility (+ Screen Recording) | no-op |
 | [Menu Bar Manager](menu-bar.md) | off | click the chevron | Accessibility | no-op |
-| [Notch Shelf](notch-shelf.md) | on with a notch | drag to the notch | none (widgets: see page) | top-center shelf |
+| [Notch Shelf](notch-shelf.md) · [widgets](notch-widgets.md) | on with a notch | drag to the notch | none (widgets: see page) | top-center shelf |
 | [Mouse Without Borders](mouse-without-borders.md) | on | move past a screen edge | Accessibility, Input Monitoring | yes |
 | [Mouse tuning](mouse-tuning.md) | changes nothing until set | — | Accessibility (buttons only) | yes |
 | [Scrolling](scrolling.md) | on (macOS) | — | Accessibility | yes |

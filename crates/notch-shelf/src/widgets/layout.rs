@@ -1,14 +1,19 @@
-//! Home view layout: a horizontal row of rounded cards that fits the panel
-//! (widths flex between a minimum and a maximum; if even the minimums
-//! don't fit, the row scrolls like the shelf strip).
+//! Home view layout: each page is a horizontal row of rounded cards of
+//! fixed size classes (small / medium / large, mixed freely) that is
+//! centered in the panel, or scrolls like the shelf strip when it's wider.
+//! Pages sit side by side and slide horizontally when switching.
 
-use super::WidgetKind;
+use super::instance::WidgetInstance;
 use crate::geometry::Rect;
 
 /// Card height and spacing, in points.
 pub const CARD_H: f64 = 112.0;
 pub const CARD_GAP: f64 = 8.0;
 pub const CARD_RADIUS: f64 = 18.0;
+/// Card widths by size class (medium = 2 small + gap, large = 3 small + 2 gaps).
+pub const SMALL_W: f64 = 136.0;
+pub const MEDIUM_W: f64 = 2.0 * SMALL_W + CARD_GAP;
+pub const LARGE_W: f64 = 3.0 * SMALL_W + 2.0 * CARD_GAP;
 /// Inner padding of a card.
 pub const PAD: f64 = 12.0;
 /// Quick-controls button size and spacing.
@@ -16,6 +21,8 @@ pub const TOGGLE: f64 = 34.0;
 pub const TOGGLE_GAP: f64 = 8.0;
 /// Widest the Home view grows the panel on its own.
 pub const HOME_MAX_W: f64 = 940.0;
+/// Space between pages while they slide.
+pub const PAGE_GAP: f64 = 28.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CardSpec {
@@ -28,26 +35,6 @@ pub struct CardSpec {
 /// Columns of the quick-controls grid (two rows).
 pub fn toggle_cols(n: usize) -> usize {
     n.div_ceil(2).max(1)
-}
-
-pub fn spec(kind: WidgetKind, n_controls: usize) -> CardSpec {
-    let s = |min_w: f64, max_w: f64, weight: f64| CardSpec { min_w, max_w, weight };
-    match kind {
-        WidgetKind::NowPlaying => s(264.0, 340.0, 2.0),
-        WidgetKind::Calendar => s(214.0, 280.0, 1.5),
-        WidgetKind::Weather => s(140.0, 170.0, 0.5),
-        WidgetKind::Battery => s(116.0, 136.0, 0.3),
-        WidgetKind::SystemStats => s(196.0, 236.0, 1.0),
-        WidgetKind::Timer => s(176.0, 210.0, 0.6),
-        WidgetKind::QuickToggles => {
-            let c = toggle_cols(n_controls) as f64;
-            let w = 2.0 * PAD + c * TOGGLE + (c - 1.0) * TOGGLE_GAP;
-            s(w.max(112.0), w.max(112.0), 0.0)
-        }
-        WidgetKind::Note => s(184.0, 280.0, 1.2),
-        WidgetKind::Mirror => s(112.0, 150.0, 0.4),
-        WidgetKind::Unknown => s(0.0, 0.0, 0.0),
-    }
 }
 
 /// Width of the cards at their minimum plus gaps.
@@ -120,6 +107,17 @@ pub fn layout_cards(area: Rect, specs: &[CardSpec], scroll: f64) -> CardsLayout 
     CardsLayout { cards, content_w, max_scroll, scroll }
 }
 
+/// How many controls fit a quick-controls card `w` wide (two rows).
+pub fn toggle_capacity(w: f64) -> usize {
+    let cols = ((w - 2.0 * PAD + TOGGLE_GAP) / (TOGGLE + TOGGLE_GAP)).floor().max(1.0) as usize;
+    2 * cols
+}
+
+/// Card spec of a fixed-width card.
+pub fn fixed(w: f64) -> CardSpec {
+    CardSpec { min_w: w, max_w: w, weight: 0.0 }
+}
+
 /// Grid cells of the quick-controls card (card-local), row-major in two
 /// rows below a caption line.
 pub fn toggle_cells(card: Rect, n: usize) -> Vec<Rect> {
@@ -133,6 +131,66 @@ pub fn toggle_cells(card: Rect, n: usize) -> Vec<Rect> {
             Rect::new(x0 + c as f64 * (TOGGLE + TOGGLE_GAP), y0 + r as f64 * (TOGGLE + TOGGLE_GAP), TOGGLE, TOGGLE)
         })
         .collect()
+}
+
+/// Card specs of a page's instances (fixed widths by size).
+pub fn page_specs(list: &[&WidgetInstance]) -> Vec<CardSpec> {
+    list.iter().map(|w| fixed(w.effective_size().width())).collect()
+}
+
+/// Panel width for several pages: the widest page decides (so switching
+/// pages slides instead of resizing).
+pub fn pages_width(pages: &[Vec<CardSpec>], side_pad: f64, configured: f64) -> f64 {
+    pages.iter().map(|p| home_width(p, side_pad, configured)).fold(configured.max(0.0), f64::max)
+}
+
+/// Horizontal offset and opacity of page `k` while the page position
+/// (animated, fractional) is `pos`, for rows `row_w` wide.
+pub fn page_offset(k: usize, pos: f64, row_w: f64) -> (f64, f64) {
+    let d = k as f64 - pos;
+    let alpha = (1.0 - d.abs() * 0.85).clamp(0.0, 1.0);
+    (d * (row_w + PAGE_GAP), alpha)
+}
+
+/// The page a horizontal swipe lands on: `dir` > 0 goes right (next).
+pub fn swipe_target(cur: usize, n: usize, dir: f64) -> usize {
+    if dir > 0.0 {
+        (cur + 1).min(n.saturating_sub(1))
+    } else if dir < 0.0 {
+        cur.saturating_sub(1)
+    } else {
+        cur
+    }
+}
+
+/// Page tabs in the header: tab frames right-aligned in `area` with the
+/// given text widths, or `None` when they don't fit (dots are used then).
+pub fn page_tabs(area: Rect, text_widths: &[f64]) -> Option<Vec<Rect>> {
+    const PADX: f64 = 10.0;
+    const H: f64 = 22.0;
+    let total: f64 = text_widths.iter().map(|w| w + 2.0 * PADX).sum::<f64>() + 4.0;
+    if text_widths.len() < 2 || total > area.w {
+        return None;
+    }
+    let mut x = area.right() - total + 2.0;
+    let y = area.center_y() - H / 2.0;
+    Some(
+        text_widths
+            .iter()
+            .map(|w| {
+                let r = Rect::new(x, y, w + 2.0 * PADX, H);
+                x += r.w;
+                r
+            })
+            .collect(),
+    )
+}
+
+/// Page dots right-aligned in `area` (8 pt hit targets 14 pt apart).
+pub fn page_dots(area: Rect, n: usize) -> Vec<Rect> {
+    let pitch = 14.0;
+    let x0 = area.right() - pitch * n as f64;
+    (0..n).map(|i| Rect::new(x0 + i as f64 * pitch, area.center_y() - pitch / 2.0, pitch, pitch)).collect()
 }
 
 #[cfg(test)]
@@ -179,32 +237,91 @@ mod tests {
 
     #[test]
     fn home_width_grows_within_limits() {
-        let specs: Vec<CardSpec> = [WidgetKind::NowPlaying, WidgetKind::Battery, WidgetKind::Timer, WidgetKind::QuickToggles].iter().map(|k| spec(*k, 5)).collect();
+        let ws = |v: &[f64]| -> Vec<CardSpec> { v.iter().map(|w| fixed(*w)).collect() };
+        let specs = ws(&[MEDIUM_W, SMALL_W, MEDIUM_W]);
         let w = home_width(&specs, 18.0, 620.0);
         assert!((w - (natural_width(&specs) + 36.0)).abs() < 1e-9);
         assert!(w > 620.0 && w <= HOME_MAX_W);
-        // Fits the configured width: stays at it.
         assert_eq!(home_width(&specs[..1], 18.0, 620.0), 620.0);
-        // Everything enabled: capped.
-        let all: Vec<CardSpec> = WidgetKind::ALL.iter().map(|k| spec(*k, 8)).collect();
+        let all = ws(&[LARGE_W; 4]);
         assert_eq!(home_width(&all, 18.0, 620.0), HOME_MAX_W);
-        // A configured width above the cap wins.
         assert_eq!(home_width(&all, 18.0, 1200.0), 1200.0);
         assert_eq!(home_width(&[], 18.0, 620.0), 620.0);
+    }
+
+    #[test]
+    fn mixed_sizes_in_a_row() {
+        let list = [
+            WidgetInstance::new(super::super::WidgetKind::Battery).sized(super::super::instance::WidgetSize::Small),
+            WidgetInstance::new(super::super::WidgetKind::Script).sized(super::super::instance::WidgetSize::Large),
+            WidgetInstance::new(super::super::WidgetKind::Note).sized(super::super::instance::WidgetSize::Medium),
+            // Not allowed: snaps to medium.
+            WidgetInstance::new(super::super::WidgetKind::Battery).sized(super::super::instance::WidgetSize::Large),
+        ];
+        let refs: Vec<&WidgetInstance> = list.iter().collect();
+        let specs = page_specs(&refs);
+        assert_eq!(specs.iter().map(|s| s.min_w).collect::<Vec<_>>(), vec![SMALL_W, LARGE_W, MEDIUM_W, MEDIUM_W]);
+        let area = Rect::new(0.0, 40.0, 1200.0, CARD_H);
+        let l = layout_cards(area, &specs, 0.0);
+        // Fixed widths, centered, gaps between.
+        assert_eq!(l.cards.iter().map(|c| c.w).collect::<Vec<_>>(), vec![SMALL_W, LARGE_W, MEDIUM_W, MEDIUM_W]);
+        assert!((l.cards[1].x - l.cards[0].right() - CARD_GAP).abs() < 1e-9);
+        assert!(((l.cards[0].x - area.x) - (area.right() - l.cards[3].right())).abs() < 1e-9);
+        // The grid lines up: a large card is as wide as three small ones.
+        assert_eq!(LARGE_W, 3.0 * SMALL_W + 2.0 * CARD_GAP);
+        // Too wide: scrolls.
+        let narrow = Rect::new(0.0, 0.0, 600.0, CARD_H);
+        let l = layout_cards(narrow, &specs, 1e9);
+        assert!(l.max_scroll > 0.0 && l.scroll == l.max_scroll);
+        assert!((l.cards[3].right() - 600.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pages_slide_and_share_a_width() {
+        let p1 = vec![fixed(SMALL_W)];
+        let p2 = vec![fixed(LARGE_W), fixed(MEDIUM_W)];
+        let w = pages_width(&[p1.clone(), p2.clone()], 18.0, 620.0);
+        assert_eq!(w, home_width(&p2, 18.0, 620.0));
+        assert_eq!(pages_width(&[p1], 18.0, 620.0), 620.0);
+        assert_eq!(pages_width(&[], 18.0, 620.0), 620.0);
+        assert_eq!(page_offset(1, 1.0, 800.0), (0.0, 1.0));
+        let (x, a) = page_offset(2, 1.0, 800.0);
+        assert_eq!(x, 800.0 + PAGE_GAP);
+        assert!(a < 0.2);
+        let (x, a) = page_offset(0, 0.5, 800.0);
+        assert!(x < 0.0 && a > 0.5);
+        assert_eq!(swipe_target(0, 3, 1.0), 1);
+        assert_eq!(swipe_target(2, 3, 1.0), 2);
+        assert_eq!(swipe_target(0, 3, -1.0), 0);
+        assert_eq!(swipe_target(1, 3, 0.0), 1);
+    }
+
+    #[test]
+    fn tabs_or_dots() {
+        let area = Rect::new(500.0, 0.0, 300.0, 32.0);
+        let tabs = page_tabs(area, &[30.0, 40.0, 25.0]).unwrap();
+        assert_eq!(tabs.len(), 3);
+        assert!((tabs[2].right() - (area.right() - 2.0)).abs() < 1e-9);
+        assert!(tabs.windows(2).all(|w| (w[0].right() - w[1].x).abs() < 1e-9));
+        assert!(tabs.iter().all(|t| (t.center_y() - area.center_y()).abs() < 1e-9));
+        assert!(page_tabs(area, &[200.0, 200.0]).is_none());
+        assert!(page_tabs(area, &[20.0]).is_none(), "one page: no tabs");
+        let dots = page_dots(area, 4);
+        assert_eq!(dots.len(), 4);
+        assert!((dots[3].right() - area.right()).abs() < 1e-9);
     }
 
     #[test]
     fn toggle_grid() {
         assert_eq!(toggle_cols(0), 1);
         assert_eq!(toggle_cols(5), 3);
-        let s = spec(WidgetKind::QuickToggles, 6);
-        assert_eq!(s.min_w, 2.0 * PAD + 3.0 * TOGGLE + 2.0 * TOGGLE_GAP);
-        assert_eq!(spec(WidgetKind::QuickToggles, 1).min_w, 112.0);
-        let card = Rect::new(0.0, 0.0, s.min_w, CARD_H);
-        let cells = toggle_cells(card, 5);
-        assert_eq!(cells.len(), 5);
-        assert!((cells[0].x - PAD).abs() < 1e-9);
-        assert_eq!(cells[3].y, cells[0].y + TOGGLE + TOGGLE_GAP);
+        assert_eq!(toggle_capacity(SMALL_W), 4);
+        assert_eq!(toggle_capacity(MEDIUM_W), 12);
+        let card = Rect::new(0.0, 0.0, SMALL_W, CARD_H);
+        let cells = toggle_cells(card, 4);
+        assert_eq!(cells.len(), 4);
+        assert!(cells.iter().all(|c| c.x >= 0.0 && c.right() <= SMALL_W));
+        assert_eq!(cells[2].y, cells[0].y + TOGGLE + TOGGLE_GAP);
         assert!(cells.iter().all(|c| c.bottom() <= card.bottom() - PAD + 2.0 + 1e-9 && c.y > 20.0));
     }
 }

@@ -5,7 +5,7 @@ The `powermac` executable runs the app and every helper window. All subcommands 
 | Command | What it does |
 |---|---|
 | `powermac` / `powermac run [--no-tray]` | Run every enabled module with the tray icon (default). |
-| `powermac settings` | Open the settings window. |
+| `powermac settings [--page <name>]` | Open the settings window, optionally on a page (`notch-widgets`, `sound`, `notch-shelf`, … — a page title in lowercase with dashes). An open window comes to the front. |
 | `powermac editor [--monitor <id>]` | Open the FancyZones layout editor. |
 | `powermac init [--force]` | Write a default `config.json` with a new Mouse Without Borders key and print the key. |
 | `powermac gen-key` | Print a new Mouse Without Borders security key. |

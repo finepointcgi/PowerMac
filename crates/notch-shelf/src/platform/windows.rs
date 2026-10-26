@@ -329,7 +329,7 @@ impl Ui {
                 Request::Expand => self.logic.expand(),
                 Request::Collapse => self.logic.collapse(false),
                 // No Home view (widgets) on Windows yet: the shelf only.
-                Request::RenderPng(_) | Request::Debug(_) | Request::SetView(_) | Request::RefreshWidgets => {}
+                Request::RenderPng(_) | Request::Debug(_) | Request::SetView(_) | Request::SetPage(_) | Request::RefreshWidgets => {}
             }
         }
         let mut pt = POINT::default();

@@ -8,15 +8,29 @@
 //! which turns widget state into a list of primitives the platform layer
 //! paints with Core Animation.
 
+pub mod bluetooth;
 pub mod calendar;
+pub mod cards;
+pub mod catalog;
+pub mod clocks;
+pub mod content;
 pub mod demo;
 pub mod draw;
+pub mod instance;
 pub mod layout;
 pub mod media;
+pub mod reminders;
+pub mod run;
+pub mod scheduler;
+pub mod shortcuts;
+pub mod sound;
 pub mod stats;
 pub mod timer;
 pub mod weather;
+pub mod web;
+pub mod xbar;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -55,6 +69,22 @@ pub enum WidgetKind {
     QuickToggles,
     Note,
     Mirror,
+    /// Runs a command and shows its output.
+    Script,
+    /// xbar / SwiftBar plugins.
+    Xbar,
+    /// GET a URL, show values from the JSON.
+    Web,
+    /// Buttons for Apple Shortcuts.
+    Shortcuts,
+    /// Grid of apps / files / folders / URLs / commands.
+    Launcher,
+    /// AirPods, Magic devices etc. battery levels.
+    Bluetooth,
+    /// Output device, volume, mute (host-provided).
+    Sound,
+    Reminders,
+    WorldClock,
     /// A kind written by a newer version; ignored (keeps old builds from
     /// rejecting the whole config).
     #[serde(other)]
@@ -62,7 +92,7 @@ pub enum WidgetKind {
 }
 
 impl WidgetKind {
-    pub const ALL: [WidgetKind; 9] = [
+    pub const ALL: [WidgetKind; 18] = [
         WidgetKind::NowPlaying,
         WidgetKind::Calendar,
         WidgetKind::Weather,
@@ -72,6 +102,15 @@ impl WidgetKind {
         WidgetKind::QuickToggles,
         WidgetKind::Note,
         WidgetKind::Mirror,
+        WidgetKind::Script,
+        WidgetKind::Xbar,
+        WidgetKind::Web,
+        WidgetKind::Shortcuts,
+        WidgetKind::Launcher,
+        WidgetKind::Bluetooth,
+        WidgetKind::Sound,
+        WidgetKind::Reminders,
+        WidgetKind::WorldClock,
     ];
 
     pub fn title(self) -> &'static str {
@@ -85,6 +124,15 @@ impl WidgetKind {
             WidgetKind::QuickToggles => "Quick Controls",
             WidgetKind::Note => "Note",
             WidgetKind::Mirror => "Mirror",
+            WidgetKind::Script => "Script",
+            WidgetKind::Xbar => "xbar Plugins",
+            WidgetKind::Web => "Web / JSON",
+            WidgetKind::Shortcuts => "Shortcuts",
+            WidgetKind::Launcher => "Launcher",
+            WidgetKind::Bluetooth => "Bluetooth Batteries",
+            WidgetKind::Sound => "Sound",
+            WidgetKind::Reminders => "Reminders",
+            WidgetKind::WorldClock => "World Clocks",
             WidgetKind::Unknown => "Unknown",
         }
     }
@@ -101,6 +149,15 @@ impl WidgetKind {
             WidgetKind::QuickToggles => "switch.2",
             WidgetKind::Note => "note.text",
             WidgetKind::Mirror => "person.crop.square",
+            WidgetKind::Script => "terminal",
+            WidgetKind::Xbar => "puzzlepiece.extension",
+            WidgetKind::Web => "network",
+            WidgetKind::Shortcuts => "square.2.layers.3d",
+            WidgetKind::Launcher => "square.grid.2x2",
+            WidgetKind::Bluetooth => "airpodspro",
+            WidgetKind::Sound => "speaker.wave.2.fill",
+            WidgetKind::Reminders => "checklist",
+            WidgetKind::WorldClock => "globe",
             WidgetKind::Unknown => "questionmark",
         }
     }
@@ -112,6 +169,13 @@ impl WidgetKind {
             WidgetKind::Calendar => Some("macOS asks for Calendar access the first time the widget is shown."),
             WidgetKind::Weather => Some("Fetches the forecast from open-meteo.com (no account) every 30 minutes."),
             WidgetKind::Mirror => Some("Shows the camera while you click it; macOS asks for Camera access. The camera stops when the notch closes."),
+            WidgetKind::Script => Some("Runs the command you enter, as you, in the background. Only commands from these settings are ever run."),
+            WidgetKind::Xbar => Some("Runs the plugin files in the folder you choose, as you. Only install plugins you trust."),
+            WidgetKind::Web => Some("Fetches the URL you enter (HTTPS only unless you allow HTTP). A token is stored in PowerMac's settings."),
+            WidgetKind::Shortcuts => Some("Runs shortcuts with Apple's shortcuts tool; a shortcut may ask for its own permissions."),
+            WidgetKind::Bluetooth => Some("Reads battery levels from the system (system_profiler and IOKit); no permission needed."),
+            WidgetKind::Sound => Some("Uses PowerMac's audio control to switch the output device and set the volume."),
+            WidgetKind::Reminders => Some("macOS asks for Reminders access the first time the widget is shown."),
             _ => None,
         }
     }
@@ -260,11 +324,20 @@ impl std::fmt::Debug for QuickAction {
 }
 
 /// Extra things the host hands to [`crate::NotchShelf::start_with`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct StartOptions {
     /// Shown in the Quick Controls widget, toggles first, in this order.
     pub toggles: Vec<QuickToggle>,
     pub actions: Vec<QuickAction>,
+    /// Audio control for the Sound widget (PowerMac implements it with its
+    /// audio-control crate). Without one the widget says it's unavailable.
+    pub sound: Option<Arc<dyn sound::SoundProvider>>,
+}
+
+impl std::fmt::Debug for StartOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartOptions").field("toggles", &self.toggles).field("actions", &self.actions).field("sound", &self.sound.is_some()).finish()
+    }
 }
 
 // ----- data the providers deliver ---------------------------------------
@@ -401,16 +474,63 @@ pub struct BatteryInfo {
     pub minutes_to_full: Option<u32>,
 }
 
+/// Results of a Shortcuts widget.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ShortcutsState {
+    /// The shortcut running now.
+    pub running: Option<String>,
+    /// The last run: (shortcut, output or error, unix time).
+    pub last: Option<(String, Result<String, String>, f64)>,
+}
+
+/// Per-instance data of the data-driven widgets.
+#[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum InstanceData {
+    /// Script / xbar / Web output.
+    Content(content::Status),
+    Shortcuts(ShortcutsState),
+}
+
 /// Everything the providers deliver, as one snapshot.
 #[derive(Clone, Debug, Default)]
 pub struct WidgetData {
     pub now_playing: Option<NowPlaying>,
     pub calendar_access: Access,
     pub events: Vec<CalEvent>,
+    /// Weather of the first Weather widget (and the fallback for others).
     pub weather: WeatherStatus,
+    /// Weather by instance id.
+    pub weathers: HashMap<String, WeatherStatus>,
     pub battery: Option<BatteryInfo>,
     pub stats: stats::StatsView,
     pub camera_access: Access,
+    /// Script / xbar / Web / Shortcuts data by instance id.
+    pub instances: HashMap<String, InstanceData>,
+    /// Connected Bluetooth devices with a battery (`None` until read).
+    pub bluetooth: Option<Vec<bluetooth::BtDevice>>,
+    pub sound: sound::SoundState,
+    pub reminders: reminders::RemindersState,
+}
+
+impl WidgetData {
+    pub fn content(&self, id: &str) -> Option<&content::Status> {
+        match self.instances.get(id) {
+            Some(InstanceData::Content(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn shortcuts(&self, id: &str) -> Option<&ShortcutsState> {
+        match self.instances.get(id) {
+            Some(InstanceData::Shortcuts(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn weather_for(&self, id: &str) -> &WeatherStatus {
+        self.weathers.get(id).unwrap_or(&self.weather)
+    }
 }
 
 /// Permission states for the host's settings page.
@@ -418,6 +538,7 @@ pub struct WidgetData {
 pub struct WidgetStatus {
     pub calendar: Access,
     pub camera: Access,
+    pub reminders: Access,
     pub media_source: Option<MediaSource>,
 }
 

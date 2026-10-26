@@ -1,6 +1,6 @@
 //! Pages and cards of the newest modules: Resolution & HiDPI (on the
 //! Displays page), Sound, Dock Previews, Text Expansion, the Caps
-//! Lock card's neighbours, the Notch Shelf widgets and the Finder basics /
+//! Lock card's neighbours, the link to the Notch Widgets page and the Finder basics /
 //! Image Resizer cards of File Tools.
 //!
 //! Like Displays, the modules that need the running app (Display Scaling,
@@ -31,6 +31,7 @@ impl SettingsApp {
         self.scaling_status = read_fresh(p, SCALING_STATUS_FILE, STATUS_FRESH_MS);
         self.audio_status = read_fresh(p, AUDIO_STATUS_FILE, STATUS_FRESH_MS);
         self.menubar_status = read_fresh(p, MENUBAR_STATUS_FILE, STATUS_FRESH_MS);
+        self.notch_status = read_fresh(p, NOTCH_STATUS_FILE, STATUS_FRESH_MS);
         if self.page == Page::MenuBar
             && self.app.cfg.menu_bar.enabled
             && self.menubar_list_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(4))
@@ -926,73 +927,32 @@ impl SettingsApp {
     }
 
     // -----------------------------------------------------------------------
-    // Notch Shelf: widgets
+    // Notch Shelf: a link to the Notch Widgets page
 
     pub(super) fn notch_widgets(&mut self, ui: &mut Ui) {
-        use notch_shelf::{DefaultView, TempUnit, WidgetConfig};
-        let n = &mut self.app.cfg.notch_shelf;
+        let n = &self.app.cfg.notch_shelf;
+        let pages = n.page_list();
+        let on = n.widgets.iter().filter(|w| w.enabled && w.kind != notch_shelf::WidgetKind::Unknown).count();
+        let mut go = false;
         card_with(
             ui,
             "Widgets",
-            Some("The Home view of the open notch. Switch widgets on and use the arrows to set their order."),
+            Some("The open notch's Home view: clocks, scripts, web data, Shortcuts, launchers and more, on pages you can swipe between."),
             |ui| {
-                let mut list = WidgetConfig::normalized(&n.widgets);
-                let before = list.clone();
-                let mut mv: Option<(usize, i32)> = None;
-                for i in 0..list.len() {
-                    let w = list[i];
-                    let note = w.kind.note();
-                    ui.push_id(("widget", i), |ui| {
-                        let mut on = w.enabled;
-                        row(ui, w.kind.title(), note, |ui| {
-                            ui.add_enabled_ui(i > 0, |ui| {
-                                if icon_button(ui, icon::ARROW_UP, "Move up").clicked() {
-                                    mv = Some((i, -1));
-                                }
-                            });
-                            ui.add_enabled_ui(i + 1 < list.len(), |ui| {
-                                if icon_button(ui, icon::ARROW_DOWN, "Move down").clicked() {
-                                    mv = Some((i, 1));
-                                }
-                            });
-                            toggle_labeled(ui, &mut on, &format!("Show {}", w.kind.title()));
-                        });
-                        list[i].enabled = on;
-                    });
-                }
-                if let Some((i, d)) = mv {
-                    let j = (i as i32 + d).clamp(0, list.len() as i32 - 1) as usize;
-                    list.swap(i, j);
-                }
-                if list != before {
-                    n.widgets = list;
-                }
-                row(ui, "Open in", None, |ui| {
-                    segmented(ui, &mut n.default_view, &[(DefaultView::Last, "Last view"), (DefaultView::Home, "Widgets"), (DefaultView::Shelf, "Shelf")])
-                });
-                toggle_row(
-                    ui,
-                    "Live activities",
-                    Some("Music and a running timer show beside the closed notch."),
-                    &mut n.live_activities,
+                let desc = format!(
+                    "{} on {}",
+                    plural(on, "widget"),
+                    if pages.len() == 1 { "one page".to_string() } else { plural(pages.len(), "page") }
                 );
+                let (clicked, label) = icon_row(ui, icon::LAYOUT, Color32::from_rgb(0xAF, 0x52, 0xDE), "Notch Widgets", Some(&desc), |ui| {
+                    primary_button(ui, "Edit widgets…").clicked()
+                });
+                go = clicked || label.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
             },
         );
-        card(ui, "Widget settings", |ui| {
-            row(ui, "Weather location", Some("A city (“Portland, Oregon”) or “latitude, longitude”. Forecasts come from open-meteo.com."), |ui| {
-                ui.add(egui::TextEdit::singleline(&mut n.weather.location).hint_text("Berlin").desired_width(200.0))
-            });
-            row(ui, "Temperature", None, |ui| {
-                segmented(ui, &mut n.weather.units, &[(TempUnit::Auto, "Automatic"), (TempUnit::Celsius, "°C"), (TempUnit::Fahrenheit, "°F")])
-            });
-            row(ui, "Calendar shows", Some("Days ahead, starting today."), |ui| slider(ui, &mut n.calendar.days, 1..=7, " days"));
-            toggle_row(
-                ui,
-                "Read Music and Spotify directly",
-                Some("When the system's Now Playing information is empty (macOS 15.4 and later), ask Music and Spotify with AppleScript. macOS asks once per app for Automation access."),
-                &mut n.now_playing.use_applescript,
-            );
-        });
+        if go {
+            self.go(Page::NotchWidgets);
+        }
     }
 
     // -----------------------------------------------------------------------

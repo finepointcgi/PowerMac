@@ -1,14 +1,17 @@
 //! macOS backend (AppKit + Core Animation, main thread).
 
 mod app;
+mod bluetooth;
 mod calendar;
 mod camera;
 mod ffi;
 mod gfx;
+mod jobs;
 mod media;
 mod paint;
 mod pboard;
 mod providers;
+mod reminders;
 mod rt;
 mod sysinfo;
 mod view;
@@ -29,6 +32,11 @@ pub fn has_notch() -> bool {
         return NSScreen::screens(mtm).iter().any(|s| s.safeAreaInsets().top > 0.0);
     }
     ffi::builtin_display_has_notch_heuristic()
+}
+
+/// Run a Script / xbar / Web instance once (settings preview).
+pub fn run_widget_once(inst: &crate::widgets::instance::WidgetInstance) -> Result<crate::widgets::content::Content, String> {
+    jobs::run_once(inst)
 }
 
 pub struct Backend;

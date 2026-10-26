@@ -69,6 +69,7 @@ nav:
           - Dock Previews: features/dock-previews.md
           - Menu Bar Manager: features/menu-bar.md
           - Notch Shelf and widgets: features/notch-shelf.md
+          - Notch widgets (gallery, Script, xbar, Web): features/notch-widgets.md
       - Input:
           - Mouse Without Borders: features/mouse-without-borders.md
           - Mouse tuning: features/mouse-tuning.md

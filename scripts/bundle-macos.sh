@@ -54,6 +54,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSAudioCaptureUsageDescription</key><string>PowerMac sets a volume for each app (Sound → Per-app volume). Nothing is recorded.</string>
   <key>NSCalendarsFullAccessUsageDescription</key><string>The Notch Shelf's Calendar widget shows your next events.</string>
   <key>NSCalendarsUsageDescription</key><string>The Notch Shelf's Calendar widget shows your next events.</string>
+  <key>NSRemindersFullAccessUsageDescription</key><string>The Notch Shelf's Reminders widget shows your open reminders and lets you tick them off.</string>
+  <key>NSRemindersUsageDescription</key><string>The Notch Shelf's Reminders widget shows your open reminders and lets you tick them off.</string>
   <key>NSCameraUsageDescription</key><string>The Notch Shelf's Mirror widget shows the camera while you click it.</string>
   <key>NSAppleEventsUsageDescription</key><string>PowerMac reads the current track from Music and Spotify (Notch Shelf) and Finder's selection (File Tools) when you turn these on.</string>
 </dict>

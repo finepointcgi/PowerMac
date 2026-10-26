@@ -15,21 +15,11 @@ Crate: `crates/notch-shelf` · Settings page: **Notch Shelf** · Config: `notchS
 
 ## Home view widgets
 
-When at least one widget is on, the notch gets a Home view next to the shelf. The order in `widgets` is the display order.
+The open notch has a Home view next to the shelf: pages of widget cards — Now Playing, Calendar, Weather, Battery, System Stats, Timer, Quick Controls, Note, Mirror, Script, xbar plugins, Web / JSON, Shortcuts, Launcher, Bluetooth batteries, Sound, Reminders and World Clocks. Each card is an instance with its own size, page and settings, and kinds can be added several times.
 
-| Widget | Notes |
-|---|---|
-| Now Playing | play/pause/next/previous; title and artwork from the system, or from Music/Spotify via AppleScript when `nowPlaying.useAppleScript` is on (macOS 15.4+ restricts the system data) |
-| Calendar | upcoming events (`calendar.days`, `calendar.calendars`); needs Calendars access |
-| Weather | `weather.location` as a city or `lat, lon`, looked up with Open-Meteo; `weather.units` |
-| Battery | level and charging state |
-| System Stats | CPU load and network rates with sparklines |
-| Timer | timer and stopwatch |
-| Quick Toggles | Awake on/off, Pick color, Extract text, Clipboard history, Window switcher, Lock screen, Show desktop |
-| Note | a scratchpad |
-| Mirror | camera preview; needs Camera access |
+They're edited on the **Notch Widgets** settings page (tray → **Notch widgets…**): a pages manager, a gallery of every kind, a settings form per widget with a **Test** run for Script / Web / xbar, and layout export / import. See [Notch widgets](notch-widgets.md) for every kind, the script output formats, xbar plugins and the Web template syntax.
 
-`liveActivities` shows music and timer activity beside the collapsed notch. `batteryIndicator` briefly widens the notch with the battery level when the charger is connected or disconnected. `showClipboard` adds the current clipboard item as the first tile (may trigger macOS's paste prompt).
+`liveActivities` shows music, a running timer and widgets with *Live activity* on beside the collapsed notch. `batteryIndicator` briefly widens the notch with the battery level when the charger is connected or disconnected. `showClipboard` adds the current clipboard item as the first tile (may trigger macOS's paste prompt).
 
 ## Settings
 
@@ -44,6 +34,8 @@ When at least one widget is on, the notch gets a Home view next to the shelf. Th
 | `haptics` | true |
 | `panelWidth` | 620 |
 | `defaultView` | last used |
+| `liveActivities` | true |
+| `pages`, `widgets` | one "Home" page with Now Playing, Battery, Timer and Quick Controls (see [Notch widgets](notch-widgets.md)) |
 
 ## Platforms
 

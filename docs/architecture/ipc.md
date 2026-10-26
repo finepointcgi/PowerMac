@@ -30,6 +30,9 @@ All files live next to `config.json` and are written atomically (temp file + ren
 | `audio-request.json` | settings → app | default device, levels | polled every 150 ms |
 | `menubar-status.json` | app → settings | permissions, items and their sections | on request |
 | `menubar-request.json` | settings → app | list / move / show / hide | polled |
+| `notch-status.json` | app → settings | Script / xbar / Web widget results, reminder lists, widget permission states | every 2 s while the shelf runs |
+| `notch-request.json` | settings → app | refresh a widget, open the notch on a page | polled every 250 ms |
+| `settings-request.json` | tray → settings | switch an open settings window to a page (tray → Notch widgets…) | polled every second |
 
 Status files carry a timestamp (`at`, ms since the epoch); the settings window treats stale status as "app not running". Requests carry one too and old ones are ignored, so a request written while the app was down never fires later.
 

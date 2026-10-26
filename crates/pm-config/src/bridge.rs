@@ -28,6 +28,16 @@ pub const MENUBAR_STATUS_FILE: &str = "menubar-status.json";
 /// Menu bar: list / move items (written by the settings window).
 pub const MENUBAR_REQUEST_FILE: &str = "menubar-request.json";
 
+/// Notch Shelf widgets: latest widget results, reminder lists, permission
+/// states (written by the app while the shelf runs).
+pub const NOTCH_STATUS_FILE: &str = "notch-status.json";
+/// Notch Shelf widgets: refresh a widget, show a Home page (written by the
+/// settings window).
+pub const NOTCH_REQUEST_FILE: &str = "notch-request.json";
+/// Settings window: switch to a page (written by the app's tray menu when
+/// the window is already open).
+pub const SETTINGS_REQUEST_FILE: &str = "settings-request.json";
+
 /// A status older than this means the app (or the module) isn't running.
 pub const STATUS_FRESH_MS: u64 = 10_000;
 /// Requests older than this are ignored.
@@ -233,6 +243,84 @@ pub enum MenuBarRequest {
     Hide,
 }
 
+// ---------------------------------------------------------------------------
+// Notch Shelf widgets
+
+/// What the running Notch Shelf reports about its widgets.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotchStatus {
+    pub running: bool,
+    /// Permission states ("granted", "denied", "notDetermined",
+    /// "missingUsageKey", "unavailable", "unknown").
+    pub calendar: String,
+    pub camera: String,
+    pub reminders: String,
+    /// Reminder list names (empty until the Reminders widget fetched once).
+    pub reminder_lists: Vec<String>,
+    /// Latest results of the Script / xbar / Web widgets, by instance id.
+    pub widgets: std::collections::BTreeMap<String, WidgetPreview>,
+}
+
+/// A widget's latest result, reduced to text for the settings window.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WidgetPreview {
+    /// Empty when the run succeeded.
+    pub error: String,
+    pub title: String,
+    pub subtitle: String,
+    pub body: String,
+    pub value: Option<String>,
+    pub unit: String,
+    /// 0..1 for a gauge.
+    pub progress: Option<f64>,
+    pub symbol: Option<String>,
+    /// Item titles (lists, xbar menus), at most 12.
+    pub items: Vec<String>,
+}
+
+impl WidgetPreview {
+    pub fn from_content(c: &notch_shelf::WidgetContent) -> Self {
+        WidgetPreview {
+            error: String::new(),
+            title: c.title.clone(),
+            subtitle: c.subtitle.clone(),
+            body: c.body.clone(),
+            value: c.value.clone(),
+            unit: c.unit.clone(),
+            progress: c.progress,
+            symbol: c.symbol.clone(),
+            items: c.items.iter().filter(|i| !i.separator && !i.title.trim().is_empty()).take(12).map(|i| i.title.clone()).collect(),
+        }
+    }
+
+    pub fn from_result(r: &Result<notch_shelf::WidgetContent, String>) -> Self {
+        match r {
+            Ok(c) => Self::from_content(c),
+            Err(e) => WidgetPreview { error: if e.trim().is_empty() { "Failed".into() } else { e.clone() }, ..Default::default() },
+        }
+    }
+}
+
+/// A request from the settings window to the running Notch Shelf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum NotchRequest {
+    /// Re-run one widget instance now.
+    RefreshWidget { id: String },
+    /// Open the notch on Home page `page` (index into the config's pages).
+    ShowPage { page: usize },
+}
+
+/// A request from the app (tray menu) to an open settings window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SettingsRequest {
+    /// Switch to a page ("notch-widgets", "sound", ...).
+    ShowPage { page: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +371,22 @@ mod tests {
         write(&cfg, MENUBAR_REQUEST_FILE, &m).unwrap();
         assert_eq!(read::<MenuBarRequest>(&cfg, MENUBAR_REQUEST_FILE).unwrap().data, m);
         assert!(std::fs::read_to_string(dir.join(MENUBAR_REQUEST_FILE)).unwrap().contains("\"alwaysHidden\""));
+
+        let n = NotchRequest::ShowPage { page: 2 };
+        write(&cfg, NOTCH_REQUEST_FILE, &n).unwrap();
+        assert_eq!(read::<NotchRequest>(&cfg, NOTCH_REQUEST_FILE).unwrap().data, n);
+        assert!(std::fs::read_to_string(dir.join(NOTCH_REQUEST_FILE)).unwrap().contains("\"showPage\""));
+        let sr = SettingsRequest::ShowPage { page: "notch-widgets".into() };
+        write(&cfg, SETTINGS_REQUEST_FILE, &sr).unwrap();
+        assert_eq!(read::<SettingsRequest>(&cfg, SETTINGS_REQUEST_FILE).unwrap().data, sr);
+        let content = notch_shelf::WidgetContent { title: "Disk".into(), value: Some("42".into()), unit: "%".into(), progress: Some(0.42), ..Default::default() };
+        let mut ns = NotchStatus { running: true, reminders: "granted".into(), ..Default::default() };
+        ns.widgets.insert("a".into(), WidgetPreview::from_result(&Ok(content)));
+        ns.widgets.insert("b".into(), WidgetPreview::from_result(&Err("Timed out".into())));
+        write(&cfg, NOTCH_STATUS_FILE, &ns).unwrap();
+        let back: NotchStatus = read_fresh(&cfg, NOTCH_STATUS_FILE, STATUS_FRESH_MS).unwrap();
+        assert_eq!(back, ns);
+        assert_eq!((back.widgets["a"].value.as_deref(), back.widgets["b"].error.as_str()), (Some("42"), "Timed out"));
 
         let old = Stamped { at: 1, data: MenuBarRequest::List };
         assert!(!old.is_fresh(REQUEST_FRESH_MS));

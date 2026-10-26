@@ -8,6 +8,7 @@ mod display_glue;
 mod menubar_glue;
 mod modules;
 mod mwb_glue;
+mod notch_glue;
 mod quick;
 mod scaling_glue;
 mod tray;
@@ -54,7 +55,12 @@ enum Cmd {
     },
     /// Open the settings window (edits config.json and fancyzones.json; a running
     /// PowerMac applies the changes within about a second).
-    Settings,
+    Settings {
+        /// Open on this page ("notch-widgets", "sound", "notch-shelf", ...;
+        /// the page's title also works).
+        #[arg(long)]
+        page: Option<String>,
+    },
     /// Open the FancyZones layout editor (edits fancyzones.json; a running
     /// PowerMac applies the changes within about a second).
     Editor {
@@ -305,7 +311,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Doctor { prompt } => doctor(&path, prompt),
-        Cmd::Settings => settings_ui::run(path),
+        Cmd::Settings { page } => settings_ui::run_with_page(path, page),
         Cmd::Clipboard => {
             let cfg = AppConfig::load_or_default(&path)?;
             clipboard_history::run_picker(clipboard_history::data_dir_for_config(&path), cfg.clipboard_history)

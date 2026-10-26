@@ -16,6 +16,33 @@
 //!   drop target and drag source.
 //! * Elsewhere: a no-op backend.
 //!
+//! ## Home view widgets (macOS)
+//!
+//! The expanded notch's Home view is a configurable widget platform:
+//! [`Config::widgets`] holds [`WidgetInstance`]s (a kind, a size class —
+//! small / medium / large, freely mixed — a page and kind-specific
+//! settings), [`Config::pages`] names the Home pages (switched with tabs /
+//! dots in the header or a two-finger swipe; the last page is remembered).
+//! [`widget_catalog`] describes every kind (sizes, settings schema) for a
+//! generic settings form, [`validate_settings`] / [`normalize_settings`]
+//! check and repair settings, [`Config::export_layout`] /
+//! [`Config::import_layout`] share layouts. Old `[{kind, enabled}]` configs
+//! are migrated when read. Kinds: Now Playing, Calendar, Weather, Battery,
+//! System Stats, Timer, Quick Controls, Note, Mirror, Script, xbar plugins,
+//! Web / JSON, Shortcuts, Launcher, Bluetooth batteries, Sound (host
+//! provided through [`StartOptions::sound`]), Reminders and World Clocks.
+//! Data-driven widgets are refreshed by a scheduler (interval, backoff,
+//! paused while the notch has been closed for a while unless they feed a
+//! live activity).
+//!
+//! The host's Info.plist needs `NSRemindersFullAccessUsageDescription` and
+//! `NSRemindersUsageDescription` for the Reminders widget (besides the
+//! calendar / camera keys); without them the widget says it isn't
+//! available and never prompts.
+//!
+//! The widget platform is macOS-only; on Windows the shelf has no Home
+//! view (the config types and catalog still compile and validate there).
+//!
 //! All AppKit work happens on the main thread through the main dispatch
 //! queue; the host must run `NSApplication` (or at least the main run loop)
 //! on the main thread, as the PowerMac tray app does.
@@ -37,6 +64,13 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub use store::{ItemKind, NewItem, ShelfItem};
+pub use widgets::catalog::{
+    default_settings, kind_info, normalize_settings, validate_settings, widget_catalog, Choice, FieldError, FieldType, SettingField, ShowIf, WidgetKindInfo,
+};
+pub use widgets::content::Content as WidgetContent;
+pub use widgets::instance::{export_layout, import_layout, new_id, ImportMode, ImportResult, WidgetInstance, WidgetPage, WidgetSize};
+pub use widgets::shortcuts::list_shortcuts;
+pub use widgets::sound::{AudioOutput, FakeSound, SoundFns, SoundProvider};
 pub use widgets::{
     Access, CalendarConfig, DefaultView, NowPlayingConfig, QuickAction, QuickToggle, StartOptions, TempUnit, View, WeatherConfig, WidgetConfig,
     WidgetKind, WidgetStatus,
@@ -57,7 +91,7 @@ pub enum ScreenMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", from = "ConfigRepr")]
 pub struct Config {
     /// Default: true on Macs whose built-in display has a notch.
     pub enabled: bool,
@@ -89,15 +123,17 @@ pub struct Config {
     /// Extra: briefly widen the notch with the battery level when the
     /// charger is connected or disconnected. Off by default.
     pub battery_indicator: bool,
-    /// Widgets of the Home view; the order is the display order. With no
-    /// widget enabled the notch only has the shelf (no view switcher).
-    pub widgets: Vec<WidgetConfig>,
+    /// Widget instances of the Home view, in display order (each on one of
+    /// `pages`). With no enabled widget the notch only has the shelf.
+    /// Older `[{kind, enabled}]` lists are migrated when read (see
+    /// [`widgets::instance`]).
+    pub widgets: Vec<WidgetInstance>,
+    /// Named Home pages; widgets refer to them by index.
+    pub pages: Vec<WidgetPage>,
     /// The view the notch opens in (a drag always opens the shelf).
     pub default_view: DefaultView,
-    pub weather: WeatherConfig,
-    pub calendar: CalendarConfig,
-    pub now_playing: NowPlayingConfig,
-    /// Show music / timer "live activities" beside the collapsed notch.
+    /// Show music / timer / widget "live activities" beside the collapsed
+    /// notch.
     pub live_activities: bool,
 }
 
@@ -118,12 +154,102 @@ impl Default for Config {
             panel_width: 620,
             show_clipboard: false,
             battery_indicator: false,
-            widgets: WidgetConfig::defaults(),
+            widgets: widgets::instance::default_instances(),
+            pages: WidgetPage::defaults(),
             default_view: DefaultView::Last,
+            live_activities: true,
+        }
+    }
+}
+
+/// What a config file may contain (current and older fields); turned into
+/// a [`Config`] with the widget list migrated.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ConfigRepr {
+    enabled: bool,
+    expand_on_hover: bool,
+    hover_delay_ms: u64,
+    collapse_delay_ms: u64,
+    expand_on_drag: bool,
+    expand_on_click: bool,
+    virtual_notch_on_non_notch_screens: bool,
+    screens: ScreenMode,
+    copy_temporary_files: bool,
+    remove_after_drag_out: bool,
+    haptics: bool,
+    panel_width: u32,
+    show_clipboard: bool,
+    battery_indicator: bool,
+    widgets: Option<serde_json::Value>,
+    pages: Vec<WidgetPage>,
+    default_view: DefaultView,
+    live_activities: bool,
+    // Global widget settings of older versions (now per instance).
+    weather: WeatherConfig,
+    calendar: CalendarConfig,
+    now_playing: NowPlayingConfig,
+}
+
+impl Default for ConfigRepr {
+    fn default() -> Self {
+        let c = Config::default();
+        ConfigRepr {
+            enabled: c.enabled,
+            expand_on_hover: c.expand_on_hover,
+            hover_delay_ms: c.hover_delay_ms,
+            collapse_delay_ms: c.collapse_delay_ms,
+            expand_on_drag: c.expand_on_drag,
+            expand_on_click: c.expand_on_click,
+            virtual_notch_on_non_notch_screens: c.virtual_notch_on_non_notch_screens,
+            screens: c.screens,
+            copy_temporary_files: c.copy_temporary_files,
+            remove_after_drag_out: c.remove_after_drag_out,
+            haptics: c.haptics,
+            panel_width: c.panel_width,
+            show_clipboard: c.show_clipboard,
+            battery_indicator: c.battery_indicator,
+            widgets: None,
+            pages: vec![],
+            default_view: c.default_view,
+            live_activities: c.live_activities,
             weather: WeatherConfig::default(),
             calendar: CalendarConfig::default(),
             now_playing: NowPlayingConfig::default(),
-            live_activities: true,
+        }
+    }
+}
+
+impl From<ConfigRepr> for Config {
+    fn from(r: ConfigRepr) -> Config {
+        use widgets::instance::{migrate_legacy, parse_widget_list, LegacySettings, WidgetList};
+        let legacy = LegacySettings { weather: r.weather, calendar: r.calendar, now_playing: r.now_playing };
+        let widgets = match &r.widgets {
+            None => widgets::instance::default_instances(),
+            Some(v) => match parse_widget_list(v) {
+                WidgetList::Instances(list) => list,
+                WidgetList::Legacy(old) => migrate_legacy(&old, &legacy),
+            },
+        };
+        Config {
+            enabled: r.enabled,
+            expand_on_hover: r.expand_on_hover,
+            hover_delay_ms: r.hover_delay_ms,
+            collapse_delay_ms: r.collapse_delay_ms,
+            expand_on_drag: r.expand_on_drag,
+            expand_on_click: r.expand_on_click,
+            virtual_notch_on_non_notch_screens: r.virtual_notch_on_non_notch_screens,
+            screens: r.screens,
+            copy_temporary_files: r.copy_temporary_files,
+            remove_after_drag_out: r.remove_after_drag_out,
+            haptics: r.haptics,
+            panel_width: r.panel_width,
+            show_clipboard: r.show_clipboard,
+            battery_indicator: r.battery_indicator,
+            widgets,
+            pages: if r.pages.is_empty() { WidgetPage::defaults() } else { r.pages },
+            default_view: r.default_view,
+            live_activities: r.live_activities,
         }
     }
 }
@@ -147,14 +273,75 @@ impl Config {
         store::AddOptions { copy_temporary_files: self.copy_temporary_files, temp_roots: store::default_temp_roots() }
     }
 
-    /// Enabled widget kinds in display order.
+    /// Kinds with at least one enabled instance, in display order.
     pub fn enabled_widgets(&self) -> Vec<WidgetKind> {
-        WidgetConfig::enabled_kinds(&self.widgets)
+        let mut v: Vec<WidgetKind> = vec![];
+        for w in self.widgets.iter().filter(|w| w.enabled && w.kind != WidgetKind::Unknown) {
+            if !v.contains(&w.kind) {
+                v.push(w.kind);
+            }
+        }
+        v
     }
 
     pub fn widget_enabled(&self, k: WidgetKind) -> bool {
-        self.enabled_widgets().contains(&k)
+        self.widgets.iter().any(|w| w.enabled && w.kind == k)
     }
+
+    /// Enabled instances of a kind.
+    pub fn instances_of(&self, k: WidgetKind) -> impl Iterator<Item = &WidgetInstance> {
+        self.widgets.iter().filter(move |w| w.enabled && w.kind == k)
+    }
+
+    /// The page names (at least one page).
+    pub fn page_list(&self) -> Vec<WidgetPage> {
+        if self.pages.is_empty() {
+            WidgetPage::defaults()
+        } else {
+            self.pages.clone()
+        }
+    }
+
+    /// Add an instance (on its page); returns its id.
+    pub fn add_widget(&mut self, w: WidgetInstance) -> String {
+        let id = w.id.clone();
+        self.widgets.push(w);
+        id
+    }
+
+    /// Remove the instance with `id`.
+    pub fn remove_widget(&mut self, id: &str) -> bool {
+        let n = self.widgets.len();
+        self.widgets.retain(|w| w.id != id);
+        n != self.widgets.len()
+    }
+
+    /// The instance with `id`, for editing.
+    pub fn widget_mut(&mut self, id: &str) -> Option<&mut WidgetInstance> {
+        self.widgets.iter_mut().find(|w| w.id == id)
+    }
+
+    /// Export the Home layout (pages + widgets) as JSON (secrets left out
+    /// unless `include_secrets`).
+    pub fn export_layout(&self, include_secrets: bool) -> String {
+        widgets::instance::export_layout(&self.page_list(), &self.widgets, include_secrets)
+    }
+
+    /// Import a layout exported with [`Config::export_layout`]; returns
+    /// warnings about what was fixed up.
+    pub fn import_layout(&mut self, json: &str, mode: ImportMode) -> Result<Vec<String>, String> {
+        let r = widgets::instance::import_layout(json, &self.page_list(), &self.widgets, mode)?;
+        self.pages = r.pages;
+        self.widgets = r.widgets;
+        Ok(r.warnings)
+    }
+}
+
+/// Run a Script / xbar / Web widget instance once and return what its card
+/// would show (for a "Test" button in the settings). Blocks for up to the
+/// instance's time limit; never asks for permissions. macOS only.
+pub fn run_widget_once(inst: &WidgetInstance) -> std::result::Result<widgets::content::Content, String> {
+    platform::run_widget_once(inst)
 }
 
 /// Whether this machine's built-in display has a notch (any thread).
@@ -173,6 +360,8 @@ pub(crate) enum Request {
     /// Diagnostics: "dropHover", "noDropHover", "peek".
     Debug(String),
     SetView(View),
+    /// Show Home page `n` (index into `Config::pages`).
+    SetPage(usize),
     RefreshWidgets,
 }
 
@@ -207,6 +396,15 @@ impl Signal {
     }
 }
 
+/// Sound widget commands for the provider thread.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) enum SoundCmd {
+    Device(String),
+    Volume(f32),
+    Mute(bool),
+}
+
 /// Requests from the UI to the provider threads.
 #[derive(Default)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -215,6 +413,27 @@ pub(crate) struct ProviderReqs {
     pub refresh_calendar: bool,
     pub refresh_weather: bool,
     pub calendar_ask: bool,
+    /// Instances to refresh now (ids; "*" = all).
+    pub refresh: Vec<String>,
+    pub reminders_ask: bool,
+    pub reminders_complete: Vec<String>,
+    pub sound: Vec<SoundCmd>,
+    /// (instance id, shortcut name) to run.
+    pub shortcuts: Vec<(String, String)>,
+}
+
+/// Where the panel is, for the refresh scheduler.
+#[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct Presence {
+    /// The panel is open (any view).
+    pub panel_open: bool,
+    /// The Home view is on screen.
+    pub home: bool,
+    /// Index of the Home page on screen (into `Config::pages`).
+    pub page: usize,
+    /// Unix time the panel last closed.
+    pub closed_at: f64,
 }
 
 pub(crate) struct Shared {
@@ -232,6 +451,8 @@ pub(crate) struct Shared {
     pub home_visible: AtomicBool,
     /// Demo data instead of the real providers (renders / previews).
     pub demo: AtomicBool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub presence: Mutex<Presence>,
 }
 
 impl Shared {
@@ -252,6 +473,11 @@ impl Shared {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn reqs(&self) -> MutexGuard<'_, ProviderReqs> {
         self.reqs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn presence(&self) -> Presence {
+        *self.presence.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn lock(&self) -> MutexGuard<'_, State> {
@@ -313,6 +539,7 @@ impl NotchShelf {
             signal: Signal::default(),
             home_visible: AtomicBool::new(false),
             demo: AtomicBool::new(false),
+            presence: Mutex::new(Presence { closed_at: widgets::unix_now() - 1e6, ..Default::default() }),
         });
         let backend = platform::Backend::start(shared.clone())?;
         Ok(Handle { shared, backend })
@@ -354,13 +581,44 @@ impl Handle {
         self.request(Request::SetView(view));
     }
 
-    /// Re-read the quick toggles and refetch calendar events and weather
-    /// (weather only if the cache is older than a few minutes).
+    /// Show Home page `page` (index into [`Config::pages`]); remembered.
+    pub fn set_page(&self, page: usize) {
+        self.request(Request::SetPage(page));
+    }
+
+    /// Re-run one widget instance (Script / xbar / Web / Bluetooth /
+    /// Reminders / Sound) now.
+    pub fn refresh_widget(&self, id: &str) {
+        self.shared.reqs().refresh.push(id.to_string());
+        self.shared.signal.notify();
+    }
+
+    /// Latest content of a Script / xbar / Web instance (for a preview in
+    /// the settings window): `Ok(content)`, `Err(error)`, or `None` while
+    /// it hasn't run yet.
+    pub fn widget_content(&self, id: &str) -> Option<Result<widgets::content::Content, String>> {
+        match self.shared.data().content(id)? {
+            widgets::content::Status::Ready { content, .. } => Some(Ok(content.clone())),
+            widgets::content::Status::Error { message, .. } => Some(Err(message.clone())),
+            widgets::content::Status::Loading => None,
+        }
+    }
+
+    /// Reminder list names (for the Reminders widget's settings; empty
+    /// until access was granted and the widget fetched once).
+    pub fn reminder_lists(&self) -> Vec<String> {
+        self.shared.data().reminders.lists.clone()
+    }
+
+    /// Re-read the quick toggles and refetch calendar events, weather and
+    /// every data-driven widget (weather only if the cache is older than a
+    /// few minutes).
     pub fn refresh_widgets(&self) {
         {
             let mut r = self.shared.reqs.lock().unwrap_or_else(|e| e.into_inner());
             r.refresh_calendar = true;
             r.refresh_weather = true;
+            r.refresh.push("*".into());
         }
         self.shared.signal.notify();
         self.request(Request::RefreshWidgets);
@@ -369,7 +627,7 @@ impl Handle {
     /// Permission / source states of the widgets (for a settings page).
     pub fn widget_status(&self) -> WidgetStatus {
         let d = self.shared.data();
-        WidgetStatus { calendar: d.calendar_access, camera: d.camera_access, media_source: d.now_playing.as_ref().map(|n| n.source) }
+        WidgetStatus { calendar: d.calendar_access, camera: d.camera_access, reminders: d.reminders.access, media_source: d.now_playing.as_ref().map(|n| n.source) }
     }
 
     /// Current shelf contents, in display order.
@@ -482,35 +740,70 @@ mod tests {
         let c: Config = serde_json::from_str(old).unwrap();
         assert!(c.enabled && !c.expand_on_hover && c.battery_indicator);
         assert_eq!((c.hover_delay_ms, c.panel_width, c.screens), (300, 700, ScreenMode::All));
-        assert_eq!(c.widgets, WidgetConfig::defaults());
+        assert_eq!(c.widgets, widgets::instance::default_instances());
+        assert_eq!(c.pages, WidgetPage::defaults());
         assert_eq!(c.default_view, DefaultView::Last);
-        assert!(c.live_activities && !c.now_playing.use_applescript);
-        assert_eq!(c.calendar.days, 2);
-        assert!(c.weather.location.is_empty());
+        assert!(c.live_activities);
         assert_eq!(c.enabled_widgets(), vec![WidgetKind::NowPlaying, WidgetKind::Battery, WidgetKind::Timer, WidgetKind::QuickToggles]);
-        // Round trip with the new fields.
+        // Round trip.
         let v = serde_json::to_value(&c).unwrap();
-        for k in ["widgets", "defaultView", "weather", "calendar", "nowPlaying", "liveActivities"] {
+        for k in ["widgets", "pages", "defaultView", "liveActivities"] {
             assert!(v.get(k).is_some(), "{k}");
         }
-        assert_eq!(v["widgets"][0], serde_json::json!({"kind": "nowPlaying", "enabled": true}));
-        assert_eq!(v["nowPlaying"]["useApplescript"], false);
+        for k in ["weather", "calendar", "nowPlaying"] {
+            assert!(v.get(k).is_none(), "{k} moved into the instances");
+        }
+        assert_eq!(v["widgets"][0]["kind"], "nowPlaying");
+        assert_eq!(v["widgets"][0]["size"], "medium");
         let back: Config = serde_json::from_value(v).unwrap();
         assert_eq!(back, c);
-        // New fields, partially given; unknown widget kinds don't break loading.
-        let newer = r#"{"widgets":[{"kind":"weather","enabled":true},{"kind":"teleporter","enabled":true},{"kind":"timer","enabled":false}],
-            "defaultView":"shelf","weather":{"location":"Berlin","units":"fahrenheit"},"calendar":{"calendars":["Work"]},
-            "nowPlaying":{"useApplescript":true},"liveActivities":false}"#;
-        let n: Config = serde_json::from_str(newer).unwrap();
-        assert_eq!(n.enabled_widgets(), vec![WidgetKind::Weather]);
-        assert!(n.widget_enabled(WidgetKind::Weather) && !n.widget_enabled(WidgetKind::Timer));
-        assert_eq!(n.default_view, DefaultView::Shelf);
-        assert_eq!(n.weather.units, TempUnit::Fahrenheit);
-        assert_eq!((n.calendar.days, n.calendar.calendars.clone()), (2, vec!["Work".to_string()]));
-        assert!(n.now_playing.use_applescript && !n.live_activities);
         // An empty list means no widgets (shelf only).
         let none: Config = serde_json::from_str(r#"{"widgets":[]}"#).unwrap();
         assert!(none.enabled_widgets().is_empty());
+    }
+
+    #[test]
+    fn kind_based_widget_list_migrates_losslessly() {
+        // The 1.0 format: kinds with on/off and global widget settings.
+        let v1 = r#"{"widgets":[{"kind":"weather","enabled":true},{"kind":"teleporter","enabled":true},{"kind":"timer","enabled":false},
+            {"kind":"calendar","enabled":true},{"kind":"nowPlaying","enabled":true},{"kind":"note","enabled":false}],
+            "defaultView":"shelf","weather":{"location":"Berlin","units":"fahrenheit"},"calendar":{"days":4,"calendars":["Work"]},
+            "nowPlaying":{"useApplescript":true},"liveActivities":false}"#;
+        let c: Config = serde_json::from_str(v1).unwrap();
+        let kinds: Vec<(WidgetKind, bool)> = c.widgets.iter().map(|w| (w.kind, w.enabled)).collect();
+        assert_eq!(kinds, vec![(WidgetKind::Weather, true), (WidgetKind::Timer, false), (WidgetKind::Calendar, true), (WidgetKind::NowPlaying, true), (WidgetKind::Note, false)]);
+        assert_eq!(c.enabled_widgets(), vec![WidgetKind::Weather, WidgetKind::Calendar, WidgetKind::NowPlaying]);
+        assert!(c.widget_enabled(WidgetKind::Weather) && !c.widget_enabled(WidgetKind::Timer));
+        let w = c.instances_of(WidgetKind::Weather).next().unwrap();
+        assert_eq!((w.settings["location"].as_str(), w.settings["units"].as_str()), (Some("Berlin"), Some("fahrenheit")));
+        let cal = c.instances_of(WidgetKind::Calendar).next().unwrap();
+        assert_eq!(cal.settings["days"], 4);
+        assert_eq!(cal.settings["calendars"], serde_json::json!(["Work"]));
+        assert_eq!(c.instances_of(WidgetKind::NowPlaying).next().unwrap().settings["useApplescript"], true);
+        assert_eq!(c.default_view, DefaultView::Shelf);
+        assert!(!c.live_activities);
+        // Saving and loading again is stable (same ids, same settings).
+        let saved = serde_json::to_string(&c).unwrap();
+        let again: Config = serde_json::from_str(&saved).unwrap();
+        assert_eq!(again, c);
+        let reloaded: Config = serde_json::from_str(v1).unwrap();
+        assert_eq!(reloaded, c, "migration is deterministic");
+    }
+
+    #[test]
+    fn config_widget_helpers_and_layout_io() {
+        let mut c = Config { pages: vec![WidgetPage::named("Work"), WidgetPage::named("Dev")], ..Config::default() };
+        let id = c.add_widget(WidgetInstance::new(WidgetKind::WorldClock).on_page(1));
+        c.widget_mut(&id).unwrap().size = WidgetSize::Large;
+        assert_eq!(c.instances_of(WidgetKind::WorldClock).count(), 1);
+        let text = c.export_layout(false);
+        let mut d = Config { widgets: vec![], ..Config::default() };
+        let warnings = d.import_layout(&text, ImportMode::Replace).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(d.pages, c.pages);
+        assert_eq!(d.widgets.len(), c.widgets.len());
+        assert!(c.remove_widget(&id) && !c.remove_widget(&id));
+        assert_eq!(Config { pages: vec![], ..Config::default() }.page_list().len(), 1);
     }
 
     #[test]

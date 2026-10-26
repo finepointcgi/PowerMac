@@ -187,3 +187,190 @@ pub fn write_stopped() {
         let _ = bridge::write(&p, AUDIO_STATUS_FILE, &st);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The Notch Shelf's Sound widget
+
+/// Audio control for the Notch Shelf's Sound widget.
+///
+/// The shelf calls this on its provider thread. Reading never needs
+/// `RUNNING`: devices, the default output and its level come from a one-shot
+/// CoreAudio snapshot (cached for a moment, so one widget refresh asks
+/// once). Changes go through the running Sound module when there is one (so
+/// its auto-switch rules know the switch was manual); `RUNNING` is only
+/// tried, and when it's busy (the config watcher may hold it while it waits
+/// for the main thread) the change is applied from a short-lived thread
+/// instead of waiting here. Without the module, the default device is set
+/// directly and the volume / mute through `osascript`.
+pub(crate) struct NotchSound {
+    cache: Mutex<Option<(Instant, Vec<audio_control::AudioDevice>)>>,
+}
+
+/// How long a device snapshot is reused.
+const SOUND_CACHE: Duration = Duration::from_millis(400);
+
+/// What the Sound widget asked for.
+#[derive(Clone, Debug)]
+enum SoundChange {
+    Device(String),
+    Volume(f32),
+    Mute(bool),
+}
+
+pub(crate) fn notch_sound() -> std::sync::Arc<dyn notch_shelf::SoundProvider> {
+    std::sync::Arc::new(NotchSound { cache: Mutex::new(None) })
+}
+
+impl NotchSound {
+    fn devices(&self) -> Vec<audio_control::AudioDevice> {
+        let mut c = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((at, list)) = c.as_ref() {
+            if at.elapsed() < SOUND_CACHE {
+                return list.clone();
+            }
+        }
+        let list = audio_control::list_devices(DeviceKind::Output).unwrap_or_else(|e| {
+            log::debug!("sound (notch): {e:#}");
+            Vec::new()
+        });
+        *c = Some((Instant::now(), list.clone()));
+        list
+    }
+
+    fn default_device(&self) -> Option<audio_control::AudioDevice> {
+        self.devices().into_iter().find(|d| d.is_default)
+    }
+
+    fn invalidate(&self) {
+        *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+
+    fn change(&self, ch: SoundChange) -> Result<(), String> {
+        let target = match &ch {
+            SoundChange::Device(_) => None,
+            _ => Some(self.default_device().ok_or("No output device")?.uid),
+        };
+        self.invalidate();
+        // Fast path: RUNNING is free.
+        if let Ok(guard) = RUNNING.try_lock() {
+            return match guard.as_ref().and_then(|r| r.audio.as_ref()) {
+                Some(h) => apply_with_handle(h, &ch, target.as_deref()).map_err(|e| format!("{e:#}")),
+                None => {
+                    drop(guard);
+                    apply_without_module(&ch)
+                }
+            };
+        }
+        // RUNNING is busy: never wait for it on this thread.
+        std::thread::spawn(move || {
+            let guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+            let r = match guard.as_ref().and_then(|r| r.audio.as_ref()) {
+                Some(h) => apply_with_handle(h, &ch, target.as_deref()).map_err(|e| format!("{e:#}")),
+                None => {
+                    drop(guard);
+                    apply_without_module(&ch)
+                }
+            };
+            if let Err(e) = r {
+                log::info!("sound (notch): {e}");
+            }
+        });
+        Ok(())
+    }
+}
+
+fn apply_with_handle(h: &audio_control::Handle, ch: &SoundChange, default_uid: Option<&str>) -> anyhow::Result<()> {
+    let r = match ch {
+        SoundChange::Device(uid) => h.set_default_output(uid),
+        SoundChange::Volume(v) => h.set_device_volume(default_uid.unwrap_or_default(), *v),
+        SoundChange::Mute(m) => h.set_device_mute(default_uid.unwrap_or_default(), *m),
+    };
+    refresh_soon();
+    r
+}
+
+/// The Sound module is off: set the default directly; volume and mute of
+/// the default output through AppleScript's `set volume` (no prompt).
+fn apply_without_module(ch: &SoundChange) -> Result<(), String> {
+    match ch {
+        SoundChange::Device(uid) => audio_control::set_default_device(DeviceKind::Output, uid).map_err(|e| format!("{e:#}")),
+        SoundChange::Volume(v) => osascript_volume(&format!("set volume output volume {}", (v.clamp(0.0, 1.0) * 100.0).round() as u32)),
+        SoundChange::Mute(m) => osascript_volume(&format!("set volume output muted {m}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn osascript_volume(script: &str) -> Result<(), String> {
+    let out = std::process::Command::new("/usr/bin/osascript").args(["-e", script]).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn osascript_volume(_script: &str) -> Result<(), String> {
+    Err("Turn on Sound in PowerMac to change the volume here".into())
+}
+
+impl notch_shelf::SoundProvider for NotchSound {
+    fn outputs(&self) -> Vec<notch_shelf::AudioOutput> {
+        self.devices()
+            .into_iter()
+            .map(|d| {
+                let mut o = notch_shelf::AudioOutput::new(&d.uid, &d.name);
+                if d.transport.is_bluetooth() && notch_shelf::widgets::sound::guess_symbol(&d.name) == "hifispeaker.fill" {
+                    o.symbol = "headphones".into();
+                }
+                o
+            })
+            .collect()
+    }
+
+    fn default_output(&self) -> Option<String> {
+        self.default_device().map(|d| d.uid)
+    }
+
+    fn set_default_output(&self, id: &str) -> Result<(), String> {
+        self.change(SoundChange::Device(id.to_string()))
+    }
+
+    fn volume(&self) -> Option<f32> {
+        self.default_device().and_then(|d| d.volume)
+    }
+
+    fn set_volume(&self, v: f32) -> Result<(), String> {
+        self.change(SoundChange::Volume(v.clamp(0.0, 1.0)))
+    }
+
+    fn muted(&self) -> Option<bool> {
+        self.default_device().and_then(|d| d.muted)
+    }
+
+    fn set_muted(&self, muted: bool) -> Result<(), String> {
+        self.change(SoundChange::Mute(muted))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notch_shelf::SoundProvider;
+
+    #[test]
+    fn notch_sound_reads_without_running_and_caches() {
+        let s = NotchSound { cache: Mutex::new(None) };
+        // Whatever the machine has (CI may have no devices): consistent.
+        let outs = s.outputs();
+        if let Some(def) = s.default_output() {
+            assert!(outs.iter().any(|o| o.id == def));
+        }
+        let t = s.cache.lock().unwrap().as_ref().map(|(t, _)| *t);
+        let _ = s.volume();
+        let t2 = s.cache.lock().unwrap().as_ref().map(|(t, _)| *t);
+        assert_eq!(t, t2, "reused within the cache window");
+        s.invalidate();
+        assert!(s.cache.lock().unwrap().is_none());
+    }
+}

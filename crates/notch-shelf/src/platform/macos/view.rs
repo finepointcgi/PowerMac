@@ -104,7 +104,10 @@ define_class!(
         fn scroll_wheel(&self, e: &NSEvent) {
             let (dx, dy) = (e.scrollingDeltaX(), e.scrollingDeltaY());
             let precise = e.hasPreciseScrollingDeltas();
-            app::with(|a| a.on_scroll(self.idx(), dx, dy, precise));
+            // NSEventPhaseBegan = 1; a non-zero momentum phase is inertia.
+            let phase: usize = unsafe { msg_send![e, phase] };
+            let momentum: usize = unsafe { msg_send![e, momentumPhase] };
+            app::with(|a| a.on_scroll(self.idx(), dx, dy, precise, phase & 1 != 0, momentum != 0));
         }
 
         // NSDraggingDestination
