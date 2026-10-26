@@ -20,3 +20,9 @@ notch-shelf = { path = "../notch-shelf" }
 color-picker = { path = "../color-picker" }
 text-extractor = { path = "../text-extractor" }
 window-switcher = { path = "../window-switcher" }
+display-scaling = { path = "../display-scaling" }
+audio-control = { path = "../audio-control" }
+battery-limit = { path = "../battery-limit" }
+dock-previews = { path = "../dock-previews" }
+text-expander = { path = "../text-expander" }
+menubar-manager = { path = "../menubar-manager" }

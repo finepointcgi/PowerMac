@@ -87,7 +87,10 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
 
     if changed(old.map(|o| &o.keyboard_manager), &new.keyboard_manager) {
         let k = &new.keyboard_manager;
-        match (k.enabled, running.keyboard.as_ref()) {
+        // Paste as plain text and the Caps Lock key work without the
+        // remapping switch (`enabled`); the engine checks each part.
+        let wanted = k.enabled || k.paste_plain_text.enabled || k.hyper_key.is_on();
+        match (wanted, running.keyboard.as_ref()) {
             (true, Some(h)) => {
                 if let Err(e) = h.update(k.clone()) {
                     log::error!("keyboard manager: {e:#}");
@@ -95,7 +98,12 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
             }
             (true, None) => match keyboard_manager::KeyboardManager::start(k.clone()) {
                 Ok(h) => {
-                    log::info!("keyboard manager: running");
+                    log::info!("keyboard manager: running{}{}",
+                        if k.enabled { "" } else { " (remaps off)" },
+                        if k.hyper_key.is_on() { ", Caps Lock remapped" } else { "" });
+                    for w in k.validate() {
+                        log::warn!("keyboard manager: {w}");
+                    }
                     running.keyboard = Some(h);
                 }
                 Err(e) => log::error!("keyboard manager: {e:#}"),
@@ -159,6 +167,193 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
     }
     if changed(old.map(|o| &o.window_switcher), &new.window_switcher) {
         apply_window_switcher(running, &new.window_switcher);
+    }
+    if changed(old.map(|o| &o.display_scaling), &new.display_scaling) {
+        apply_display_scaling(running, &new.display_scaling, old.is_none());
+    }
+    if changed(old.map(|o| &o.audio), &new.audio) {
+        apply_audio(running, &new.audio);
+    }
+    // The battery controller always runs (status only while the limit is
+    // off) so the tray and the settings window can show the battery.
+    if changed(old.map(|o| &o.battery_limit), &new.battery_limit) {
+        apply_battery(running, &new.battery_limit);
+    }
+    if changed(old.map(|o| &o.dock_previews), &new.dock_previews) {
+        apply_dock_previews(running, &new.dock_previews);
+    }
+    if changed(old.map(|o| &o.text_expander), &new.text_expander) {
+        apply_text_expander(running, &new.text_expander);
+    }
+    if changed(old.map(|o| &o.menu_bar), &new.menu_bar) {
+        apply_menu_bar(running, &new.menu_bar);
+    }
+}
+
+fn apply_menu_bar(running: &mut Running, cfg: &menubar_manager::Config) {
+    match (cfg.enabled, running.menubar.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("menu bar: settings applied");
+        }
+        (true, None) => match menubar_manager::MenuBarManager::start(cfg.clone()) {
+            Ok(h) => {
+                log::info!("menu bar: running");
+                if !menubar_manager::permissions().accessibility {
+                    log::info!("menu bar: without Accessibility, items can't be moved from Settings (Cmd-drag them instead)");
+                }
+                running.menubar = Some(std::sync::Arc::new(h));
+                crate::menubar_glue::start_once();
+            }
+            Err(e) => log::error!("menu bar: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.menubar.take() {
+                h.stop();
+            }
+            crate::menubar_glue::write_stopped();
+            log::info!("menu bar: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_display_scaling(running: &mut Running, cfg: &display_scaling::Config, startup: bool) {
+    let state = data_dir().join(display_scaling::STATE_FILE);
+    match (cfg.enabled, running.scaling.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("display scaling: settings applied");
+        }
+        (true, None) => match display_scaling::DisplayScaling::start_with_state_file(cfg.clone(), Some(state)) {
+            Ok(h) => {
+                let hidpi = cfg.displays.values().filter(|d| d.hidpi_enabled).count();
+                log::info!("display scaling: running ({hidpi} display{} with HiDPI)", if hidpi == 1 { "" } else { "s" });
+                running.scaling = Some(h);
+                crate::scaling_glue::start_once();
+            }
+            Err(e) => log::error!("display scaling: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.scaling.take() {
+                h.stop(); // removes virtual displays, restores modes
+            }
+            crate::scaling_glue::write_stopped();
+            log::info!("display scaling: stopped");
+        }
+        (false, None) => {
+            // A previous run crashed with HiDPI on or a mode unconfirmed:
+            // starting undoes that (the state file is gone after a clean stop).
+            if startup && state.exists() {
+                log::info!("display scaling: undoing what a previous run left behind");
+                match display_scaling::DisplayScaling::start_with_state_file(display_scaling::Config::default(), Some(state)) {
+                    Ok(h) => h.stop(),
+                    Err(e) => log::warn!("display scaling: {e:#}"),
+                }
+            }
+        }
+    }
+}
+
+fn apply_audio(running: &mut Running, cfg: &audio_control::Config) {
+    match (cfg.enabled, running.audio.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("sound: settings applied");
+        }
+        (true, None) => match audio_control::AudioControl::start(cfg.clone()) {
+            Ok(h) => {
+                let rules = cfg.rules.outputs.len() + cfg.rules.inputs.len() + cfg.block_auto_switch_to.len();
+                log::info!("sound: running ({rules} device rule{}{})", if rules == 1 { "" } else { "s" },
+                    if cfg.per_app_volume { ", per-app volume" } else { "" });
+                if cfg.per_app_volume && !audio_control::per_app_volume_supported() {
+                    log::warn!("sound: per-app volume needs macOS 14.4 or later");
+                }
+                crate::audio_glue::attach(&h);
+                running.audio = Some(h);
+                crate::audio_glue::start_once();
+            }
+            Err(e) => log::error!("sound: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.audio.take() {
+                h.stop(); // removes the per-app taps
+            }
+            crate::audio_glue::write_stopped();
+            log::info!("sound: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_battery(running: &mut Running, cfg: &battery_limit::Config) {
+    match running.battery.as_ref() {
+        Some(h) => {
+            h.update(cfg.clone());
+            log::info!("battery: settings applied (limit {})", if cfg.enabled { format!("{} %", cfg.normalized().limit_percent) } else { "off".into() });
+        }
+        None => match battery_limit::BatteryLimit::start(cfg.clone()) {
+            Ok(h) => {
+                log::info!("battery: running (limit {})", if cfg.enabled { format!("{} %", cfg.normalized().limit_percent) } else { "off, status only".into() });
+                running.battery = Some(h);
+                crate::battery_glue::start_once();
+            }
+            Err(e) => log::error!("battery: {e:#}"),
+        },
+    }
+}
+
+fn apply_dock_previews(running: &mut Running, cfg: &dock_previews::Config) {
+    match (cfg.enabled && dock_previews::SUPPORTED, running.dock.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("dock previews: settings applied");
+        }
+        (true, None) => match dock_previews::DockPreviews::start(cfg.clone()) {
+            Ok(h) => {
+                let p = dock_previews::permissions();
+                log::info!("dock previews: running");
+                if !p.accessibility {
+                    log::warn!("dock previews: need Accessibility permission; they start working as soon as it's granted");
+                }
+                if !p.screen_recording {
+                    log::info!("dock previews: no Screen Recording permission, showing app icons and titles instead of thumbnails");
+                }
+                running.dock = Some(h);
+            }
+            Err(e) => log::error!("dock previews: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.dock.take() {
+                h.stop();
+            }
+            log::info!("dock previews: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_text_expander(running: &mut Running, cfg: &text_expander::Config) {
+    match (cfg.enabled, running.expander.as_ref()) {
+        (true, Some(h)) => match h.update(cfg.clone()) {
+            Ok(()) => log::info!("text expander: settings applied"),
+            Err(e) => log::error!("text expander: {e:#}"),
+        },
+        (true, None) => match text_expander::TextExpander::start(cfg.clone()) {
+            Ok(h) => {
+                let n = cfg.snippets.iter().filter(|s| s.enabled).count();
+                log::info!("text expander: running ({n} snippet{})", if n == 1 { "" } else { "s" });
+                running.expander = Some(h);
+            }
+            Err(e) => log::error!("text expander: {e:#} (it needs Accessibility permission)"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.expander.take() {
+                h.stop();
+            }
+            log::info!("text expander: stopped");
+        }
+        (false, None) => {}
     }
 }
 
@@ -278,7 +473,7 @@ fn apply_notch_shelf(running: &mut Running, cfg: &notch_shelf::Config) {
             h.update(cfg.clone());
             log::info!("notch shelf: settings applied");
         }
-        (true, None) => match notch_shelf::NotchShelf::start(cfg.clone(), data_dir()) {
+        (true, None) => match notch_shelf::NotchShelf::start_with(cfg.clone(), data_dir(), crate::quick::notch_controls()) {
             Ok(h) => {
                 log::info!("notch shelf: running ({})", if notch_shelf::has_notch() { "notch" } else { "no notch on this Mac" });
                 running.shelf = Some(h);

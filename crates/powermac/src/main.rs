@@ -1,11 +1,16 @@
 //! PowerMac: PowerToys-style utilities (Mouse Without Borders, FancyZones,
 //! Awake, Keyboard Manager, Color Picker, ...) in one cross-platform app.
 
+mod audio_glue;
+mod battery_glue;
 mod children;
 mod clipboard;
 mod display_glue;
+mod menubar_glue;
 mod modules;
 mod mwb_glue;
+mod quick;
+mod scaling_glue;
 mod tray;
 
 use std::sync::{Arc, Mutex};
@@ -104,6 +109,22 @@ enum Cmd {
         #[arg(long)]
         dir: std::path::PathBuf,
     },
+    /// Resize pictures with Image Resizer: opens its window, or resizes
+    /// right away with a size option (see `powermac resize --help`; the
+    /// Finder Quick Action runs this).
+    #[command(disable_help_flag = true)]
+    Resize {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Finder basics: open-terminal, open-editor, copy-path, show-hidden /
+    /// hide-hidden / toggle-hidden, volumes, eject-all, who-uses, apps (run
+    /// `powermac finder` for the details; the Quick Actions run this).
+    #[command(disable_help_flag = true)]
+    Finder {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 /// Running modules, kept globally so the Ctrl+C handler can shut them down
@@ -123,6 +144,14 @@ pub(crate) struct Running {
     pub(crate) color: Option<color_picker::Handle>,
     pub(crate) ocr: Option<text_extractor::Handle>,
     pub(crate) switcher: Option<window_switcher::Handle>,
+    pub(crate) scaling: Option<display_scaling::Handle>,
+    pub(crate) audio: Option<audio_control::Handle>,
+    pub(crate) battery: Option<battery_limit::Handle>,
+    pub(crate) dock: Option<dock_previews::Handle>,
+    pub(crate) expander: Option<text_expander::Handle>,
+    /// Shared so that listing / moving items (which wait for the main
+    /// thread) can run without holding `RUNNING`.
+    pub(crate) menubar: Option<Arc<menubar_manager::Handle>>,
 }
 
 impl Running {
@@ -140,6 +169,11 @@ impl Running {
             || self.color.is_some()
             || self.ocr.is_some()
             || self.switcher.is_some()
+            || self.scaling.is_some()
+            || self.audio.is_some()
+            || self.dock.is_some()
+            || self.expander.is_some()
+            || self.menubar.is_some()
     }
 }
 
@@ -153,6 +187,11 @@ pub(crate) fn edit_config(f: impl FnOnce(&mut AppConfig)) -> Result<()> {
 }
 
 pub(crate) static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+/// The config file as it is on disk now (defaults if it can't be read).
+pub(crate) fn current_config() -> AppConfig {
+    CONFIG_PATH.get().and_then(|p| AppConfig::load_or_default(p).ok()).unwrap_or_default()
+}
 
 pub(crate) fn shutdown() {
     if let Some(mut r) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -173,7 +212,10 @@ pub(crate) fn shutdown() {
             m.stop();
         }
         if let Some(k) = r.keyboard.take() {
-            k.stop();
+            k.stop(); // also puts the Caps Lock (hidutil) mapping back
+        }
+        if let Some(t) = r.expander.take() {
+            t.stop();
         }
         if let Some(mut m) = r.mouse_tuning.take() {
             m.stop(); // restores the pointer settings
@@ -190,6 +232,24 @@ pub(crate) fn shutdown() {
         }
         if let Some(w) = r.switcher.take() {
             w.stop();
+        }
+        if let Some(d) = r.dock.take() {
+            d.stop();
+        }
+        if let Some(m) = r.menubar.take() {
+            m.stop(); // short separators again: every icon visible
+            menubar_glue::write_stopped();
+        }
+        if let Some(s) = r.scaling.take() {
+            s.stop(); // removes the virtual HiDPI displays, restores modes
+            scaling_glue::write_stopped();
+        }
+        if let Some(a) = r.audio.take() {
+            a.stop(); // removes the per-app volume taps
+            audio_glue::write_stopped();
+        }
+        if let Some(b) = r.battery.take() {
+            b.stop(); // gives charging back to the firmware
         }
         drop(r.color.take());
         drop(r.ocr.take());
@@ -263,6 +323,27 @@ fn main() -> Result<()> {
             Some(path.with_file_name("rename-undo.json")),
         ),
         Cmd::New { dir } => file_tools::newplus_ui::run_new_window_with(dir, Some(pm_config::file_tools_path_for(&path))),
+        Cmd::Resize { args } => {
+            // (-h is --height here)
+            if args.is_empty() || args.iter().any(|a| a == "--help") {
+                println!("{}", file_tools::resize::cli::USAGE);
+                return Ok(());
+            }
+            let code = file_tools::resize::cli::run_with(&args, Some(&pm_config::file_tools_path_for(&path)))?;
+            std::process::exit(code);
+        }
+        Cmd::Finder { args } => {
+            if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+                println!("{}", file_tools::finder::USAGE);
+                return Ok(());
+            }
+            let cfg = file_tools::Config::load_from(&pm_config::file_tools_path_for(&path));
+            let out = file_tools::finder::run_cli_with(&args, &cfg.finder)?;
+            if !out.is_empty() {
+                println!("{out}");
+            }
+            Ok(())
+        }
         Cmd::Editor { monitor } => settings_ui::run_editor(path, monitor),
         Cmd::Awake { display_on, time_limit, expire_at, pid } => {
             let mode = match (time_limit, expire_at) {
@@ -429,17 +510,28 @@ fn doctor(path: &std::path::Path, prompt: bool) -> Result<()> {
     println!("config: {} ({})", path.display(), if path.exists() { "exists" } else { "missing" });
     let cfg = AppConfig::load_or_default(path)?;
     println!("modules: mwb={} fancyzones={} awake={} scroll={} mouse-tuning={} keyboard={} displays={} \
-              clipboard={} shelf={} color-picker={} text-extractor={} window-switcher={}",
+              clipboard={} shelf={} color-picker={} text-extractor={} window-switcher={} display-scaling={} \
+              sound={} battery-limit={} dock-previews={} text-expander={} menu-bar={}",
         cfg.mwb.enabled, cfg.fancyzones.enabled, cfg.awake.enabled, cfg.scroll_reverser.enabled,
         cfg.mouse_tuning.enabled, cfg.keyboard_manager.enabled, cfg.display_control.enabled,
         cfg.clipboard_history.enabled, cfg.notch_shelf.enabled, cfg.color_picker.enabled,
-        cfg.text_extractor.enabled, cfg.window_switcher.enabled);
+        cfg.text_extractor.enabled, cfg.window_switcher.enabled, cfg.display_scaling.enabled,
+        cfg.audio.enabled, cfg.battery_limit.enabled, cfg.dock_previews.enabled, cfg.text_expander.enabled, cfg.menu_bar.enabled);
+    println!("caps lock: {:?}", cfg.keyboard_manager.hyper_key.mode);
     println!("machine name: {}", cfg.mwb.settings.effective_machine_name());
     println!("mwb key valid: {}", mwb::crypto::is_key_valid(&cfg.mwb.settings.key));
     let backend: Arc<dyn pm_input::InputBackend> = pm_input::backend()?;
     println!("input permissions: {}", backend.has_permissions(prompt));
     println!("screen recording: {:?}", text_extractor::screen_recording_permission());
-    println!("finder quick actions installed: {}", file_tools::finder_integration_installed());
+    println!("finder quick actions installed: {}{}", file_tools::finder_integration_installed(),
+        if file_tools::finder_integration_needs_update() { " (some are missing: reinstall them in Settings → File Tools)" } else { "" });
+    println!("hidpi (virtual displays) supported: {}", display_scaling::hidpi_supported());
+    println!("per-app volume supported: {} (audio capture permission: {:?})",
+        audio_control::per_app_volume_supported(), audio_control::capture_permission());
+    let b = battery_limit::read_battery();
+    if b.has_battery {
+        println!("battery: {}% (helper installed: {})", b.percent.unwrap_or(0), battery_limit::helper_installed());
+    }
     for (i, s) in backend.screens()?.iter().enumerate() {
         println!("screen {i}: {}x{} at ({}, {})", s.width(), s.height(), s.left, s.top);
     }

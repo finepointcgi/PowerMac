@@ -5,6 +5,7 @@
 //! Every section has a serde default, so config files written by older
 //! versions (without the newer sections) keep loading.
 
+pub mod bridge;
 pub mod login;
 
 use std::path::{Path, PathBuf};
@@ -52,6 +53,19 @@ pub struct AppConfig {
     pub text_extractor: Module<text_extractor::Config>,
     /// Alt+Tab-style window switcher (has its own `enabled`).
     pub window_switcher: window_switcher::Config,
+    /// Display modes, HiDPI on non-Retina displays, custom resolutions
+    /// (has its own `enabled`; off by default).
+    pub display_scaling: display_scaling::Config,
+    /// Default-device rules and per-app volume (has its own `enabled`).
+    pub audio: audio_control::Config,
+    /// Battery charge limit (has its own `enabled`; off by default).
+    pub battery_limit: battery_limit::Config,
+    /// Window previews on Dock icons (has its own `enabled`).
+    pub dock_previews: dock_previews::Config,
+    /// Snippets typed from abbreviations (has its own `enabled`; off by default).
+    pub text_expander: text_expander::Config,
+    /// Hide menu bar icons behind a chevron (has its own `enabled`; off by default).
+    pub menu_bar: menubar_manager::Config,
 }
 
 impl Default for AppConfig {
@@ -71,6 +85,12 @@ impl Default for AppConfig {
             color_picker: Module { enabled: color_picker::SUPPORTED, settings: color_picker::Config::default() },
             text_extractor: Module { enabled: text_extractor::SUPPORTED, settings: text_extractor::Config::default() },
             window_switcher: window_switcher::Config::default(),
+            display_scaling: display_scaling::Config::default(),
+            audio: audio_control::Config::default(),
+            battery_limit: battery_limit::Config::default(),
+            dock_previews: dock_previews::Config::default(),
+            text_expander: text_expander::Config::default(),
+            menu_bar: menubar_manager::Config::default(),
         }
     }
 }
@@ -388,6 +408,15 @@ mod tests {
         assert_eq!(c.color_picker.settings, d.color_picker.settings);
         assert_eq!(c.text_extractor.settings, d.text_extractor.settings);
         assert_eq!(c.window_switcher, d.window_switcher);
+        assert_eq!(c.display_scaling, d.display_scaling);
+        assert!(!c.display_scaling.enabled && !c.battery_limit.enabled && !c.text_expander.enabled);
+        assert_eq!(c.audio, d.audio);
+        assert_eq!(c.battery_limit, d.battery_limit);
+        assert_eq!(c.dock_previews, d.dock_previews);
+        assert_eq!(c.text_expander, d.text_expander);
+        assert_eq!(c.menu_bar, d.menu_bar);
+        assert!(!c.menu_bar.enabled);
+        assert_eq!(c.keyboard_manager.hyper_key, keyboard_manager::HyperKeyConfig::default());
 
         // New sections are written with camelCase keys and read back.
         let mut c2 = c.clone();
@@ -397,22 +426,38 @@ mod tests {
         c2.window_switcher.show_delay_ms = 200;
         c2.keyboard_manager.windows_style.enabled = true;
         c2.keyboard_manager.windows_style.finder_cut_paste = false;
+        c2.keyboard_manager.hyper_key.mode = keyboard_manager::HyperMode::Hyper;
+        c2.audio.app_volumes.insert("com.spotify.client".into(), audio_control::AppLevel { volume: 0.5, muted: false });
+        c2.text_expander.snippets.push(text_expander::Snippet::new(";sig", "Best,\nAda"));
         let v = serde_json::to_value(&c2).unwrap();
-        for k in ["mouseTuning", "displayControl", "clipboardHistory", "notchShelf", "colorPicker", "textExtractor", "windowSwitcher"] {
+        for k in ["mouseTuning", "displayControl", "clipboardHistory", "notchShelf", "colorPicker", "textExtractor", "windowSwitcher",
+                  "displayScaling", "audio", "batteryLimit", "dockPreviews", "textExpander", "menuBar"] {
             assert!(v.get(k).is_some(), "{k}");
         }
         assert_eq!(v["colorPicker"]["enabled"], false);
         assert_eq!(v["colorPicker"]["copiedFormat"], "RGB");
         assert_eq!(v["keyboardManager"]["windowsStyle"]["finderCutPaste"], false);
-        let back: AppConfig = serde_json::from_value(v).unwrap();
+        let back: AppConfig = serde_json::from_value(v.clone()).unwrap();
         assert!(!back.color_picker.enabled && back.clipboard_history.paused);
         assert_eq!(back.window_switcher.show_delay_ms, 200);
+        assert_eq!(v["keyboardManager"]["hyperKey"]["mode"], "hyper");
+        assert_eq!(v["audio"]["appVolumes"]["com.spotify.client"]["volume"], 0.5);
+        assert_eq!(back.keyboard_manager.hyper_key.mode, keyboard_manager::HyperMode::Hyper);
+        assert_eq!(back.text_expander.snippets.last().unwrap().trigger, ";sig");
         assert!(back.keyboard_manager.windows_style.enabled && !back.keyboard_manager.windows_style.finder_cut_paste);
         // A partial new section keeps the other fields' defaults.
         let p: AppConfig = serde_json::from_str(r#"{"colorPicker": {"copiedFormat": "HSL"}, "textExtractor": {"enabled": true}}"#).unwrap();
         assert_eq!(p.color_picker.settings.copied_format, "HSL");
         assert_eq!(p.color_picker.settings.hotkey, color_picker::Hotkey::default_for_platform());
         assert!(p.text_extractor.enabled);
+    }
+
+    /// Display Control skips Display Scaling's virtual displays by these numbers.
+    #[test]
+    fn virtual_display_ids_agree() {
+        assert_eq!(display_control::SCALING_VIRTUAL_VENDOR, display_scaling::VIRTUAL_VENDOR);
+        assert_eq!(display_control::SCALING_VIRTUAL_PRODUCT, display_scaling::VIRTUAL_PRODUCT);
+        assert!(display_control::is_scaling_virtual_display(display_scaling::VIRTUAL_VENDOR, display_scaling::VIRTUAL_PRODUCT));
     }
 
     #[test]

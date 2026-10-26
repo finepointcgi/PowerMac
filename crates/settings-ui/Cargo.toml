@@ -24,6 +24,12 @@ color-picker = { path = "../color-picker" }
 text-extractor = { path = "../text-extractor" }
 file-tools = { path = "../file-tools" }
 window-switcher = { path = "../window-switcher" }
+display-scaling = { path = "../display-scaling" }
+audio-control = { path = "../audio-control" }
+battery-limit = { path = "../battery-limit" }
+dock-previews = { path = "../dock-previews" }
+text-expander = { path = "../text-expander" }
+menubar-manager = { path = "../menubar-manager" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }
 

@@ -55,7 +55,22 @@ struct Ui {
     open_log: MenuItem,
     quit: MenuItem,
     tools: Tools,
+    sound: Submenu,
+    /// What the Sound submenu shows (to rebuild only on change).
+    sound_shown: Option<SoundSig>,
+    battery: Submenu,
+    battery_status: MenuItem,
+    battery_detail: MenuItem,
+    battery_full: MenuItem,
+    battery_settings: MenuItem,
 }
+
+/// Sound submenu contents: devices (kind, uid, name, default) and, with
+/// per-app volume on, apps (bundle id, name, volume %, muted).
+type SoundSig = Option<(Vec<(char, String, String, bool)>, Option<Vec<(String, String, u32, bool)>>)>;
+
+/// Per-app volume presets in the Sound submenu (percent).
+const APP_PRESETS: [u32; 5] = [25, 50, 75, 100, 150];
 
 /// The "Tools" part of the menu.
 struct Tools {
@@ -74,6 +89,10 @@ struct Tools {
     displays_shown: Option<Vec<(String, String, bool)>>,
     display_items: Vec<DisplayItems>,
     finder: CheckMenuItem,
+    eject: MenuItem,
+    hidden_files: CheckMenuItem,
+    menubar_show: MenuItem,
+    hidden_checked_at: std::time::Instant,
     /// The hotkeys shown as accelerators (to update only on change).
     accels: [Option<String>; 4],
     finder_checked_at: std::time::Instant,
@@ -155,11 +174,34 @@ pub fn install() -> anyhow::Result<()> {
     let shelf = MenuItem::new("Show shelf", false, None);
     let displays = Submenu::new("Displays", false);
     let finder = CheckMenuItem::new(
-        if cfg!(windows) { "Explorer menu: PowerRename, New+" } else { "Finder Quick Actions: PowerRename, New+" },
+        if cfg!(windows) { "Explorer menu: PowerRename, New+, …" } else { "Finder Quick Actions: PowerRename, New+, …" },
         cfg!(any(target_os = "macos", windows)),
         file_tools::finder_integration_installed(),
         None,
     );
+    let menubar_show = MenuItem::new("Show hidden menu bar items", false, None);
+    let eject = MenuItem::new("Eject all drives", cfg!(any(target_os = "macos", windows)), None);
+    let hidden_files = CheckMenuItem::new(
+        if cfg!(windows) { "Show hidden files (restarts Explorer windows)" } else { "Show hidden files (restarts Finder)" },
+        cfg!(any(target_os = "macos", windows)),
+        file_tools::hidden_files_shown(),
+        None,
+    );
+
+    // Sound and Battery (filled in by the refresh).
+    let sound = Submenu::new("Sound", false);
+    let battery = Submenu::new("Battery", false);
+    let battery_status = MenuItem::new("", false, None);
+    let battery_detail = MenuItem::new("", false, None);
+    let battery_full = MenuItem::new("Charge to 100 % now", false, None);
+    let battery_settings = MenuItem::new("Battery settings…", true, None);
+    battery.append_items(&[
+        &battery_status,
+        &battery_detail,
+        &PredefinedMenuItem::separator(),
+        &battery_full,
+        &battery_settings,
+    ])?;
 
     menu.append_items(&[
         &settings,
@@ -172,6 +214,8 @@ pub fn install() -> anyhow::Result<()> {
         &copy_key,
         &PredefinedMenuItem::separator(),
         &awake,
+        &sound,
+        &battery,
         &zones,
         &scroll,
         &mouse,
@@ -184,7 +228,10 @@ pub fn install() -> anyhow::Result<()> {
         &switcher,
         &shelf,
         &displays,
+        &menubar_show,
         &finder,
+        &eject,
+        &hidden_files,
         &PredefinedMenuItem::separator(),
         &login,
         &open_privacy,
@@ -241,9 +288,20 @@ pub fn install() -> anyhow::Result<()> {
                 displays_shown: None,
                 display_items: Vec::new(),
                 finder,
+                eject,
+                hidden_files,
+                menubar_show,
+                hidden_checked_at: std::time::Instant::now(),
                 accels: Default::default(),
                 finder_checked_at: std::time::Instant::now(),
             },
+            sound,
+            sound_shown: None,
+            battery,
+            battery_status,
+            battery_detail,
+            battery_full,
+            battery_settings,
         })
     });
 
@@ -282,7 +340,24 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     if on_tools_click(&mut ui.tools, id) {
         return;
     }
-    if id == ui.settings.id() {
+    if let Some(rest) = id.as_ref().strip_prefix("snd-") {
+        sound_click(rest);
+        ui.sound_shown = None;
+        return;
+    }
+    if id == ui.battery_full.id() {
+        std::thread::spawn(|| {
+            with_running(|r| {
+                if let Some(b) = &r.battery {
+                    log::info!("battery: charging to 100 % until unplugged (tray)");
+                    b.charge_to_full_once();
+                }
+            });
+        });
+        ui.battery_full.set_enabled(false);
+        return;
+    }
+    if id == ui.settings.id() || id == ui.battery_settings.id() {
         open_settings();
         return;
     }
@@ -422,6 +497,8 @@ fn refresh() {
 
 fn refresh_ui(ui: &mut Ui) {
     refresh_tools(&mut ui.tools);
+    refresh_sound(ui);
+    refresh_battery(ui);
     let snapshot = try_with_running(|r| {
         (
             r.mwb.as_ref().map(|m| m.status()),
@@ -674,6 +751,21 @@ fn on_tools_click(t: &mut Tools, id: &tray_icon::menu::MenuId) -> bool {
         });
     } else if id == t.shelf.id() {
         with_running(|r| r.shelf.as_ref().map(|s| s.expand()));
+    } else if id == t.menubar_show.id() {
+        std::thread::spawn(|| {
+            if let Some(h) = crate::menubar_glue::handle() {
+                h.toggle();
+            }
+        });
+    } else if id == t.eject.id() {
+        eject_all();
+    } else if id == t.hidden_files.id() {
+        let show = t.hidden_files.is_checked();
+        std::thread::spawn(move || match file_tools::finder::set_hidden_files_shown(show) {
+            Ok(()) => log::info!("finder: hidden files {}", if show { "shown" } else { "hidden" }),
+            Err(e) => log::warn!("finder: hidden files: {e:#}"),
+        });
+        t.hidden_checked_at = std::time::Instant::now();
     } else if id == t.finder.id() {
         toggle_finder_integration(t.finder.is_checked());
         t.finder.set_checked(file_tools::finder_integration_installed());
@@ -766,6 +858,8 @@ struct ToolsSnapshot {
     clipboard: Option<ClipState>,
     switcher: Option<window_switcher::Hotkey>,
     shelf: bool,
+    /// The menu bar manager runs (and shows its hidden items).
+    menubar: Option<bool>,
     displays: Option<Vec<display_control::DisplayInfo>>,
 }
 
@@ -780,6 +874,7 @@ fn refresh_tools(t: &mut Tools) {
         }),
         switcher: r.switcher.as_ref().map(|w| w.config().trigger),
         shelf: r.shelf.is_some(),
+        menubar: r.menubar.as_ref().map(|m| m.expansion() != menubar_manager::Expansion::Collapsed),
         displays: r.display.as_ref().map(|d| d.displays()),
     }) else {
         return;
@@ -795,6 +890,8 @@ fn refresh_tools(t: &mut Tools) {
     let a = s.switcher.and_then(|h| accel_text(h.win, h.ctrl, h.alt, h.shift, h.code));
     set_accel(&t.switcher, &mut t.accels[2], a);
     t.shelf.set_enabled(s.shelf);
+    t.menubar_show.set_enabled(s.menubar.is_some());
+    t.menubar_show.set_text(if s.menubar == Some(true) { "Hide menu bar items again" } else { "Show hidden menu bar items" });
 
     // Clipboard history
     match &s.clipboard {
@@ -853,6 +950,193 @@ fn refresh_tools(t: &mut Tools) {
         t.finder_checked_at = std::time::Instant::now();
         t.finder.set_checked(file_tools::finder_integration_installed());
     }
+    // Hidden files: `defaults read` (macOS) / the registry, so not too often.
+    if t.hidden_checked_at.elapsed() >= Duration::from_secs(15) {
+        t.hidden_checked_at = std::time::Instant::now();
+        t.hidden_files.set_checked(file_tools::hidden_files_shown());
+    }
+}
+
+/// "Eject all drives": eject on another thread, then report.
+fn eject_all() {
+    std::thread::spawn(|| {
+        let cfg = crate::CONFIG_PATH
+            .get()
+            .map(|p| file_tools::Config::load_from(&pm_config::file_tools_path_for(p)))
+            .unwrap_or_default()
+            .finder;
+        let filter = file_tools::finder::volumes::EjectFilter { disk_images: cfg.eject_disk_images, network: cfg.eject_network_volumes };
+        let report = file_tools::finder::volumes::eject_all_with(filter);
+        let summary = report.summary();
+        if report.failed.is_empty() {
+            log::info!("eject all: {summary}");
+        } else {
+            log::warn!("eject all: {summary}");
+        }
+        notify("PowerMac", &summary);
+    });
+}
+
+/// A system notification (macOS: through osascript; elsewhere only logged).
+fn notify(title: &str, text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("display notification \"{}\" with title \"{}\"", esc(text), esc(title));
+        if let Ok(mut c) = std::process::Command::new("/usr/bin/osascript").arg("-e").arg(script).spawn() {
+            std::thread::spawn(move || {
+                let _ = c.wait();
+            });
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (title, text);
+}
+
+// ---------------------------------------------------------------------------
+// Sound
+
+/// `out:<uid>`, `in:<uid>`, `app:<pct>:<bundle>` or `mute:<bundle>`.
+fn sound_click(rest: &str) {
+    let rest = rest.to_string();
+    // CoreAudio calls and the RUNNING lock: off the main thread.
+    std::thread::spawn(move || {
+        let (kind, arg) = rest.split_once(':').unwrap_or(("", ""));
+        let r = with_running(|r| {
+            let a = r.audio.as_ref()?;
+            Some(match kind {
+                "out" => a.set_default_output(arg),
+                "in" => a.set_default_input(arg),
+                "mute" => {
+                    let muted = a.app_levels().get(arg).is_some_and(|l| l.muted);
+                    a.set_app_mute(arg, !muted)
+                }
+                "app" => {
+                    let (pct, bundle) = arg.split_once(':')?;
+                    let pct: f32 = pct.parse().ok()?;
+                    let _ = a.set_app_mute(bundle, false);
+                    a.set_app_volume(bundle, pct / 100.0)
+                }
+                _ => return None,
+            })
+        })
+        .flatten();
+        if let Some(Err(e)) = r {
+            log::warn!("sound: {e:#}");
+        }
+        crate::audio_glue::refresh_soon();
+    });
+}
+
+fn refresh_sound(ui: &mut Ui) {
+    let latest = crate::audio_glue::latest();
+    let sig: SoundSig = latest.as_ref().map(|(st, per_app)| {
+        let mut devs: Vec<(char, String, String, bool)> =
+            st.outputs.iter().map(|d| ('o', d.uid.clone(), d.name.clone(), d.is_default)).collect();
+        devs.extend(st.inputs.iter().map(|d| ('i', d.uid.clone(), d.name.clone(), d.is_default)));
+        let apps = per_app.then(|| {
+            st.apps
+                .iter()
+                .map(|a| (a.bundle_id.clone(), a.name.clone(), (a.volume * 100.0).round() as u32, a.muted))
+                .collect()
+        });
+        (devs, apps)
+    });
+    if ui.sound_shown.as_ref() == Some(&sig) {
+        return;
+    }
+    rebuild_sound_menu(&ui.sound, &sig);
+    ui.sound_shown = Some(sig);
+}
+
+fn rebuild_sound_menu(menu: &Submenu, sig: &SoundSig) {
+    while menu.remove_at(0).is_some() {}
+    let Some((devs, apps)) = sig else {
+        menu.set_enabled(false);
+        menu.set_text("Sound");
+        return;
+    };
+    menu.set_enabled(true);
+    let add = |item: &dyn tray_icon::menu::IsMenuItem| {
+        let _ = menu.append(item);
+    };
+    for (kind, title) in [('o', "Output"), ('i', "Input")] {
+        if kind == 'i' {
+            add(&PredefinedMenuItem::separator());
+        }
+        add(&MenuItem::new(title, false, None));
+        let mut any = false;
+        for (k, uid, name, default) in devs.iter().filter(|d| d.0 == kind) {
+            let id = format!("snd-{}:{uid}", if *k == 'o' { "out" } else { "in" });
+            add(&CheckMenuItem::with_id(id, name, true, *default, None));
+            any = true;
+        }
+        if !any {
+            add(&MenuItem::new("None", false, None));
+        }
+    }
+    if let Some(apps) = apps {
+        add(&PredefinedMenuItem::separator());
+        add(&MenuItem::new("App volume", false, None));
+        if apps.is_empty() {
+            add(&MenuItem::new("No apps playing", false, None));
+        }
+        for (bundle, name, pct, muted) in apps {
+            let label = if *muted { format!("{name} — muted") } else { format!("{name} — {pct} %") };
+            let sub = Submenu::new(label, true);
+            for p in APP_PRESETS {
+                let on = !muted && pct.abs_diff(p) <= 2;
+                let _ = sub.append(&CheckMenuItem::with_id(format!("snd-app:{p}:{bundle}"), format!("{p} %"), true, on, None));
+            }
+            let _ = sub.append(&PredefinedMenuItem::separator());
+            let _ = sub.append(&CheckMenuItem::with_id(format!("snd-mute:{bundle}"), "Mute", true, *muted, None));
+            add(&sub);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Battery
+
+fn refresh_battery(ui: &mut Ui) {
+    let Some(snap) = try_with_running(|r| r.battery.as_ref().map(|b| b.status())) else { return };
+    let limit_on = current_config().battery_limit.enabled;
+    let Some(st) = snap.filter(|s| s.battery.has_battery) else {
+        ui.battery.set_text("Battery");
+        ui.battery.set_enabled(false);
+        return;
+    };
+    ui.battery.set_enabled(true);
+    let pct = st.battery.percent.map(|p| format!("{p} %")).unwrap_or_default();
+    ui.battery.set_text(format!("Battery · {pct}"));
+    ui.battery_status.set_text(crate::battery_glue::status_line(&st));
+    let b = &st.battery;
+    let mut detail = Vec::new();
+    if let Some(h) = b.health_percent {
+        detail.push(format!("health {h:.0} %"));
+    }
+    if let Some(c) = b.cycles {
+        detail.push(format!("{c} cycles"));
+    }
+    if let Some(t) = b.temperature_c {
+        detail.push(format!("{t:.0} °C"));
+    }
+    if let Some(w) = b.adapter_watts.filter(|_| b.plugged) {
+        detail.push(format!("{w} W adapter"));
+    }
+    let mut detail = detail.join(" · ");
+    if let Some(first) = detail.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    ui.battery_detail.set_text(if detail.is_empty() { "–".to_string() } else { detail });
+    let (text, enabled) = match st.charge_control {
+        Some(true) if limit_on && st.top_up_active => ("Charging to 100 % until unplugged".to_string(), false),
+        Some(true) if limit_on => ("Charge to 100 % now".to_string(), true),
+        Some(true) => ("Charge limit is off".to_string(), false),
+        _ => ("No charge limit on this Mac (see Settings)".to_string(), false),
+    };
+    ui.battery_full.set_text(text);
+    ui.battery_full.set_enabled(enabled);
 }
 
 /// The config file as it is on disk (for hotkeys the handles don't expose).

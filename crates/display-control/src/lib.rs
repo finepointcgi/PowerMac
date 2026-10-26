@@ -39,6 +39,18 @@ pub use config::{Config, DisplayOverride, Hotkey, Hotkeys, Mods};
 pub use platform::{debug_noop_writes, debug_report, debug_show_osd, run_main_loop_for};
 pub use ddc::Feature;
 
+/// Vendor / model numbers of Display Scaling's virtual HiDPI displays (the
+/// same values as `display_scaling::VIRTUAL_VENDOR` / `VIRTUAL_PRODUCT`,
+/// which depends on this crate). They are skipped: there is no hardware
+/// behind them, and the physical panel they mirror onto is listed itself.
+pub const SCALING_VIRTUAL_VENDOR: u32 = 0x50D0;
+pub const SCALING_VIRTUAL_PRODUCT: u32 = 0x4844;
+
+/// Whether a display (by vendor / model number) is a Display Scaling virtual display.
+pub fn is_scaling_virtual_display(vendor: u32, model: u32) -> bool {
+    vendor == SCALING_VIRTUAL_VENDOR && model == SCALING_VIRTUAL_PRODUCT
+}
+
 /// A rectangle in global display coordinates (points, top-left origin on
 /// macOS; virtual-screen pixels on Windows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

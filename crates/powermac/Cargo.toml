@@ -25,6 +25,12 @@ color-picker = { path = "../color-picker" }
 text-extractor = { path = "../text-extractor" }
 file-tools = { path = "../file-tools" }
 window-switcher = { path = "../window-switcher" }
+display-scaling = { path = "../display-scaling" }
+audio-control = { path = "../audio-control" }
+battery-limit = { path = "../battery-limit" }
+dock-previews = { path = "../dock-previews" }
+text-expander = { path = "../text-expander" }
+menubar-manager = { path = "../menubar-manager" }
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 ctrlc = "3"

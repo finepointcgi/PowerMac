@@ -36,20 +36,32 @@ pub enum Page {
     TextExtractor,
     FileTools,
     WindowSwitcher,
+    /// Default-device rules and per-app volume.
+    Sound,
+    /// Battery status and charge limit.
+    Battery,
+    DockPreviews,
+    TextExpander,
+    MenuBar,
 }
 
 impl Page {
     /// Sidebar order (grouped by [`Page::section`]).
-    pub const ALL: [Page; 15] = [
+    pub const ALL: [Page; 20] = [
         Page::General,
         Page::FancyZones,
         Page::WindowSwitcher,
         Page::NotchShelf,
+        Page::DockPreviews,
+        Page::MenuBar,
         Page::MouseTuning,
         Page::ScrollReverser,
         Page::MouseUtils,
         Page::KeyboardManager,
+        Page::TextExpander,
         Page::Displays,
+        Page::Sound,
+        Page::Battery,
         Page::Awake,
         Page::ClipboardHistory,
         Page::ColorPicker,
@@ -75,6 +87,11 @@ impl Page {
             Page::TextExtractor => "Text Extractor",
             Page::FileTools => "File Tools",
             Page::WindowSwitcher => "Window Switcher",
+            Page::Sound => "Sound",
+            Page::Battery => "Battery",
+            Page::DockPreviews => "Dock Previews",
+            Page::TextExpander => "Text Expansion",
+            Page::MenuBar => "Menu Bar",
         }
     }
 
@@ -82,11 +99,13 @@ impl Page {
     pub fn section(self) -> Option<&'static str> {
         Some(match self {
             Page::General => return None,
-            Page::FancyZones | Page::WindowSwitcher | Page::NotchShelf => "Windows & Desktop",
-            Page::MouseTuning | Page::ScrollReverser | Page::MouseUtils | Page::KeyboardManager => {
-                "Mouse & Keyboard"
-            }
-            Page::Displays | Page::Awake => "Displays & Power",
+            Page::FancyZones | Page::WindowSwitcher | Page::NotchShelf | Page::DockPreviews | Page::MenuBar => "Windows & Desktop",
+            Page::MouseTuning
+            | Page::ScrollReverser
+            | Page::MouseUtils
+            | Page::KeyboardManager
+            | Page::TextExpander => "Mouse & Keyboard",
+            Page::Displays | Page::Sound | Page::Battery | Page::Awake => "Displays & Power",
             Page::ClipboardHistory | Page::ColorPicker | Page::TextExtractor | Page::FileTools => {
                 "Productivity"
             }
@@ -1018,6 +1037,11 @@ pub struct FtEdit {
     pub show_only_changed: bool,
     pub mru_size: usize,
     pub new_plus: file_tools::NewPlusConfig,
+    /// Image Resizer presets and defaults (its window keeps the last
+    /// choices here too).
+    pub resize: file_tools::ResizeConfig,
+    /// Finder basics: terminal / editor, copy path, eject.
+    pub finder: file_tools::FinderConfig,
 }
 
 impl FtEdit {
@@ -1027,8 +1051,33 @@ impl FtEdit {
             show_only_changed: c.rename.show_only_changed,
             mru_size: c.rename.mru_size,
             new_plus: c.new_plus.clone(),
+            resize: c.resize.clone(),
+            finder: c.finder.clone(),
         }
     }
+}
+
+/// Problems with the Image Resizer presets (they block saving file-tools.json).
+pub fn validate_resize(r: &file_tools::ResizeConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, p) in r.presets.iter().enumerate() {
+        let n = p.name.trim();
+        if n.is_empty() {
+            out.push(format!("Size {}: give it a name.", i + 1));
+        } else if r.presets[..i].iter().any(|o| o.name.trim().eq_ignore_ascii_case(n)) {
+            out.push(format!("There are two sizes named “{n}”."));
+        }
+        if !(p.width >= 0.0 && p.height >= 0.0) || (p.width == 0.0 && p.height == 0.0) {
+            out.push(format!("Size “{n}”: enter a width or a height (0 = automatic)."));
+        }
+    }
+    if !(1..=100).contains(&r.options.jpeg_quality) {
+        out.push("Quality must be 1–100.".into());
+    }
+    if r.options.file_name_format.trim().is_empty() && !r.options.replace {
+        out.push("Enter a file name pattern, like %1 (%2).".into());
+    }
+    out
 }
 
 /// Write the edited parts into `path`, keeping the rest as it is on disk now.
@@ -1038,6 +1087,8 @@ pub fn save_file_tools(path: &Path, e: &FtEdit) -> Result<()> {
     c.rename.show_only_changed = e.show_only_changed;
     c.rename.mru_size = e.mru_size;
     c.new_plus = e.new_plus.clone();
+    c.resize = e.resize.clone();
+    c.finder = e.finder.clone();
     c.save_to(path)
 }
 
@@ -1487,7 +1538,75 @@ mod tests {
         assert_eq!(back.rename.search_mru, ["IMG_"]);
         assert!(back.new_plus.open_after_create);
         assert_eq!(back.rename.mru_size, 3);
+        // Finder basics and Image Resizer settings go through too.
+        e.finder.terminal_app = "com.googlecode.iterm2".into();
+        e.finder.path_style = file_tools::CopyStyle::Tilde;
+        e.resize.presets.push(file_tools::resize::ResizeSize::new(
+            "Thumb",
+            file_tools::resize::ResizeFit::Fill,
+            200.0,
+            200.0,
+            file_tools::resize::ResizeUnit::Pixel,
+        ));
+        e.resize.options.jpeg_quality = 70;
+        assert!(validate_resize(&e.resize).is_empty());
+        save_file_tools(&path, &e).unwrap();
+        let back = file_tools::Config::load_from(&path);
+        assert_eq!(back.finder.terminal_app, "com.googlecode.iterm2");
+        assert_eq!(back.finder.path_style, file_tools::CopyStyle::Tilde);
+        assert_eq!(back.resize.presets.last().unwrap().name, "Thumb");
+        assert_eq!(back.resize.options.jpeg_quality, 70);
+        assert_eq!(back.rename.search_mru, ["IMG_"]);
+        assert_eq!(FtEdit::of(&back), e);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resize_presets_validation() {
+        use file_tools::resize::{ResizeFit, ResizeSize, ResizeUnit};
+        let mut r = file_tools::ResizeConfig::default();
+        assert!(validate_resize(&r).is_empty());
+        r.presets.push(ResizeSize::new("small", ResizeFit::Fit, 0.0, 0.0, ResizeUnit::Pixel));
+        r.presets.push(ResizeSize::new(" ", ResizeFit::Fit, 10.0, 0.0, ResizeUnit::Pixel));
+        r.options.jpeg_quality = 0;
+        let e = validate_resize(&r);
+        assert_eq!(e.len(), 4, "{e:?}");
+        assert!(e.iter().any(|m| m.contains("two sizes named")));
+    }
+
+    /// Settings the window has no special buffer for (the Caps Lock key,
+    /// the new modules' sections) survive a load / build round trip.
+    #[test]
+    fn new_module_sections_round_trip_through_the_draft() {
+        let mut c = AppConfig::with_new_key();
+        c.keyboard_manager.hyper_key = keyboard_manager::HyperKeyConfig {
+            mode: keyboard_manager::HyperMode::Control,
+            tap_action: keyboard_manager::TapAction::CapsLock,
+            tap_timeout_ms: 250,
+        };
+        c.display_scaling.enabled = true;
+        c.display_scaling.displays.insert(
+            "LG#1".into(),
+            display_scaling::DisplayConfig {
+                hidpi_enabled: true,
+                target_logical_resolution: Some(display_scaling::Resolution { width: 1920, height: 1080 }),
+                ..Default::default()
+            },
+        );
+        c.audio.rules.outputs.push(audio_control::DeviceMatch::name("Studio Display"));
+        c.audio.block_auto_switch_to.push(audio_control::DeviceMatch::name("AirPods"));
+        c.battery_limit.limit_percent = 75;
+        c.dock_previews.preview_size = dock_previews::PreviewSize::Large;
+        c.text_expander.enabled = true;
+        c.text_expander.snippets.push(text_expander::Snippet::new(";addr", "1 Infinite Loop"));
+        let d = AppDraft::new(c.clone(), now());
+        let back = d.build(now()).unwrap();
+        assert_eq!(back.keyboard_manager.hyper_key, c.keyboard_manager.hyper_key);
+        assert_eq!(back.display_scaling, c.display_scaling);
+        assert_eq!(back.audio, c.audio);
+        assert_eq!(back.battery_limit, c.battery_limit);
+        assert_eq!(back.dock_previews, c.dock_previews);
+        assert_eq!(back.text_expander, c.text_expander);
     }
 
     #[test]

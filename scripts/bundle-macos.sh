@@ -1,13 +1,19 @@
 #!/bin/sh
 # Build PowerMac.app: a menu-bar-only app (no Dock icon). macOS ties the
 # Accessibility / Input Monitoring grants to this bundle instead of your terminal.
+# Honors CARGO_TARGET_DIR (the bundle goes to $CARGO_TARGET_DIR/release).
 set -e
 cd "$(dirname "$0")/.."
+TARGET="${CARGO_TARGET_DIR:-target}"
 cargo build --release -p powermac
-APP=target/release/PowerMac.app
+# The battery charge-limit helper (installed from Settings → Battery, with an
+# admin prompt, from next to the app executable).
+cargo build --release -p battery-limit --bin powermac-battery-helper
+APP="$TARGET/release/PowerMac.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp target/release/powermac "$APP/Contents/MacOS/powermac"
+cp "$TARGET/release/powermac" "$APP/Contents/MacOS/powermac"
+cp "$TARGET/release/powermac-battery-helper" "$APP/Contents/MacOS/powermac-battery-helper"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -24,6 +30,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAudioCaptureUsageDescription</key><string>PowerMac sets a volume for each app (Sound → Per-app volume). Nothing is recorded.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key><string>The Notch Shelf's Calendar widget shows your next events.</string>
+  <key>NSCalendarsUsageDescription</key><string>The Notch Shelf's Calendar widget shows your next events.</string>
+  <key>NSCameraUsageDescription</key><string>The Notch Shelf's Mirror widget shows the camera while you click it.</string>
+  <key>NSAppleEventsUsageDescription</key><string>PowerMac reads the current track from Music and Spotify (Notch Shelf) and Finder's selection (File Tools) when you turn these on.</string>
 </dict>
 </plist>
 PLIST
@@ -32,9 +43,11 @@ PLIST
 # every rebuild).
 IDENTITY="PowerMac Local Signing"
 if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+  codesign --force -s "$IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --deep -s "$IDENTITY" "$APP"
 else
   echo "note: ad-hoc signing; run scripts/create-signing-cert.sh once to keep permissions across rebuilds"
+  codesign --force -s - "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --deep -s - "$APP"
 fi
 echo "built $APP — move it to /Applications and open it"

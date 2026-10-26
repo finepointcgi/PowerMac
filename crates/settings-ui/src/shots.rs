@@ -169,6 +169,41 @@ fn shots() {
     cfg.text_extractor.settings.languages = vec!["en-US".into(), "de-DE".into()];
     cfg.display_control.hotkeys.brightness_up = display_control::Hotkey::new(false, true, true, false, 0x26);
     cfg.display_control.hotkeys.brightness_down = display_control::Hotkey::new(false, true, true, false, 0x28);
+    // Newer modules
+    cfg.keyboard_manager.hyper_key.mode = keyboard_manager::HyperMode::Hyper;
+    cfg.display_scaling.enabled = true;
+    cfg.display_scaling.displays.insert(
+        "LG HDR 4K#8R2N".into(),
+        display_scaling::DisplayConfig {
+            hidpi_enabled: true,
+            target_logical_resolution: Some(display_scaling::Resolution { width: 1920, height: 1080 }),
+            custom_resolutions: vec![display_scaling::Resolution { width: 2200, height: 1238 }],
+            preferred_mode: None,
+        },
+    );
+    cfg.audio.rules.outputs = vec![
+        audio_control::DeviceMatch::uid("studio-uid", "Studio Display Speakers"),
+        audio_control::DeviceMatch::name("MacBook Pro Speakers"),
+    ];
+    cfg.audio.rules.inputs = vec![audio_control::DeviceMatch::name("Shure MV7")];
+    cfg.audio.block_auto_switch_to = vec![audio_control::DeviceMatch::name("AirPods")];
+    cfg.audio.keep_builtin_mic_with_bluetooth = true;
+    cfg.audio.per_app_volume = true;
+    cfg.audio.app_volumes.insert("com.spotify.client".into(), audio_control::AppLevel { volume: 0.6, muted: false });
+    cfg.audio.app_volumes.insert("us.zoom.xos".into(), audio_control::AppLevel { volume: 1.0, muted: true });
+    cfg.text_expander.enabled = true;
+    cfg.text_expander.snippets.push(text_expander::Snippet {
+        word_boundary: true,
+        case_sensitive: false,
+        ..text_expander::Snippet::new("btw", "by the way")
+    });
+    cfg.text_expander.snippets.push(text_expander::Snippet {
+        apps: vec!["com.apple.mail".into()],
+        label: "Signature".into(),
+        ..text_expander::Snippet::new(";sig", "Best regards,\nAda Lovelace")
+    });
+    cfg.notch_shelf.weather.location = "Portland, Oregon".into();
+    cfg.menu_bar.enabled = true;
     cfg.save(&path).unwrap();
     sample_fz(&fancyzones_path(&path));
     // What a running app reports about the displays (re-stamped before
@@ -215,7 +250,147 @@ fn shots() {
         ..Default::default()
     }
     ;
-    let fresh_status = || display_status.clone().stamp().save_for(&path).unwrap();
+    let mode = |w: u32, h: u32, hidpi: bool| display_scaling::Mode {
+        width: w,
+        height: h,
+        pixel_width: if hidpi { w * 2 } else { w },
+        pixel_height: if hidpi { h * 2 } else { h },
+        refresh: 60.0,
+        hidpi,
+    };
+    let scaling = pm_config::bridge::ScalingStatus {
+        running: true,
+        hidpi_supported: true,
+        displays: vec![display_scaling::DisplayModes {
+            id: "LG HDR 4K#8R2N".into(),
+            name: "LG HDR 4K".into(),
+            is_builtin: false,
+            vendor: 0x1E6D,
+            model: 0x5B10,
+            current: Some(mode(1920, 1080, true)),
+            modes: vec![
+                mode(2560, 1440, true),
+                mode(2200, 1238, true),
+                mode(1920, 1080, true),
+                mode(1280, 720, true),
+                mode(2560, 1440, false),
+                mode(1920, 1080, false),
+            ],
+            physical_current: Some(mode(2560, 1440, false)),
+            native: Some(display_scaling::Resolution { width: 2560, height: 1440 }),
+            hidpi_capable: true,
+            hidpi_active: true,
+            native_hidpi: false,
+            suggested_hidpi: vec![
+                display_scaling::Resolution { width: 2560, height: 1440 },
+                display_scaling::Resolution { width: 2048, height: 1152 },
+                display_scaling::Resolution { width: 1920, height: 1080 },
+                display_scaling::Resolution { width: 1600, height: 900 },
+            ],
+            dpi: None,
+            scale_percent: Some(200),
+        }],
+        pending: vec![display_scaling::PendingChange {
+            token: display_scaling::Token(1),
+            display_id: "LG HDR 4K#8R2N".into(),
+            previous: mode(2560, 1440, false),
+            applied: mode(1920, 1080, true),
+            seconds_left: 12,
+        }],
+        error: None,
+    };
+    let dev = |uid: &str, name: &str, t: audio_control::Transport, def: bool, vol: Option<f32>| audio_control::AudioDevice {
+        uid: uid.into(),
+        name: name.into(),
+        transport: t,
+        is_default: def,
+        is_default_system: def,
+        channels: 2,
+        volume: vol,
+        muted: Some(false),
+    };
+    use audio_control::Transport as T;
+    let audio = pm_config::bridge::AudioStatus {
+        running: true,
+        outputs: vec![
+            dev("studio-uid", "Studio Display Speakers", T::Usb, true, Some(0.55)),
+            dev("builtin-out", "MacBook Pro Speakers", T::BuiltIn, false, Some(0.4)),
+            dev("airpods", "Ada's AirPods Pro", T::Bluetooth, false, Some(0.5)),
+        ],
+        inputs: vec![
+            dev("mv7", "Shure MV7", T::Usb, false, Some(0.8)),
+            dev("builtin-in", "MacBook Pro Microphone", T::BuiltIn, true, Some(0.7)),
+        ],
+        apps: vec![
+            audio_control::AudioApp { pid: 10, pids: vec![10], bundle_id: "com.spotify.client".into(), name: "Spotify".into(), volume: 0.6, muted: false, playing: true },
+            audio_control::AudioApp { pid: 11, pids: vec![11], bundle_id: "com.google.Chrome".into(), name: "Google Chrome".into(), volume: 1.0, muted: false, playing: true },
+        ],
+        per_app_supported: true,
+        capture_permission: audio_control::CapturePermission::Granted,
+        error: None,
+    };
+    let battery = |control: Option<bool>| battery_limit::BatteryStatus {
+        battery: battery_limit::BatteryReading {
+            has_battery: true,
+            percent: Some(82),
+            charging: true,
+            plugged: true,
+            adapter_watts: Some(96),
+            cycles: Some(312),
+            health_percent: Some(91.4),
+            design_capacity_mah: Some(8579),
+            max_capacity_mah: Some(7841),
+            temperature_c: Some(31.2),
+            time_remaining_min: Some(48),
+            amperage_ma: Some(2100),
+        },
+        helper_installed: control == Some(true),
+        helper_running: control == Some(true),
+        scheme: Some(if control == Some(true) { "CHTE+CHIE".into() } else { "none".into() }),
+        charge_control: control,
+        reason: if control == Some(true) { "charging to the limit (80 %)".into() } else { "charge limit off".into() },
+        supported: true,
+        ..Default::default()
+    };
+    let item = |id: &str, owner: &str, title: Option<&str>, sec: menubar_manager::Section, system: bool| menubar_manager::MenuBarItem {
+        id: id.into(),
+        owner: owner.into(),
+        bundle_id: Some(format!("com.example.{}", owner.to_lowercase().replace(' ', ""))),
+        pid: 1,
+        title: title.map(Into::into),
+        frame: Default::default(),
+        section: sec,
+        window_id: None,
+        own: false,
+        system,
+    };
+    use menubar_manager::Section as Sec;
+    let menubar = pm_config::bridge::MenuBarStatus {
+        running: true,
+        accessibility: true,
+        screen_recording: false,
+        listed: true,
+        items: vec![
+            item("dropbox", "Dropbox", None, Sec::AlwaysHidden, false),
+            item("docker", "Docker Desktop", None, Sec::Hidden, false),
+            item("1password", "1Password", None, Sec::Hidden, false),
+            item("slack", "Slack", None, Sec::Visible, false),
+            item("wifi", "Control Center", Some("Wi‑Fi"), Sec::Visible, true),
+            item("battery", "Control Center", Some("Battery"), Sec::Visible, true),
+        ],
+        hidden_by_notch: vec![item("slack", "Slack", None, Sec::Visible, false)],
+        fitted_mode: true,
+        layout_issue: None,
+        error: None,
+    };
+    let battery_ctl = std::cell::Cell::new(Some(false));
+    let fresh_status = || {
+        display_status.clone().stamp().save_for(&path).unwrap();
+        pm_config::bridge::write(&path, pm_config::bridge::SCALING_STATUS_FILE, &scaling).unwrap();
+        pm_config::bridge::write(&path, pm_config::bridge::AUDIO_STATUS_FILE, &audio).unwrap();
+        pm_config::bridge::write(&path, pm_config::bridge::BATTERY_STATUS_FILE, &battery(battery_ctl.get())).unwrap();
+        pm_config::bridge::write(&path, pm_config::bridge::MENUBAR_STATUS_FILE, &menubar).unwrap();
+    };
     fresh_status();
     // What a running app reports: one machine found automatically and
     // connected, one found but reconnecting, one with another key.
@@ -271,6 +446,9 @@ fn shots() {
                 .with_accessibility_check(false)
                 .wgpu()
                 .build_ui_state(|ui, app: &mut SettingsApp| app.draw(ui), app);
+            // Like the real window: characters the bundled fonts lack (the
+            // default ¯\_(ツ)_/¯ snippet) are drawn as boxes, not a panic.
+            h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
             for p in Page::ALL {
                 if !suffix.is_empty() && matches!(p, Page::Awake) {
                     continue;
@@ -281,6 +459,13 @@ fn shots() {
                 let slug = format!("{p:?}").to_lowercase();
                 save(&mut h, &dir, &format!("settings-{slug}-{tn}{suffix}"));
             }
+            // The Battery page on a Mac whose firmware allows a charge limit.
+            battery_ctl.set(Some(true));
+            fresh_status();
+            h.state_mut().set_page(Page::Battery);
+            h.state_mut().reload_status_for_test();
+            save(&mut h, &dir, &format!("settings-battery-limit-{tn}{suffix}"));
+            battery_ctl.set(Some(false));
             if suffix.is_empty() {
                 h.state_mut().set_search_for_test("color");
                 save(&mut h, &dir, &format!("settings-search-{tn}"));

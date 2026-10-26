@@ -20,6 +20,7 @@ use crate::mu_color::color_edit;
 use crate::zone_style;
 
 mod pages;
+mod pages2;
 
 /// Wait this long after the last change before writing the file.
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -140,7 +141,7 @@ fn meta(p: Page) -> Meta {
         Page::NotchShelf => (
             icon::TRAY,
             Color32::from_rgb(0x3A, 0x3A, 0x3C),
-            "A drop shelf in the notch: park files, links and text, then drag them out again.",
+            "A drop shelf and widgets in the notch: park files, links and text, see what's playing, the weather and your next meeting.",
         ),
         Page::ColorPicker => (
             icon::EYEDROPPER,
@@ -155,12 +156,37 @@ fn meta(p: Page) -> Meta {
         Page::FileTools => (
             icon::FOLDER_OPEN,
             Color32::from_rgb(0x2E, 0x8C, 0xE6),
-            "PowerRename and New+ in Finder: rename many files at once, or create files from templates.",
+            "PowerRename, New+, Image Resizer and the Finder basics: Open in Terminal, Copy Path, Eject all, hidden files.",
         ),
         Page::WindowSwitcher => (
             icon::CARDS,
             Color32::from_rgb(0x58, 0x56, 0xD6),
             "Switch between windows, not apps, with Option+Tab.",
+        ),
+        Page::Sound => (
+            icon::SPEAKER_HIGH,
+            Color32::from_rgb(0xFF, 0x37, 0x5F),
+            "Choose which speakers and microphone win, keep AirPods from taking over, and set a volume per app.",
+        ),
+        Page::Battery => (
+            icon::LIGHTNING,
+            Color32::from_rgb(0x30, 0xB0, 0x50),
+            "Battery health at a glance, and a charge limit that keeps it from sitting at 100 %.",
+        ),
+        Page::DockPreviews => (
+            icon::APP_WINDOW,
+            Color32::from_rgb(0x00, 0x99, 0xCC),
+            "Rest the pointer on a Dock icon to see that app's windows, and click one to bring it forward.",
+        ),
+        Page::MenuBar => (
+            icon::DOTS_SIX_VERTICAL,
+            Color32::from_rgb(0x63, 0x63, 0x70),
+            "Tuck menu bar icons away behind a chevron, and find the ones the notch hides.",
+        ),
+        Page::TextExpander => (
+            icon::TEXT_AA,
+            Color32::from_rgb(0xFF, 0x8C, 0x1A),
+            "Type a short abbreviation anywhere and it turns into the full text: addresses, dates, signatures.",
         ),
     };
     Meta { icon, tint, blurb }
@@ -173,6 +199,9 @@ struct Hit {
     section: String,
     labels: Vec<String>,
 }
+
+/// Finished background actions: (what, Ok(message) / Err(message)).
+type BackgroundResults = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, Result<String, String>)>>>;
 
 pub struct SettingsApp {
     config_path: PathBuf,
@@ -238,6 +267,44 @@ pub struct SettingsApp {
     has_notch: bool,
     /// The custom color format being added (name, template).
     new_format: (String, String),
+
+    // Newer modules (see app/pages2.rs)
+    /// Display Scaling status written by the running app.
+    scaling_status: Option<pm_config::bridge::ScalingStatus>,
+    /// Sound status written by the running app.
+    audio_status: Option<pm_config::bridge::AudioStatus>,
+    /// Devices read here while the app isn't running Sound: (outputs, inputs).
+    audio_local: Option<(Vec<audio_control::AudioDevice>, Vec<audio_control::AudioDevice>)>,
+    /// Per-app levels just set here (shown until the app reports them).
+    audio_app_local: std::collections::HashMap<String, (f32, Instant)>,
+    /// A level request not written yet (writes are spaced out while dragging).
+    audio_pending: Option<pm_config::bridge::AudioRequest>,
+    audio_written: Instant,
+    /// Battery status written by the running app.
+    battery_status: Option<battery_limit::BatteryStatus>,
+    /// Battery read here while the app isn't running (with when).
+    battery_local: Option<(battery_limit::BatteryStatus, Instant)>,
+    /// Installed terminals and editors (File Tools).
+    finder_apps: Option<(Vec<file_tools::finder::apps::InstalledApp>, Vec<file_tools::finder::apps::InstalledApp>)>,
+    finder_needs_update: Option<bool>,
+    /// espanso import: the path typed / chosen and the outcome.
+    espanso_path: String,
+    espanso_result: Option<(bool, String)>,
+    /// Results of slow actions run on another thread (admin prompts, file
+    /// pickers): (what, Ok(message) / Err(message)).
+    background: BackgroundResults,
+    /// Which background actions are running.
+    busy: std::collections::BTreeSet<&'static str>,
+    /// Messages shown under a card after a background action (by its name).
+    notes: std::collections::BTreeMap<&'static str, Result<String, String>>,
+    /// Text Expansion: the snippet whose details are open.
+    snippet_open: Option<usize>,
+    /// Menu bar manager status written by the running app.
+    menubar_status: Option<pm_config::bridge::MenuBarStatus>,
+    /// When the Menu Bar page last asked the app to list the items.
+    menubar_list_at: Option<Instant>,
+    /// Sound: the "add device" text fields, per list.
+    new_device: std::collections::BTreeMap<&'static str, String>,
 }
 
 impl SettingsApp {
@@ -288,6 +355,25 @@ impl SettingsApp {
             clip_count: None,
             has_notch: notch_shelf::has_notch(),
             new_format: Default::default(),
+            scaling_status: pm_config::bridge::read_fresh(&config_path, pm_config::bridge::SCALING_STATUS_FILE, pm_config::bridge::STATUS_FRESH_MS),
+            audio_status: pm_config::bridge::read_fresh(&config_path, pm_config::bridge::AUDIO_STATUS_FILE, pm_config::bridge::STATUS_FRESH_MS),
+            audio_local: None,
+            audio_app_local: Default::default(),
+            audio_pending: None,
+            audio_written: now,
+            battery_status: pm_config::bridge::read_fresh(&config_path, pm_config::bridge::BATTERY_STATUS_FILE, pm_config::bridge::STATUS_FRESH_MS),
+            battery_local: None,
+            finder_apps: None,
+            finder_needs_update: None,
+            espanso_path: String::new(),
+            espanso_result: None,
+            background: Default::default(),
+            busy: Default::default(),
+            notes: Default::default(),
+            snippet_open: None,
+            new_device: Default::default(),
+            menubar_status: None,
+            menubar_list_at: None,
             config_path,
         };
         if !s.config_path.exists() {
@@ -360,6 +446,9 @@ impl SettingsApp {
     fn save_ft(&mut self) {
         let f = &mut self.ft_file;
         f.changed_at = None;
+        if !f.problems.is_empty() {
+            return;
+        }
         let edit = FtEdit::of(&self.ft);
         let v = canonical(&edit);
         if v == f.written {
@@ -449,7 +538,12 @@ impl SettingsApp {
         if self.fz_file.track(serde_json::to_value(FzEdit::of(&self.fz)).unwrap_or_default(), now) {
             self.fz_file.problems = validate_fancyzones(&self.fz);
         }
-        self.ft_file.track(serde_json::to_value(FtEdit::of(&self.ft)).unwrap_or_default(), now);
+        if self.ft_file.track(serde_json::to_value(FtEdit::of(&self.ft)).unwrap_or_default(), now) {
+            self.ft_file.problems = validate_resize(&self.ft.resize)
+                .into_iter()
+                .map(|m| Problem { page: Page::FileTools, message: format!("Image Resizer: {m}") })
+                .collect();
+        }
         for which in [0, 1, 2] {
             let f = match which {
                 0 => &self.app_file,
@@ -470,6 +564,8 @@ impl SettingsApp {
             }
         }
         self.flush_display_request(false);
+        self.flush_audio_request(false);
+        self.collect_background(ctx);
         if now - self.last_poll >= POLL {
             self.last_poll = now;
             if mtime(&self.config_path) != self.app_file.mtime && self.app_file.clean() {
@@ -484,6 +580,7 @@ impl SettingsApp {
             self.mwb_status = pm_config::MwbStatus::load_for(&self.config_path);
             self.display_status = pm_config::DisplayStatus::load_for(&self.config_path);
             self.display_local.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(4));
+            self.poll_new_modules();
             if now - self.perms_at >= Duration::from_secs(2) {
                 self.perms_at = now;
                 self.perms = crate::platform::permissions();
@@ -510,6 +607,7 @@ impl SettingsApp {
             self.save_ft();
         }
         self.flush_display_request(true);
+        self.flush_audio_request(true);
     }
 
     fn problems(&self) -> impl Iterator<Item = &Problem> {
@@ -537,6 +635,11 @@ impl SettingsApp {
             Page::TextExtractor => Some(c.text_extractor.enabled),
             Page::FileTools => None,
             Page::WindowSwitcher => Some(c.window_switcher.enabled),
+            Page::Sound => Some(c.audio.enabled),
+            Page::Battery => None,
+            Page::DockPreviews => Some(c.dock_previews.enabled),
+            Page::TextExpander => Some(c.text_expander.enabled),
+            Page::MenuBar => Some(c.menu_bar.enabled),
         }
     }
 
@@ -561,7 +664,11 @@ impl SettingsApp {
             Page::ColorPicker => c.color_picker.enabled = on,
             Page::TextExtractor => c.text_extractor.enabled = on,
             Page::WindowSwitcher => c.window_switcher.enabled = on,
-            Page::General | Page::FileTools => {}
+            Page::Sound => c.audio.enabled = on,
+            Page::DockPreviews => c.dock_previews.enabled = on,
+            Page::TextExpander => c.text_expander.enabled = on,
+            Page::MenuBar => c.menu_bar.enabled = on,
+            Page::General | Page::FileTools | Page::Battery => {}
         }
     }
 
@@ -649,7 +756,7 @@ impl SettingsApp {
                 )
             } else if self.app_file.save_error.is_some() || self.fz_file.save_error.is_some() {
                 (icon::WARNING_CIRCLE, p.error, "Saving failed".to_string())
-            } else if self.app_file.changed_at.is_some() || self.fz_file.changed_at.is_some() {
+            } else if self.app_file.changed_at.is_some() || self.fz_file.changed_at.is_some() || self.ft_file.changed_at.is_some() {
                 (icon::ARROWS_CLOCKWISE, p.text2, "Saving…".to_string())
             } else if let Some(t) = self.last_saved {
                 (
@@ -995,7 +1102,7 @@ impl SettingsApp {
         let m = meta(page);
         let p = pal(ui);
         ui.add_space(30.0);
-        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools);
+        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools | Page::Battery);
         let mut on = self.module_on(page).unwrap_or(false);
         card_frame(&p)
             .inner_margin(egui::Margin::same(20))
@@ -1059,6 +1166,11 @@ impl SettingsApp {
             Page::TextExtractor => self.text_extractor(ui),
             Page::FileTools => self.file_tools(ui),
             Page::WindowSwitcher => self.window_switcher(ui),
+            Page::Sound => self.sound(ui),
+            Page::Battery => self.battery(ui),
+            Page::DockPreviews => self.dock_previews(ui),
+            Page::TextExpander => self.text_expander(ui),
+            Page::MenuBar => self.menu_bar(ui),
         }
     }
 
@@ -2797,7 +2909,8 @@ impl SettingsApp {
                 .collect(),
             ..d.cfg.keyboard_manager.clone()
         };
-        let warnings = km.validate();
+        let (caps_warnings, warnings): (Vec<String>, Vec<String>) =
+            km.validate().into_iter().partition(|w| w.contains("hyperKey"));
         if !warnings.is_empty() {
             ui.add_space(10.0);
             for w in warnings {
@@ -2856,6 +2969,60 @@ impl SettingsApp {
                 },
             );
         }
+
+        let hk = &mut d.cfg.keyboard_manager.hyper_key;
+        card_with(
+            ui,
+            "Caps Lock",
+            Some("Give Caps Lock a better job. Works independently of the Keyboard Manager switch above."),
+            |ui| {
+                use keyboard_manager::{HyperMode as M, TapAction as T};
+                row(ui, "Caps Lock acts as", None, |ui| {
+                    segmented(ui, &mut hk.mode, &[(M::Off, "Caps Lock"), (M::Hyper, "Hyper"), (M::Control, "Control"), (M::Escape, "Escape")])
+                });
+                let (held, extra) = match (hk.mode, mac) {
+                    (M::Off, _) => ("Caps Lock works as usual.", ""),
+                    (M::Hyper, true) => (
+                        "Held, it is Control+Option+Shift+Command at once: a modifier no app uses, free for your own shortcuts (Hyper+T arrives as ⌃⌥⇧⌘T, so shortcut remaps from Ctrl+Option+Shift+Cmd+T fire on it).",
+                        "",
+                    ),
+                    (M::Hyper, false) => (
+                        "Held, it is Ctrl+Alt+Shift+Win at once: free for your own shortcuts (shortcut remaps from Ctrl+Alt+Shift+Win+T fire on Hyper+T).",
+                        "Office uses some Ctrl+Alt+Shift+Win shortcuts (W, T, Y, O, P, D, L, X, N, Space).",
+                    ),
+                    (M::Control, _) => ("Held, it is Control — handy for Emacs-style and terminal shortcuts.", ""),
+                    (M::Escape, _) => ("Caps Lock is Escape (it repeats while held).", ""),
+                };
+                block(ui, |ui| {
+                    hint(ui, held);
+                    if !extra.is_empty() {
+                        hint(ui, extra);
+                    }
+                    if mac && hk.mode != M::Off {
+                        hint(ui, "While this is on, macOS maps Caps Lock to F18 for this login session; the usual mapping comes back when you switch it off or quit PowerMac.");
+                    }
+                });
+                ui.add_enabled_ui(matches!(hk.mode, M::Hyper | M::Control), |ui| {
+                    row(ui, "Tapped alone", Some("A press with no other key."), |ui| {
+                        segmented(ui, &mut hk.tap_action, &[(T::Escape, "Escape"), (T::CapsLock, "Caps Lock"), (T::None, "Nothing")])
+                    });
+                    row(ui, "Counts as a tap within", Some("A longer press is never a tap."), |ui| {
+                        slider(ui, &mut hk.tap_timeout_ms, 0..=1000, " ms")
+                    });
+                });
+                for w in &caps_warnings {
+                    let text = if w.contains("CapsLock remap") {
+                        "Your key remap of CapsLock is ignored while Caps Lock has a job here.".to_string()
+                    } else if w.contains("tapTimeoutMs is 0") {
+                        "With 0 ms, tapping Caps Lock never counts as a tap.".to_string()
+                    } else {
+                        w.clone()
+                    };
+                    warn_label(ui, &text);
+                    ui.add_space(8.0);
+                }
+            },
+        );
 
         card(ui, "Paste as plain text", |ui| {
             let p = &mut d.cfg.keyboard_manager.paste_plain_text;
@@ -2921,6 +3088,7 @@ impl SettingsApp {
     }
     pub fn reload_status_for_test(&mut self) {
         self.display_status = pm_config::DisplayStatus::load_for(&self.config_path);
+        self.poll_new_modules();
     }
     pub fn set_devices_for_test(&mut self, d: Vec<mouse_tuning::DeviceInfo>) {
         self.devices = Some(d);

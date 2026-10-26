@@ -202,6 +202,7 @@ impl SettingsApp {
 
     pub(super) fn displays(&mut self, ui: &mut Ui) {
         self.hero(ui, |_, _| {});
+        self.scaling_banners(ui);
         let on = self.app.cfg.display_control.enabled;
         let status = self.display_status.clone().filter(|s| s.is_fresh() && s.running);
         let mut sets: Vec<(String, u8, u8)> = Vec::new();
@@ -299,6 +300,7 @@ impl SettingsApp {
             self.flush_display_request(true);
         }
 
+        self.scaling_cards(ui);
         let keys_active = status.as_ref().map(|s| s.keys_active);
         let rec = &mut self.recording;
         let d = &mut self.app;
@@ -580,6 +582,7 @@ impl SettingsApp {
                 &mut n.battery_indicator,
             );
         });
+        self.notch_widgets(ui);
     }
 
     // -----------------------------------------------------------------------
@@ -901,15 +904,16 @@ impl SettingsApp {
         self.hero(ui, |_, _| {});
         let mac = cfg!(target_os = "macos");
         let installed = *self.finder_installed.get_or_insert_with(file_tools::finder_integration_installed);
+        let needs_update = *self.finder_needs_update.get_or_insert_with(file_tools::finder_integration_needs_update);
         let mut toggle = None;
         let where_ = if mac { "Finder" } else { "Explorer" };
         card_with(
             ui,
             &format!("{where_} integration"),
             Some(if mac {
-                "Adds “Rename with PowerRename” and “New file here” to Quick Actions when you right-click files or folders in Finder."
+                "Adds Rename with PowerRename, New file here, Open in Terminal, Open in Editor, Copy Path and Resize Images to Quick Actions when you right-click files or folders in Finder."
             } else {
-                "Adds “Rename with PowerRename” and “New file here” to the right-click menu in Explorer."
+                "Adds Rename with PowerRename, New file here, Open in Terminal, Open in Editor, Copy Path and Resize Images to the right-click menu in Explorer."
             }),
             |ui| {
                 row(
@@ -917,6 +921,13 @@ impl SettingsApp {
                     if mac { "Quick Actions" } else { "Context menu" },
                     Some("They run this copy of PowerMac."),
                     |ui| {
+                        if needs_update {
+                            status_pill(ui, false, "Some are missing");
+                            if primary_button(ui, if mac { "Update Finder actions" } else { "Update Explorer menu" }).clicked() {
+                                toggle = Some(true);
+                            }
+                            return;
+                        }
                         status_pill(ui, installed, if installed { "Installed" } else { "Not installed" });
                         if installed {
                             if ui.button("Remove").clicked() {
@@ -931,7 +942,7 @@ impl SettingsApp {
                     error_label(ui, e);
                     ui.add_space(8.0);
                 }
-                row(ui, "From a terminal", Some("powermac rename <files…>   ·   powermac new --dir <folder>"), |_| {});
+                row(ui, "From a terminal", Some("powermac rename <files…>  ·  powermac new --dir <folder>  ·  powermac resize <pictures…>  ·  powermac finder <action>"), |_| {});
             },
         );
         if let Some(install) = toggle {
@@ -944,6 +955,7 @@ impl SettingsApp {
             };
             self.finder_error = r.err().map(|e| format!("{e:#}"));
             self.finder_installed = Some(file_tools::finder_integration_installed());
+            self.finder_needs_update = Some(file_tools::finder_integration_needs_update());
         }
 
         let ft = &mut self.ft;
@@ -994,6 +1006,7 @@ impl SettingsApp {
             toggle_row(ui, &format!("Select the new item in {where_}"), None, &mut np.reveal_after_create);
             toggle_row(ui, "Open the new item", None, &mut np.open_after_create);
         });
+        self.finder_cards(ui);
     }
 
     // -----------------------------------------------------------------------
@@ -1143,7 +1156,7 @@ fn pointer_card(ui: &mut Ui, title: &str, desc: &str, s: &mut PointerSettings) {
 }
 
 /// A status pill plus "Open Settings…" when not granted.
-fn permission_control(ui: &mut Ui, ok: bool, pane: &str) {
+pub(super) fn permission_control(ui: &mut Ui, ok: bool, pane: &str) {
     status_pill(ui, ok, if ok { "Granted" } else { "Not granted" });
     if !ok && ui.button("Open Settings…").clicked() {
         crate::platform::open_privacy_pane(pane);
@@ -1164,7 +1177,7 @@ fn swatch(ui: &mut Ui, c: Rgb) {
 }
 
 /// A tinted note above the cards.
-fn callout(ui: &mut Ui, glyph: &str, title: &str, text: &str) {
+pub(super) fn callout(ui: &mut Ui, glyph: &str, title: &str, text: &str) {
     let p = pal(ui);
     let c = if glyph == icon::WARNING { Color32::from_rgb(0xE8, 0x9A, 0x00) } else { p.accent };
     ui.add_space(16.0);

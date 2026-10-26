@@ -113,6 +113,20 @@ pub fn capture_permission() -> CapturePermission {
     }
 }
 
+/// Show the macOS audio-capture permission prompt without a running engine
+/// (blocks until the user answers; returns whether access was granted).
+/// Same as [`Handle::request_capture_permission`]; `Ok(true)` elsewhere.
+pub fn request_capture_permission() -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::tcc::request()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(true)
+    }
+}
+
 /// One-shot device listing without starting the engine (for the settings
 /// window, which runs in its own process).
 pub fn list_devices(kind: DeviceKind) -> Result<Vec<AudioDevice>> {

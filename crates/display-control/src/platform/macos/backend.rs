@@ -128,7 +128,13 @@ pub(crate) fn online_displays() -> Vec<CGDirectDisplayID> {
     if unsafe { CGGetOnlineDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut n) } != 0 {
         return Vec::new();
     }
-    ids[..n as usize].to_vec()
+    // Display Scaling's virtual HiDPI displays have no hardware to control
+    // (the physical panel they mirror onto is listed on its own).
+    ids[..n as usize]
+        .iter()
+        .copied()
+        .filter(|&d| !crate::is_scaling_virtual_display(unsafe { CGDisplayVendorNumber(d) }, unsafe { CGDisplayModelNumber(d) }))
+        .collect()
 }
 
 fn bounds(id: CGDirectDisplayID) -> Rect {
