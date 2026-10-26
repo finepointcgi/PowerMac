@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::edge_snap::{BottomEdgeAction, EdgeSnapConfig, TopEdgeAction};
 use crate::layout::{AppliedLayout, CustomLayout, OverlappingZonesAlgorithm};
 
 /// Modifier set for a hotkey.
@@ -72,8 +73,21 @@ pub struct Settings {
     pub span_zones_across_monitors: bool,
     pub show_zones_on_all_monitors: bool,
     pub show_zone_number: bool,
-    /// Restore a window's original size when it is dragged out of its zone.
+    /// Restore a window's original size when it is dragged out of its zone
+    /// (or out of an edge snap).
     pub restore_size: bool,
+    /// Rectangle-style snapping: drag a window to a screen edge/corner (with
+    /// zones not showing) to snap it to a half, quarter, third or maximize.
+    /// Default on macOS; off on Windows, whose built-in Snap already does this.
+    pub edge_snap_enabled: bool,
+    /// Distance (px/points) from a monitor edge that triggers an edge snap.
+    pub edge_snap_margin: i32,
+    /// Distance from a corner (along either edge) that snaps to a quarter.
+    pub edge_snap_corner_size: i32,
+    pub edge_snap_top: TopEdgeAction,
+    pub edge_snap_bottom: BottomEdgeAction,
+    /// Gap around and between edge-snapped windows.
+    pub edge_snap_gap: i32,
     /// Move newly opened windows of an app to the zone it last used.
     pub app_last_zone_move_windows: bool,
     pub zone_color: String,
@@ -101,6 +115,12 @@ impl Default for Settings {
             show_zones_on_all_monitors: false,
             show_zone_number: true,
             restore_size: false,
+            edge_snap_enabled: cfg!(not(windows)),
+            edge_snap_margin: 5,
+            edge_snap_corner_size: 20,
+            edge_snap_top: TopEdgeAction::Maximize,
+            edge_snap_bottom: BottomEdgeAction::BottomHalf,
+            edge_snap_gap: 0,
             app_last_zone_move_windows: false,
             zone_color: "#AACDFF".into(),
             zone_border_color: "#FFFFFF".into(),
@@ -109,6 +129,17 @@ impl Default for Settings {
             zone_highlight_opacity: 50,
             overlapping_zones_algorithm: OverlappingZonesAlgorithm::Smallest,
             default_layout: AppliedLayout::default(),
+        }
+    }
+}
+
+impl Settings {
+    pub fn edge_snap_config(&self) -> EdgeSnapConfig {
+        EdgeSnapConfig {
+            margin: self.edge_snap_margin,
+            corner_size: self.edge_snap_corner_size,
+            top: self.edge_snap_top,
+            bottom: self.edge_snap_bottom,
         }
     }
 }

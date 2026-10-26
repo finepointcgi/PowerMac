@@ -35,6 +35,7 @@
 //! message loop. Nothing is required from the caller's thread.
 
 pub mod config;
+pub mod edge_snap;
 pub mod engine;
 pub mod geometry;
 pub mod layout;
@@ -48,7 +49,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::Result;
 
 pub use config::{Config, Modifiers, Settings};
-pub use engine::{Engine, Monitor, WindowSystem, WorkArea};
+pub use edge_snap::{BottomEdgeAction, EdgeAction, TopEdgeAction};
+pub use engine::{DragResult, Engine, Monitor, WindowSystem, WorkArea};
 pub use geometry::{Point, Rect};
 pub use layout::{AppliedLayout, CustomLayout, CustomLayoutInfo, Layout, LayoutType};
 pub use navigation::Direction;

@@ -20,7 +20,7 @@ use super::ax::{has_permissions, MacWindow, NativeWindowSystem};
 use super::ffi::*;
 use super::{overlay, screens};
 use crate::config::Modifiers;
-use crate::engine::{DragInput, WorkArea};
+use crate::engine::{DragInput, DragResult, WorkArea};
 use crate::geometry::{Point, Rect};
 use crate::hotkey_bits::{self, Action};
 use crate::navigation::Direction;
@@ -306,8 +306,9 @@ fn worker_loop(rx: Receiver<Msg>, shared: Arc<Shared>) {
                     std::thread::sleep(Duration::from_millis(40));
                     let mut e = shared.engine();
                     match e.drag_end(&ws, &a.window, &a.areas) {
-                        Ok(Some(z)) => log::debug!("fancyzones: snapped to zones {z:?}"),
-                        Ok(None) => {}
+                        Ok(DragResult::Zones(z)) => log::debug!("fancyzones: snapped to zones {z:?}"),
+                        Ok(DragResult::Edge(a, r)) => log::debug!("fancyzones: edge snap {a:?} -> {r:?}"),
+                        Ok(DragResult::Moved) => {}
                         Err(err) => log::warn!("fancyzones: snapping failed: {err:#}"),
                     }
                     shared.persist(&e.config);
