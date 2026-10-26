@@ -117,8 +117,36 @@ pub(crate) fn shutdown() {
     }
 }
 
+/// Where the app logs when it isn't attached to a terminal (e.g. launched as
+/// PowerMac.app): `~/Library/Logs/PowerMac/powermac.log` on macOS,
+/// `%LOCALAPPDATA%\PowerMac\powermac.log` on Windows.
+pub(crate) fn log_path() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    return dirs::home_dir().map(|h| h.join("Library/Logs/PowerMac/powermac.log"));
+    #[cfg(not(target_os = "macos"))]
+    return dirs::data_local_dir().map(|d| d.join("PowerMac").join("powermac.log"));
+}
+
+fn init_logging() {
+    use std::io::IsTerminal;
+    let mut b = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if !std::io::stderr().is_terminal() {
+        if let Some(path) = log_path() {
+            let _ = std::fs::create_dir_all(path.parent().unwrap());
+            // Keep one previous log around instead of growing forever.
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5_000_000) {
+                let _ = std::fs::rename(&path, path.with_extension("log.old"));
+            }
+            if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                b.target(env_logger::Target::Pipe(Box::new(f)));
+            }
+        }
+    }
+    b.init();
+}
+
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_logging();
     let cli = Cli::parse();
     let path = match cli.config {
         Some(p) => p,

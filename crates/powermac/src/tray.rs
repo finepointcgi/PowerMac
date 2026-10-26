@@ -51,6 +51,7 @@ struct Ui {
     scroll_trackpad: CheckMenuItem,
     open_privacy: MenuItem,
     open_config: MenuItem,
+    open_log: MenuItem,
     quit: MenuItem,
 }
 
@@ -102,6 +103,7 @@ pub fn install() -> anyhow::Result<()> {
     mouse.append_items(&[&find_mouse, &highlighter, &crosshairs])?;
     let paste_plain = MenuItem::new("Paste as plain text", true, None);
     let open_config = MenuItem::new("Open config folder", true, None);
+    let open_log = MenuItem::new("Open log file", true, None);
     let login = CheckMenuItem::new("Launch at login", true, pm_config::login::is_enabled(), None);
     let quit = MenuItem::new("Quit PowerMac", true, None);
     menu.append_items(&[
@@ -122,6 +124,7 @@ pub fn install() -> anyhow::Result<()> {
         &login,
         &open_privacy,
         &open_config,
+        &open_log,
         &quit,
     ])?;
 
@@ -156,6 +159,7 @@ pub fn install() -> anyhow::Result<()> {
             crosshairs,
             open_privacy,
             open_config,
+            open_log,
             quit,
         })
     });
@@ -236,6 +240,15 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
         let _ = std::process::Command::new("open")
             .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             .spawn();
+        return;
+    }
+    if id == ui.open_log.id() {
+        if let Some(p) = crate::log_path().filter(|p| p.exists()) {
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
+            #[cfg(windows)]
+            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn();
+        }
         return;
     }
     if id == ui.open_config.id() {
