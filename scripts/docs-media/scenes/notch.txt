@@ -1,0 +1,10 @@
+move 550 280 300
+wait 900
+move 550 8 700
+wait 3200
+move 330 130 600
+wait 1400
+move 760 140 700
+wait 1400
+move 550 290 700
+wait 1600

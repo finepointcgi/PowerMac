@@ -41,6 +41,17 @@ cargo build --release -p powermac
 | `settings-tour.txt` | `settings-tour.gif` | Home, Install, README |
 | `fancyzones-editor.txt` | `fancyzones-editor.gif` | Home, FancyZones |
 | `notch-widgets.txt` | `notch-widgets.gif` | Notch widgets |
+| `fancyzones-drag.txt` | `fancyzones-drag.gif` | Home, FancyZones, README |
+| `window-switcher.txt` | `window-switcher.gif` | Home, Window Switcher, README |
+| `notch.txt` | `notch.gif` | Home, Notch Shelf, README |
+
+The last three record the running app on the whole screen (`region:0,0,1512,982`) or around the notch (`region:206,0,1100,300`, on a 1512-point-wide screen), so they show whatever is on the desktop. Before recording them:
+
+- Hide every app except a few demo windows (a PowerMac Settings window on the demo config, TextEdit with a sample note, Calculator), and hide the desktop icons (`defaults write com.apple.finder CreateDesktop -bool false; killall Finder`; undo with `defaults delete com.apple.finder CreateDesktop; killall Finder`).
+- The Window Switcher lists hidden and minimized windows and windows on other desktops by title. Set `showHidden`, `showMinimized` and `showOtherSpaces` to `false` in `config.json` while recording, and put them back afterwards.
+- `fancyzones-drag.txt` drags windows by fixed title-bar positions and drops them into the zones of a three-column layout; adjust the coordinates to where your windows and zones are.
+- Pause music you don't want in the Now Playing widget.
+- Check every frame before committing, for example with `ffmpeg -i x.gif -vf "select='not(mod(n\,12))',scale=500:-1,tile=4x3" -frames:v 1 sheet.png`.
 
 Put an image on a page as a figure, so it gets the shared style and a caption:
 

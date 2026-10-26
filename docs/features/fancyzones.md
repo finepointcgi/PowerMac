@@ -24,6 +24,11 @@ Crate: `crates/fancyzones` · Settings page: **FancyZones** · Config: `fancyzon
 
 ## Snapping windows
 
+<figure markdown="span">
+  ![Shift+dragging windows into zones](../assets/gifs/fancyzones-drag.gif){ loading=lazy }
+  <figcaption>Hold Shift while dragging: the zones appear, the one under the pointer lights up, and the window takes its size when you let go.</figcaption>
+</figure>
+
 | Action | macOS | Windows |
 |---|---|---|
 | Show zones while dragging | hold **Shift** | hold Shift |

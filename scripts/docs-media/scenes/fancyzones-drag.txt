@@ -1,0 +1,28 @@
+move 460 300 300
+wait 600
+move 454 80 700
+wait 300
+down
+move 500 130 300
+hold shift
+wait 300
+move 760 470 900
+wait 1300
+move 230 470 900
+wait 1300
+up
+wait 150
+release shift
+wait 1500
+move 1338 133 900
+wait 300
+down
+move 1300 180 300
+hold shift
+wait 300
+move 1300 480 800
+wait 1200
+up
+wait 150
+release shift
+wait 2000

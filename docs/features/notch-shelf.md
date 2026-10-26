@@ -9,6 +9,11 @@ Crate: `crates/notch-shelf` · Settings page: **Notch Shelf** · Config: `notchS
   <figcaption>The Notch Shelf settings page.</figcaption>
 </figure>
 
+<figure markdown="span">
+  ![Opening the notch to show the Home view widgets](../assets/gifs/notch.gif){ loading=lazy }
+  <figcaption>Rest the pointer on the notch and it opens on the Home view: Now Playing, System Stats and a timer here. Move away and it closes.</figcaption>
+</figure>
+
 ## The shelf
 
 - Collapsed, the panel is a black shape exactly over the notch, so it's invisible.

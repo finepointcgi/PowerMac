@@ -12,6 +12,11 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
 
 <table>
   <tr>
+    <td><img src="docs/assets/gifs/fancyzones-drag.gif" alt="FancyZones: Shift+drag a window into a zone"></td>
+    <td><img src="docs/assets/gifs/window-switcher.gif" alt="Window Switcher"></td>
+    <td><img src="docs/assets/gifs/notch.gif" alt="Notch widgets"></td>
+  </tr>
+  <tr>
     <td><img src="docs/assets/screenshots/settings-fancyzones.png" alt="FancyZones settings"></td>
     <td><img src="docs/assets/screenshots/settings-notch-widgets.png" alt="Notch Widgets settings"></td>
     <td><img src="docs/assets/screenshots/settings-window-switcher.png" alt="Window Switcher settings"></td>

@@ -9,6 +9,11 @@ Crate: `crates/window-switcher` · Settings page: **Window Switcher** · Config:
   <figcaption>The Window Switcher settings page.</figcaption>
 </figure>
 
+<figure markdown="span">
+  ![Switching windows with the Window Switcher](../assets/gifs/window-switcher.gif){ loading=lazy }
+  <figcaption>Hold the modifier and press Tab to move through the windows, release to switch. Without Screen Recording permission the switcher shows app icons and window outlines instead of live thumbnails, as here.</figcaption>
+</figure>
+
 ## Shortcuts
 
 | Shortcut | Action |
