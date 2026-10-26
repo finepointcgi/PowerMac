@@ -13,9 +13,12 @@ Crate: `crates/mwb` (protocol + engine), `crates/pm-input` (capture/injection) �
 
 1. In PowerToys → Mouse Without Borders on the PC, copy its security key and machine name. You can also go the other way: tray → **Copy security key** in PowerMac, and paste it into PowerToys.
 2. In **Settings → Mouse Without Borders**, enter the key.
-3. With **Find other computers automatically** on (the default), PowerMac finds the PC itself (see below). Otherwise put both machines in the matrix in left-to-right order, and if the PC's name doesn't resolve add a peer address such as `192.168.1.20`.
-4. Allow TCP **15101** (and 15100) through the firewall on both machines.
-5. Move the pointer past the screen edge to switch machines.
+3. With **Find other computers automatically** on (the default), PowerMac finds the PC itself (see below). This needs the PC's TCP 15101 to be reachable through its firewall.
+4. Or connect from the PC: in PowerToys use **Connect** with the key and the Mac's **name** (for example `MacBook-Pro`), not its IP address. PowerMac answers Windows' LLMNR name queries, so the name resolves without setup. If it doesn't, add `MACBOOK-PRO 10.0.0.112` (name, space, address) under PowerToys → Advanced → **IP address mapping**. One direction is enough, so the PC's firewall can stay closed.
+5. Allow TCP **15101** through the firewall on the machine that accepts the connection. Quit VPNs such as NordVPN on the Mac, or allow LAN traffic in them.
+6. Move the pointer past the screen edge to switch machines.
+
+If it doesn't pair, run `powermac mwb doctor`. [Pairing with a Windows PC](mouse-without-borders-pairing.md) explains how PowerToys resolves and accepts machines, with source references, and why typing an IP address into **Connect** does nothing.
 
 **Swap Cmd/Ctrl** (on by default on macOS) makes Cmd+C on the Mac arrive as Ctrl+C on Windows, and the other way round.
 
@@ -44,6 +47,8 @@ A machine that completes the handshake is connected, placed to the right of this
 | `shareClipboard` | true | exchange clipboard text |
 | `swapCmdCtrl` | true on macOS | swap Cmd and Ctrl on forwarded keys |
 | `autoDiscover` | true | LAN discovery |
+| `answer_name_queries` | true | answer LLMNR name queries (UDP 5355) for `machineName`, so Windows finds the Mac by name |
+| `llmnr_port` | 5355 | LLMNR port (change only for tests) |
 
 ## How it works
 

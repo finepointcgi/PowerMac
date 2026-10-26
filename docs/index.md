@@ -28,6 +28,7 @@ The [feature overview](features/index.md) lists every module with its default st
 <div class="shots">
 <a href="features/fancyzones/"><img src="assets/gifs/fancyzones-drag.gif" alt="Shift+dragging a window into a zone" loading="lazy"><span>FancyZones: Shift+drag into a zone</span></a>
 <a href="features/window-switcher/"><img src="assets/gifs/window-switcher.gif" alt="Switching windows with the Window Switcher" loading="lazy"><span>Window Switcher</span></a>
+<a href="features/dock-previews/"><img src="assets/gifs/dock-previews.gif" alt="Window previews above a Dock icon" loading="lazy"><span>Dock Previews</span></a>
 <a href="features/notch-shelf/"><img src="assets/gifs/notch.gif" alt="The notch opening on its widgets" loading="lazy"><span>Notch widgets</span></a>
 </div>
 

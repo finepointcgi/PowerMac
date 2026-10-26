@@ -17,7 +17,7 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
     <td><img src="docs/assets/gifs/notch.gif" alt="Notch widgets"></td>
   </tr>
   <tr>
-    <td><img src="docs/assets/screenshots/settings-fancyzones.png" alt="FancyZones settings"></td>
+    <td><img src="docs/assets/gifs/dock-previews.gif" alt="Dock Previews"></td>
     <td><img src="docs/assets/screenshots/settings-notch-widgets.png" alt="Notch Widgets settings"></td>
     <td><img src="docs/assets/screenshots/settings-window-switcher.png" alt="Window Switcher settings"></td>
   </tr>
@@ -86,7 +86,7 @@ The settings window checks shortcuts across all modules and won't save two modul
 
 1. In PowerToys → Mouse Without Borders on the PC, copy its security key and machine name. You can also go the other way: use **Copy security key** in the PowerMac tray and paste it into PowerToys.
 2. In Settings → Mouse Without Borders, enter the key. With **Find other computers automatically** on (the default), PowerMac probes TCP 15101 on the hosts of this Mac's private subnets (at most 1024 per network, the /24 around the Mac on larger ones) every minute until a machine is connected, then every 5 minutes, or right away with **Search now** / tray → **Find computers now**. A machine that completes the key handshake is connected, put to the right of this Mac in the layout, and its address is saved; PowerToys then adds the Mac to its own layout. A machine with a different key is left alone for 30 minutes. Otherwise put both machines in the matrix in left-to-right order, and if the PC's name doesn't resolve, add a peer address such as `192.168.1.20`.
-3. Allow TCP **15101** through the firewall on both machines.
+3. Allow TCP **15101** through the firewall on the machine that accepts the connection. From the PC, use PowerToys' **Connect** with the Mac's **name** (not its IP address). PowerMac answers Windows' LLMNR name queries for it. If pairing fails, run `powermac mwb doctor` and see [Pairing with a Windows PC](docs/features/mouse-without-borders-pairing.md).
 4. "Swap Cmd/Ctrl" (on by default on macOS) makes Cmd+C on the Mac arrive as Ctrl+C on Windows, and the other way round.
 
 ### macOS permissions

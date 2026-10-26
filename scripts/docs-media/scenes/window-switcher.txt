@@ -1,9 +1,11 @@
-move 980 700 400
+move 980 760 400
 wait 800
 hold cmd
 wait 150
 key 48
-wait 1600
+wait 1800
+key 48
+wait 1500
 key 48
 wait 1500
 release cmd

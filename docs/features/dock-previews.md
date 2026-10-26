@@ -9,6 +9,11 @@ Crate: `crates/dock-previews` · Settings page: **Dock Previews** · Config: `do
   <figcaption>The Dock Previews settings page.</figcaption>
 </figure>
 
+<figure markdown="span">
+  ![Hovering Dock icons to preview their windows](../assets/gifs/dock-previews.gif){ loading=lazy }
+  <figcaption>Hover TextEdit's Dock icon to see both of its windows, click one to bring it forward, then hover Calculator.</figcaption>
+</figure>
+
 ## Using it
 
 | In the panel | Action |
