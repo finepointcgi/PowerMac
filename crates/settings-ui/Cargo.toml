@@ -9,6 +9,7 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 pm-config = { path = "../pm-config" }
+pm-ui = { path = "../pm-ui" }
 mwb = { path = "../mwb" }
 fancyzones = { path = "../fancyzones" }
 awake = { path = "../awake" }

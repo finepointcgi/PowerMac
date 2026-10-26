@@ -16,6 +16,7 @@ use crate::model::*;
 use crate::record::{self, Recorded};
 use crate::theme::{self, icon, pal};
 use crate::widgets::*;
+use crate::mu_color::color_edit;
 use crate::zone_style;
 
 /// Wait this long after the last change before writing the file.

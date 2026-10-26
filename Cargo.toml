@@ -1,6 +1,26 @@
 [workspace]
 resolver = "2"
-members = ["crates/pm-input", "crates/mwb", "crates/fancyzones", "crates/awake", "crates/scroll-reverser", "crates/mouse-utils", "crates/keyboard-manager", "crates/pm-config", "crates/settings-ui", "crates/powermac"]
+members = [
+    "crates/pm-input",
+    "crates/mwb",
+    "crates/fancyzones",
+    "crates/awake",
+    "crates/scroll-reverser",
+    "crates/mouse-utils",
+    "crates/keyboard-manager",
+    "crates/pm-config",
+    "crates/settings-ui",
+    "crates/pm-ui",
+    "crates/mouse-tuning",
+    "crates/display-control",
+    "crates/clipboard-history",
+    "crates/notch-shelf",
+    "crates/color-picker",
+    "crates/text-extractor",
+    "crates/file-tools",
+    "crates/window-switcher",
+    "crates/powermac",
+]
 
 [workspace.package]
 version = "0.1.0"

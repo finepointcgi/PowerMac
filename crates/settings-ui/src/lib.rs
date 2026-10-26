@@ -13,8 +13,9 @@ mod platform;
 mod record;
 #[cfg(test)]
 mod shots;
-mod theme;
-mod widgets;
+pub(crate) use pm_ui::theme;
+pub(crate) use pm_ui::widgets;
+mod mu_color;
 mod zone_style;
 
 use std::path::PathBuf;

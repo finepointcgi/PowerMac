@@ -1,0 +1,7 @@
+[package]
+name = "pm-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }

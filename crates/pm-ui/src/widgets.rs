@@ -734,8 +734,18 @@ fn split_keys(s: &str) -> Vec<&str> {
 // ---------------------------------------------------------------------------
 // Colors
 
+/// Parse `#RRGGBB` (the leading `#` is optional).
+pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
 pub fn hex_to_color32(s: &str, fallback: Color32) -> Color32 {
-    fancyzones::config::parse_hex_color(s).map(|(r, g, b)| Color32::from_rgb(r, g, b)).unwrap_or(fallback)
+    parse_hex_color(s).map(|(r, g, b)| Color32::from_rgb(r, g, b)).unwrap_or(fallback)
 }
 
 pub fn color32_to_hex(c: Color32) -> String {
@@ -953,7 +963,7 @@ pub fn hex_color_edit(ui: &mut Ui, s: &mut String) -> Response {
         } else {
             format!("#{t}")
         };
-        if fancyzones::config::parse_hex_color(&t).is_some() && t.len() == 7 {
+        if parse_hex_color(&t).is_some() && t.len() == 7 {
             *s = t.to_uppercase();
             r.mark_changed();
         }
@@ -964,17 +974,6 @@ pub fn hex_color_edit(ui: &mut Ui, s: &mut String) -> Response {
         ui.data_mut(|d| d.remove::<String>(id));
     }
     r
-}
-
-/// Color picker for a Mouse Utilities color (with or without alpha).
-pub fn color_edit(ui: &mut Ui, c: &mut mouse_utils::Color, alpha: bool) {
-    let mut col = Color32::from_rgba_unmultiplied(c.r, c.g, c.b, if alpha { c.a } else { 255 });
-    if swatch_picker(ui, &mut col, alpha).changed() {
-        let [r, g, b, a] = col.to_srgba_unmultiplied();
-        *c = mouse_utils::Color::argb(if alpha { a } else { c.a }, r, g, b);
-    }
-    let p = pal(ui);
-    ui.label(RichText::new(c.to_string()).monospace().color(p.text2));
 }
 
 #[cfg(test)]
