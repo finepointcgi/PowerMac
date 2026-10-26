@@ -40,6 +40,7 @@ struct Ui {
     zones_status: MenuItem,
     layouts: Vec<CheckMenuItem>,
     copy_key: MenuItem,
+    login: CheckMenuItem,
     open_privacy: MenuItem,
     open_config: MenuItem,
     quit: MenuItem,
@@ -80,6 +81,7 @@ pub fn install() -> anyhow::Result<()> {
     let copy_key = MenuItem::new("Copy security key", true, None);
     let open_privacy = MenuItem::new("Open Privacy settings…", cfg!(target_os = "macos"), None);
     let open_config = MenuItem::new("Open config folder", true, None);
+    let login = CheckMenuItem::new("Launch at login", true, crate::login::is_enabled(), None);
     let quit = MenuItem::new("Quit PowerMac", true, None);
     menu.append_items(&[
         &title,
@@ -91,6 +93,7 @@ pub fn install() -> anyhow::Result<()> {
         &awake,
         &zones,
         &PredefinedMenuItem::separator(),
+        &login,
         &open_privacy,
         &open_config,
         &quit,
@@ -116,6 +119,7 @@ pub fn install() -> anyhow::Result<()> {
             zones_status,
             layouts,
             copy_key,
+            login,
             open_privacy,
             open_config,
             quit,
@@ -142,6 +146,13 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     if id == ui.quit.id() {
         shutdown();
         std::process::exit(0);
+    }
+    if id == ui.login.id() {
+        if let Err(e) = crate::login::set_enabled(ui.login.is_checked()) {
+            log::warn!("launch at login: {e:#}");
+        }
+        ui.login.set_checked(crate::login::is_enabled());
+        return;
     }
     if id == ui.copy_key.id() {
         copy_key();

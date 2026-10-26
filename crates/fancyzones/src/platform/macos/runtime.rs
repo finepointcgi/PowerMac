@@ -206,6 +206,22 @@ struct Pending {
     rect: Rect,
     down: Point,
     checks: u32,
+    /// Mouse went down on the title bar (away from the resize edges), so any
+    /// frame change is a move. macOS itself resizes tiled windows when a drag
+    /// starts, which would otherwise look like a resize.
+    in_title_bar: bool,
+}
+
+/// Height of the strip at the top of a window treated as its title bar.
+const TITLE_BAR_HEIGHT: i32 = 32;
+/// Distance from the left/right edges where a press may be a resize.
+const RESIZE_EDGE: i32 = 6;
+
+fn in_title_bar(rect: &Rect, p: Point) -> bool {
+    p.y >= rect.top + 2
+        && p.y < rect.top + TITLE_BAR_HEIGHT
+        && p.x >= rect.left + RESIZE_EDGE
+        && p.x < rect.right - RESIZE_EDGE
 }
 
 struct Active {
@@ -243,7 +259,7 @@ fn worker_loop(rx: Receiver<Msg>, shared: Arc<Shared>) {
                         return None;
                     }
                     let rect = w.element.frame().ok()?;
-                    Some(Pending { window: w, rect, down: p, checks: 0 })
+                    Some(Pending { window: w, rect, down: p, checks: 0, in_title_bar: in_title_bar(&rect, p) })
                 });
             }
             Msg::MouseDragged(p, flags) => {
@@ -262,9 +278,11 @@ fn worker_loop(rx: Receiver<Msg>, shared: Arc<Shared>) {
                     pending = None;
                     continue;
                 };
-                if now.width() != pd.rect.width() || now.height() != pd.rect.height() {
+                let resized = now.width() != pd.rect.width() || now.height() != pd.rect.height();
+                let moved = now.left != pd.rect.left || now.top != pd.rect.top;
+                if resized && !pd.in_title_bar {
                     pending = None; // resizing, not moving
-                } else if now.left != pd.rect.left || now.top != pd.rect.top {
+                } else if moved || resized {
                     let pd = pending.take().unwrap();
                     let monitors = match screens::monitors() {
                         Ok(m) => m,

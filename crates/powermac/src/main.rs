@@ -2,6 +2,8 @@
 
 mod clipboard;
 mod config;
+mod login;
+mod modules;
 mod tray;
 
 use std::sync::{Arc, Mutex};
@@ -159,41 +161,8 @@ fn run(path: &std::path::Path, tray: bool) -> Result<()> {
     let cfg = AppConfig::load_or_default(path)?;
     let _ = CONFIG_PATH.set(path.to_path_buf());
     let mut running = Running::default();
-
-    // Awake always exists (passive unless enabled) so the tray can switch it on.
-    let a = awake::Awake::new()?;
-    if cfg.awake.enabled {
-        a.set(cfg.awake.settings)?;
-        log::info!("awake: {:?}", cfg.awake.settings.mode);
-    }
-    running.awake = Some(a);
-
-    if cfg.mwb.enabled {
-        let backend = pm_input::backend()?;
-        if !backend.has_permissions(true) {
-            log::error!("mouse without borders needs Accessibility + Input Monitoring permission; \
-                         grant it in System Settings → Privacy & Security and restart");
-        } else if !mwb::crypto::is_key_valid(&cfg.mwb.settings.key) {
-            log::error!("mouse without borders: key missing or shorter than 16 chars (run `powermac init`)");
-        } else {
-            let h = mwb::Engine::start(cfg.mwb.settings.clone(), backend)?;
-            log::info!("mouse without borders: {} listening on {}", h.machine_name(), h.local_addr());
-            let rx = h.events();
-            running.mwb = Some(h);
-            clipboard::start(rx, cfg.mwb.settings.share_clipboard);
-        }
-    }
-
-    if cfg.fancyzones.enabled {
-        let fz_cfg = fancyzones::Config::load_or_default()?;
-        match fancyzones::FancyZones::start(fz_cfg) {
-            Ok(h) => {
-                log::info!("fancyzones: running");
-                running.zones = Some(h);
-            }
-            Err(e) => log::error!("fancyzones: {e:#}"),
-        }
-    }
+    modules::apply(&mut running, None, &cfg);
+    modules::watch(path, cfg.clone());
 
     let anything = running.mwb.is_some() || running.zones.is_some() || cfg.awake.enabled;
     if !anything && !tray {
