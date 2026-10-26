@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::{DateTime, Local};
 use serde::Serialize;
 
@@ -102,6 +102,19 @@ pub fn matrix_move_up(slots: &mut [String; MAX_MACHINE], i: usize) {
 pub fn matrix_move_down(slots: &mut [String; MAX_MACHINE], i: usize) {
     if i + 1 < MAX_MACHINE {
         slots.swap(i, i + 1);
+    }
+}
+
+/// Move the machine in slot `from` to slot `to` (drag and drop); the
+/// slots in between shift by one.
+pub fn matrix_move(slots: &mut [String; MAX_MACHINE], from: usize, to: usize) {
+    if from >= MAX_MACHINE || to >= MAX_MACHINE || from == to {
+        return;
+    }
+    if from < to {
+        slots[from..=to].rotate_left(1);
+    } else {
+        slots[to..=from].rotate_right(1);
     }
 }
 
@@ -669,6 +682,14 @@ pub fn load_fancyzones(path: &Path) -> Result<fancyzones::Config> {
     }
 }
 
+/// Ask the running PowerMac to flash the zones (see
+/// [`fancyzones::FLASH_REQUEST_FILE`]).
+pub fn request_zone_flash(config_path: &Path, monitor: Option<String>) -> Result<()> {
+    let path = config_path.with_file_name(fancyzones::FLASH_REQUEST_FILE);
+    let json = serde_json::to_string(&fancyzones::FlashRequest::now(monitor))?;
+    std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
+}
+
 /// The parts of `fancyzones.json` this window edits.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FzEdit {
@@ -779,6 +800,32 @@ pub fn validate_fancyzones(c: &fancyzones::Config) -> Vec<Problem> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn matrix_drag_moves() {
+        let mut m: [String; super::MAX_MACHINE] = ["a".into(), "b".into(), "c".into(), "".into()];
+        super::matrix_move(&mut m, 0, 2);
+        assert_eq!(m, ["b", "c", "a", ""]);
+        super::matrix_move(&mut m, 3, 0);
+        assert_eq!(m, ["", "b", "c", "a"]);
+        super::matrix_move(&mut m, 1, 1);
+        assert_eq!(m, ["", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn flash_request_file() {
+        let d = std::env::temp_dir().join(format!("pm-flash-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let cfg = d.join("config.json");
+        super::request_zone_flash(&cfg, Some("mon".into())).unwrap();
+        let r: fancyzones::FlashRequest = serde_json::from_str(
+            &std::fs::read_to_string(d.join(fancyzones::FLASH_REQUEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(r.monitor.as_deref(), Some("mon"));
+        assert!(r.is_fresh(5_000));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     use super::*;
     use chrono::TimeZone;
 

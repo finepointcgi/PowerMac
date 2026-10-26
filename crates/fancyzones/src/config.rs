@@ -283,6 +283,11 @@ pub struct Settings {
     pub zone_number_color: String,
     /// 0..=100
     pub zone_highlight_opacity: u8,
+    /// Derive the zone and highlight colors from the system accent color
+    /// (macOS: System Settings → Appearance → Accent color; Windows: the
+    /// personalization accent color) instead of `zone_color` /
+    /// `zone_highlight_color`. Not a PowerToys setting.
+    pub use_system_accent: bool,
     pub overlapping_zones_algorithm: OverlappingZonesAlgorithm,
     /// Applied to monitors that have no entry in `applied_layouts`.
     pub default_layout: AppliedLayout,
@@ -377,6 +382,7 @@ impl Default for Settings {
             zone_highlight_color: "#008CFF".into(),
             zone_number_color: "#000000".into(),
             zone_highlight_opacity: 50,
+            use_system_accent: false,
             overlapping_zones_algorithm: OverlappingZonesAlgorithm::Smallest,
             default_layout: AppliedLayout::default(),
             mouse_middle_click_spanning_multiple_zones: false,

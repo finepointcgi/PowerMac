@@ -22,3 +22,7 @@ eframe = { version = "0.37.0", default-features = false, features = ["default_fo
 objc2 = "0.6.5"
 objc2-app-kit = "0.3.2"
 objc2-foundation = "0.3"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

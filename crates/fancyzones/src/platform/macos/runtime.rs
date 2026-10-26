@@ -479,7 +479,7 @@ pub fn monitor_under_cursor() -> Option<String> {
 
 fn show_feedback(fb: SwitchFeedback) {
     if let Some(f) = fb.flash {
-        overlay::flash(f, FLASH_ZONES_MS);
+        overlay::flash(f, fb.flash_ms.unwrap_or(FLASH_ZONES_MS));
     }
     if let Some(l) = fb.label {
         overlay::show_label(l);

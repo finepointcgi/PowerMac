@@ -5,10 +5,10 @@
 
 use std::collections::BTreeSet;
 
-use eframe::egui::{self, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, Ui};
+use eframe::egui::{self, CursorIcon, Pos2, Rect, Sense, Stroke, Ui};
 use fancyzones::layout::{calculate_grid_zones, GridLayoutInfo};
 
-use crate::widgets::ACCENT;
+use crate::theme;
 
 /// Row / column percentages sum to this (`GridData.Multiplier`).
 pub const MULTIPLIER: i32 = 10000;
@@ -696,13 +696,18 @@ impl GridEditor {
         // --- drawing
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals().clone();
+        let pal = theme::pal(ui);
+        let accent = pal.accent;
         painter.rect_filled(rect, 0.0, visuals.extreme_bg_color);
         let sx = rect.width() / self.work.0 as f32;
         let sy = rect.height() / self.work.1 as f32;
         let info = self.to_info();
-        let px_rects = calculate_grid_zones(self.work.0, self.work.1, &info, self.effective_spacing()).ok();
-        let fill = Color32::from_rgba_unmultiplied(0x2B, 0x88, 0xD8, 70);
-        let sel_fill = Color32::from_rgba_unmultiplied(0x2B, 0x88, 0xD8, 150);
+        let px_rects =
+            calculate_grid_zones(self.work.0, self.work.1, &info, self.effective_spacing()).ok();
+        let fill = pal
+            .accent
+            .gamma_multiply(if pal.dark { 0.16 } else { 0.12 });
+        let sel_fill = pal.accent.gamma_multiply(0.38);
         for (i, z) in self.model.zones().iter().enumerate() {
             // Draw with the real spacing (as FancyZones will place windows).
             let r = match px_rects.as_ref().and_then(|v| v.get(i)) {
@@ -713,8 +718,20 @@ impl GridEditor {
                 None => Rect::from_min_max(to_screen(z.left, z.top), to_screen(z.right, z.bottom)).shrink(2.0),
             };
             let selected = self.merge_selection.contains(&i);
-            painter.rect(r, 4.0, if selected { sel_fill } else { fill }, Stroke::new(1.5, ACCENT), egui::StrokeKind::Inside);
-            painter.text(r.center(), egui::Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::proportional(28.0), visuals.text_color());
+            painter.rect(
+                r,
+                6.0,
+                if selected { sel_fill } else { fill },
+                Stroke::new(1.5, accent),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                (i + 1).to_string(),
+                theme::font_semibold(26.0),
+                pal.text,
+            );
             let w = (z.width() as i64 * self.work.0 as i64 / MULTIPLIER as i64) as i32;
             let h = (z.height() as i64 * self.work.1 as i64 / MULTIPLIER as i64) as i32;
             painter.text(
@@ -742,7 +759,15 @@ impl GridEditor {
                 Orientation::Horizontal => (22.0, 4.0),
             };
             let handle = Rect::from_center_size(mid, egui::vec2(hw * 2.0, hh * 2.0));
-            painter.rect_filled(handle, 3.0, if hot { ACCENT } else { visuals.widgets.inactive.fg_stroke.color });
+            painter.rect_filled(
+                handle,
+                3.0,
+                if hot {
+                    accent
+                } else {
+                    visuals.widgets.inactive.fg_stroke.color
+                },
+            );
         }
         // Cursor + split preview.
         match &self.drag {
@@ -762,7 +787,11 @@ impl GridEditor {
                         if let Some((z, pos, o)) = split_at(&self.model, p) {
                             let zone = self.model.zones()[z];
                             let ok = self.model.can_split(z, pos, o, min);
-                            let color = if ok { ACCENT } else { visuals.weak_text_color() };
+                            let color = if ok {
+                                accent
+                            } else {
+                                visuals.weak_text_color()
+                            };
                             let (a, b) = match o {
                                 Orientation::Horizontal => (to_screen(zone.left, pos), to_screen(zone.right, pos)),
                                 Orientation::Vertical => (to_screen(pos, zone.top), to_screen(pos, zone.bottom)),

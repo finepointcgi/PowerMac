@@ -29,6 +29,8 @@ struct MonitorOverlay {
     zones: Vec<Rect>,
     boxes: Vec<Retained<NSBox>>,
     show_numbers: bool,
+    /// The number labels' color (they are rebuilt when it changes).
+    number_color: (u8, u8, u8),
 }
 
 thread_local! {
@@ -232,6 +234,7 @@ fn rebuild(mtm: MainThreadMarker, ov: &mut MonitorOverlay, zones: &[Rect], state
     }
     ov.zones = zones.to_vec();
     ov.show_numbers = state.show_numbers;
+    ov.number_color = state.number_color;
 }
 
 fn apply(mtm: MainThreadMarker, state: &OverlayState) {
@@ -254,14 +257,25 @@ fn apply(mtm: MainThreadMarker, state: &OverlayState) {
                         let v = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(m.frame.width() as f64, m.frame.height() as f64)));
                         window.setContentView(Some(&v));
                     }
-                    overlays.push(MonitorOverlay { frame: m.frame, window, zones: vec![], boxes: vec![], show_numbers: false });
+                    overlays.push(MonitorOverlay {
+                        frame: m.frame,
+                        window,
+                        zones: vec![],
+                        boxes: vec![],
+                        show_numbers: false,
+                        number_color: (0, 0, 0),
+                    });
                     used.push(false);
                     overlays.len() - 1
                 }
             };
             used[idx] = true;
             let ov = &mut overlays[idx];
-            if ov.zones != m.zones || ov.show_numbers != state.show_numbers || ov.boxes.len() != m.zones.len() {
+            if ov.zones != m.zones
+                || ov.show_numbers != state.show_numbers
+                || (state.show_numbers && ov.number_color != state.number_color)
+                || ov.boxes.len() != m.zones.len()
+            {
                 rebuild(mtm, ov, &m.zones, state);
             }
             let a = state.opacity.clamp(0.0, 1.0);

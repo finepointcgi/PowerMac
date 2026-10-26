@@ -44,6 +44,11 @@ pub fn monitor_under_cursor() -> Option<String> {
     None
 }
 
+/// The system accent color (sRGB); not available here.
+pub fn system_accent_color() -> Option<(u8, u8, u8)> {
+    None
+}
+
 pub(crate) struct Runtime;
 
 impl Runtime {

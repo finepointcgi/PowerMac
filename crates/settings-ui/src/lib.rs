@@ -11,7 +11,11 @@ pub mod editor;
 pub mod model;
 mod platform;
 mod record;
+#[cfg(test)]
+mod shots;
+mod theme;
 mod widgets;
+mod zone_style;
 
 use std::path::PathBuf;
 

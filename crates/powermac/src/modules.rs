@@ -264,6 +264,24 @@ fn reload_fancyzones(running: &Running, path: &Path) {
     }
 }
 
+/// Handle a flash request file written by the settings window: briefly show
+/// the zones with the current colors (requests older than 5 s are ignored).
+fn flash_zones(path: &Path) {
+    let req: fancyzones::FlashRequest =
+        match std::fs::read_to_string(path).map(|s| serde_json::from_str(&s)) {
+            Ok(Ok(r)) => r,
+            _ => return,
+        };
+    if !req.is_fresh(5_000) {
+        return;
+    }
+    let guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(z) = guard.as_ref().and_then(|r| r.zones.as_ref()) {
+        log::info!("fancyzones: showing the zones (settings preview)");
+        z.flash_zones(req.monitor.as_deref());
+    }
+}
+
 fn apply_scroll(running: &mut Running, cfg: &scroll_reverser::Config) {
     match (cfg.enabled, running.scroll.as_mut()) {
         (true, Some(h)) => h.update(*cfg),
@@ -323,6 +341,11 @@ pub fn watch(path: &Path, mut current: AppConfig) {
     let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let mut last: Option<SystemTime> = mtime(&path);
     let mut fz_last: Option<SystemTime> = fz_path.as_deref().and_then(mtime);
+    // "Show on screen" requests from the settings window.
+    let flash_path = fz_path
+        .as_ref()
+        .map(|p| p.with_file_name(fancyzones::FLASH_REQUEST_FILE));
+    let mut flash_last: Option<SystemTime> = flash_path.as_deref().and_then(mtime);
     std::thread::Builder::new()
         .name("config-watch".into())
         .spawn(move || loop {
@@ -336,6 +359,15 @@ pub fn watch(path: &Path, mut current: AppConfig) {
                         if let Some(running) = guard.as_ref() {
                             reload_fancyzones(running, fz);
                         }
+                    }
+                }
+            }
+            if let Some(fp) = &flash_path {
+                let now = mtime(fp);
+                if now != flash_last {
+                    flash_last = now;
+                    if now.is_some() {
+                        flash_zones(fp);
                     }
                 }
             }

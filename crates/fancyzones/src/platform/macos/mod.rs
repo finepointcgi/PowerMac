@@ -15,6 +15,35 @@ pub(crate) use runtime::Runtime;
 pub use runtime::monitor_under_cursor;
 pub use screens::{cocoa_to_global, global_to_cocoa};
 
+/// The macOS accent color (`NSColor.controlAccentColor`, sRGB). Cached for
+/// two seconds since the overlay asks for it on every drag update.
+pub fn system_accent_color() -> Option<(u8, u8, u8)> {
+    use std::sync::Mutex;
+    type Rgb = (u8, u8, u8);
+    static CACHE: Mutex<Option<(Instant, Option<Rgb>)>> = Mutex::new(None);
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((t, v)) = *c {
+        if t.elapsed() < Duration::from_secs(2) {
+            return v;
+        }
+    }
+    let v = read_accent();
+    *c = Some((Instant::now(), v));
+    v
+}
+
+fn read_accent() -> Option<(u8, u8, u8)> {
+    use objc2_app_kit::{NSColor, NSColorSpace};
+    let accent = NSColor::controlAccentColor();
+    let rgb = accent.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
+    let to = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Some((
+        to(rgb.redComponent()),
+        to(rgb.greenComponent()),
+        to(rgb.blueComponent()),
+    ))
+}
+
 /// Show the zone overlay directly (any thread; drawn on the main thread).
 pub fn show_overlay(state: crate::engine::OverlayState) {
     overlay::show(state)

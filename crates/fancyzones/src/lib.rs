@@ -145,6 +145,36 @@ pub(crate) enum KeyAction {
     QuickLayout(u8),
 }
 
+/// File next to `fancyzones.json` that asks the running app to flash the
+/// zones (written by the settings window's "Show on screen"): JSON
+/// `{"at": <unix ms>, "monitor": <id or null>}`.
+pub const FLASH_REQUEST_FILE: &str = "fancyzones-flash.json";
+
+/// A request to flash the zones (see [`FLASH_REQUEST_FILE`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FlashRequest {
+    /// When it was made (milliseconds since the Unix epoch); old requests are ignored.
+    pub at: u64,
+    #[serde(default)]
+    pub monitor: Option<String>,
+}
+
+impl FlashRequest {
+    pub fn now(monitor: Option<String>) -> Self {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        FlashRequest { at, monitor }
+    }
+
+    /// Whether the request was made less than `max_age_ms` ago.
+    pub fn is_fresh(&self, max_age_ms: u64) -> bool {
+        let now = FlashRequest::now(None).at;
+        now.saturating_sub(self.at) <= max_age_ms
+    }
+}
+
 /// Modifiers of the (fixed) quick layout switch chord: Win+Ctrl+Alt /
 /// Ctrl+Option+Cmd.
 pub const QUICK_SWITCH_MODIFIERS: Modifiers = Modifiers::new(true, true, false, true);
@@ -207,6 +237,8 @@ pub(crate) enum Command {
     QuickLayout(u8),
     /// Rotate windows across monitors.
     Rotate(bool),
+    /// Show the zones (all monitors, or one) briefly with the current colors.
+    Flash(Option<String>),
 }
 
 /// Packed hotkey settings readable from hook callbacks without locking.
@@ -317,8 +349,15 @@ impl Shared {
             Command::LayoutChanged(id) => match e.on_layout_changed(ws, &id) {
                 Ok(_) => {
                     let flash = e.config.settings.zone_set_change_flash_zones && e.drag.is_none();
-                    let areas = if flash { e.areas(ws).unwrap_or_default() } else { vec![] };
-                    SwitchFeedback { flash: flash.then(|| e.flash_overlay(&areas)), label: None }
+                    let areas = if flash {
+                        e.areas(ws).unwrap_or_default()
+                    } else {
+                        vec![]
+                    };
+                    SwitchFeedback {
+                        flash: flash.then(|| e.flash_overlay(&areas)),
+                        ..Default::default()
+                    }
                 }
                 Err(err) => {
                     log::warn!("fancyzones: {err:#}");
@@ -334,6 +373,16 @@ impl Shared {
                         SwitchFeedback::default()
                     }
                 }
+            }
+            Command::Flash(monitor) => {
+                let areas = e.areas(ws).unwrap_or_default();
+                let st = e.preview_overlay(&areas, monitor.as_deref());
+                let flash = (!st.monitors.is_empty() && e.drag.is_none()).then_some(st);
+                return SwitchFeedback {
+                    flash,
+                    label: None,
+                    flash_ms: Some(engine::PREVIEW_FLASH_MS),
+                };
             }
             Command::Rotate(reverse) => {
                 match e.rotate_windows(ws, reverse) {
@@ -493,6 +542,14 @@ impl Handle {
 
     pub fn config(&self) -> Config {
         self.shared.engine().config.clone()
+    }
+
+    /// Briefly show the zones with the current colors (the settings
+    /// window's "Show on screen"), on all monitors or only `monitor` (an id
+    /// from [`Handle::monitors`]). The first zone is shown highlighted.
+    pub fn flash_zones(&self, monitor: Option<&str>) {
+        self.shared
+            .post(Command::Flash(monitor.map(str::to_string)));
     }
 
     /// Change settings (hotkeys etc. take effect immediately) and persist.

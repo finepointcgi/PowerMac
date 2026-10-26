@@ -128,6 +128,15 @@ impl LabelState {
 
 /// How long flashed zones stay visible (`FlashZonesDurationMillis`).
 pub const FLASH_ZONES_MS: u64 = 700;
+/// How long the "show on screen" preview of the zone colors stays visible.
+pub const PREVIEW_FLASH_MS: u64 = 1600;
+
+/// The zone fill color derived from an accent color (the highlight uses
+/// the accent itself): the accent mixed 60 % towards white.
+pub fn accent_zone_color(accent: (u8, u8, u8)) -> (u8, u8, u8) {
+    let l = |c: u8| (c as f64 + (255.0 - c as f64) * 0.6).round() as u8;
+    (l(accent.0), l(accent.1), l(accent.2))
+}
 
 /// Visual feedback after a layout switch.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -135,6 +144,8 @@ pub struct SwitchFeedback {
     /// Flash these zones (all work areas) for [`FLASH_ZONES_MS`].
     pub flash: Option<OverlayState>,
     pub label: Option<LabelState>,
+    /// How long to show `flash` (default [`FLASH_ZONES_MS`]).
+    pub flash_ms: Option<u64>,
 }
 
 /// Highlight information for the overlay of one monitor.
@@ -359,7 +370,11 @@ impl Engine {
                 .and_then(|c| self.label_state(a.monitor.work_area, &c.name)),
             _ => None,
         };
-        Ok(SwitchFeedback { flash, label })
+        Ok(SwitchFeedback {
+            flash,
+            label,
+            flash_ms: None,
+        })
     }
 
     /// Quick layout switch (Ctrl+Win+Alt+`key`): apply the layout bound to
@@ -426,6 +441,24 @@ impl Engine {
         let mut st = self.overlay_base();
         for a in areas {
             Self::push_area(&mut st, a, vec![]);
+        }
+        st
+    }
+
+    /// Preview of the zone colors: the zones of every work area (or only of
+    /// monitor `monitor_id`), with the first zone highlighted.
+    pub fn preview_overlay(&self, areas: &[WorkArea], monitor_id: Option<&str>) -> OverlayState {
+        let mut st = self.overlay_base();
+        for a in areas
+            .iter()
+            .filter(|a| monitor_id.is_none_or(|m| a.monitor.id == m))
+        {
+            let hl = if a.layout.zones.is_empty() {
+                vec![]
+            } else {
+                vec![0]
+            };
+            Self::push_area(&mut st, a, hl);
         }
         st
     }
@@ -1011,13 +1044,21 @@ impl Engine {
     fn overlay_base(&self) -> OverlayState {
         let s = &self.config.settings;
         let c = |h: &str, d: (u8, u8, u8)| crate::config::parse_hex_color(h).unwrap_or(d);
+        let mut zone_color = c(&s.zone_color, (0xAA, 0xCD, 0xFF));
+        let mut highlight_color = c(&s.zone_highlight_color, (0x00, 0x8C, 0xFF));
+        if s.use_system_accent {
+            if let Some(a) = crate::platform::system_accent_color() {
+                zone_color = accent_zone_color(a);
+                highlight_color = a;
+            }
+        }
         OverlayState {
             monitors: vec![],
             edge_preview: None,
             show_numbers: s.show_zone_number,
-            zone_color: c(&s.zone_color, (0xAA, 0xCD, 0xFF)),
+            zone_color,
             border_color: c(&s.zone_border_color, (0xFF, 0xFF, 0xFF)),
-            highlight_color: c(&s.zone_highlight_color, (0x00, 0x8C, 0xFF)),
+            highlight_color,
             number_color: c(&s.zone_number_color, (0, 0, 0)),
             opacity: (s.zone_highlight_opacity.min(100) as f64) / 100.0,
         }
@@ -1457,6 +1498,28 @@ pub(crate) mod tests {
         assert_eq!(e.on_layout_changed(&ws, "B").unwrap(), 0);
         assert!(e.assignment(2).is_none());
         assert_eq!(ws.rect(2), Rect::new(1000, 25, 1500, 825));
+    }
+
+    #[test]
+    fn preview_flash_and_accent_colors() {
+        let (mut e, ws) = setup();
+        let areas = e.areas(&ws).unwrap();
+        let all = e.preview_overlay(&areas, None);
+        assert_eq!(all.monitors.len(), areas.len());
+        assert!(all.monitors.iter().all(|m| m.zones.is_empty() || m.highlighted == vec![0]));
+        let id = areas[0].monitor.id.clone();
+        let one = e.preview_overlay(&areas, Some(&id));
+        assert_eq!(one.monitors.len(), 1);
+        assert_eq!(one.zone_color, (0xAA, 0xCD, 0xFF));
+        e.config.settings.zone_highlight_color = "#FF0000".into();
+        assert_eq!(e.preview_overlay(&areas, None).highlight_color, (0xFF, 0, 0));
+        assert_eq!(accent_zone_color((0, 0x80, 0xFF)), (0x99, 0xCC, 0xFF));
+        // With the system accent (where available) the zone colors follow it.
+        e.config.settings.use_system_accent = true;
+        if let Some(a) = crate::platform::system_accent_color() {
+            let st = e.preview_overlay(&areas, None);
+            assert_eq!((st.highlight_color, st.zone_color), (a, accent_zone_color(a)));
+        }
     }
 
     #[test]

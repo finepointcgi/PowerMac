@@ -15,11 +15,14 @@ pub mod store;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use eframe::egui::{self, RichText, Ui};
-use fancyzones::layout::{compute_relative_zones, guid_eq, CustomLayout, CustomLayoutInfo, LayoutType};
+use eframe::egui::{self, pos2, vec2, Align, Align2, Layout, RichText, Sense, Stroke, Ui};
+use fancyzones::layout::{
+    compute_relative_zones, guid_eq, CustomLayout, CustomLayoutInfo, LayoutType,
+};
 use fancyzones::{AppliedLayout, Monitor, WindowSystem};
 
-use crate::widgets::{error_label, ERROR, OK};
+use crate::theme::{self, icon, pal};
+use crate::widgets::{self, error_label};
 use canvas::CanvasEditor;
 use gallery::TEMPLATES;
 use grid::{GridEditor, GridModel};
@@ -53,6 +56,26 @@ pub struct Target {
 }
 
 impl Target {
+    /// The monitor's name without its number and size.
+    pub fn short_name(&self) -> String {
+        if self.id == DEFAULT_TARGET {
+            return "monitors without a layout of their own".into();
+        }
+        if self.id == fancyzones::engine::SPAN_MONITOR_ID {
+            return "all monitors".into();
+        }
+        if !self.connected {
+            return self.id.clone();
+        }
+        let l = self.label.split(" (").next().unwrap_or(&self.label);
+        let l = l
+            .split_once(". ")
+            .filter(|(n, _)| n.chars().all(|c| c.is_ascii_digit()))
+            .map(|(_, r)| r)
+            .unwrap_or(l);
+        l.to_string()
+    }
+
     pub fn work(&self) -> (i32, i32) {
         (self.work_area.width().max(1), self.work_area.height().max(1))
     }
@@ -289,102 +312,158 @@ impl EditorApp {
 
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        theme::ensure(&ctx);
+        let p = pal(ui);
         self.poll();
-        egui::Panel::bottom("editor-status").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.status_bar(ui);
-            ui.add_space(2.0);
-        });
         if self.session.is_some() {
             self.session_ui(ui);
         } else {
-            egui::CentralPanel::default().show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.gallery(ui));
-            });
+            egui::Panel::bottom("editor-status")
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.sidebar)
+                        .inner_margin(egui::Margin::symmetric(24, 8))
+                        .stroke(Stroke::new(1.0, p.card_border)),
+                )
+                .show(ui, |ui| self.status_bar(ui));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(p.bg))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin {
+                                    left: 32,
+                                    right: 32,
+                                    top: 26,
+                                    bottom: 32,
+                                })
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    self.gallery(ui);
+                                });
+                        });
+                });
         }
         self.dialogs(&ctx);
         ctx.request_repaint_after(POLL);
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
-        ui.horizontal_wrapped(|ui| {
+        let p = pal(ui);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             if let Some(e) = self.load_error.clone() {
-                ui.colored_label(ERROR, format!("fancyzones.json couldn't be read, so nothing is saved: {e}"));
+                ui.label(theme::icon_text(icon::WARNING_CIRCLE).size(14.0).color(p.error));
+                ui.add(egui::Label::new(RichText::new(format!("fancyzones.json couldn't be read, so nothing is saved: {e}")).size(12.5).color(p.error)).truncate());
                 if ui.button("Reload").clicked() {
                     self.reload();
                 }
             } else if let Some((m, err)) = &self.status {
-                ui.colored_label(if *err { ERROR } else { OK }, m);
+                let (g, c) = if *err { (icon::WARNING_CIRCLE, p.error) } else { (icon::CHECK_CIRCLE, p.ok) };
+                ui.label(RichText::new(g).size(14.0).color(c));
+                ui.add(egui::Label::new(RichText::new(m).size(12.5).color(if *err { p.error } else { p.text2 })).truncate());
             } else {
-                ui.weak("Click a layout to apply it. Changes are saved to fancyzones.json right away.");
+                ui.label(theme::icon_text(icon::INFO).size(14.0).color(p.text3));
+                ui.add(egui::Label::new(RichText::new("Click a layout to apply it. Changes are saved to fancyzones.json right away.").size(12.5).color(p.text2)).truncate());
             }
         });
     }
 
     fn gallery(&mut self, ui: &mut Ui) {
-        ui.add_space(8.0);
-        ui.heading(RichText::new("FancyZones layouts").size(24.0));
-        ui.add_space(6.0);
+        let p = pal(ui);
         let targets = self.targets();
+        let target = self.target();
+        // Header.
+        ui.horizontal(|ui| {
+            crate::app::app_logo(ui, 40.0);
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(
+                    RichText::new("FancyZones Layouts")
+                        .font(theme::font_semibold(23.0))
+                        .color(p.text),
+                );
+                ui.label(
+                    RichText::new(format!("Choose the layout for {}.", target.short_name()))
+                        .color(p.text2),
+                );
+            });
+        });
+        ui.add_space(18.0);
+        // Monitor picker.
+        let mut pick = None;
+        let mut refresh = false;
         ui.horizontal_wrapped(|ui| {
-            ui.label("Monitor:");
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
             for t in &targets {
-                let mut text = RichText::new(&t.label);
-                if !t.connected && t.id != DEFAULT_TARGET {
-                    text = text.italics();
-                }
-                if ui.add(egui::Button::selectable(self.selected == t.id, text)).clicked() {
-                    self.select(&t.id.clone());
+                if monitor_chip(ui, t, self.selected == t.id).clicked() {
+                    pick = Some(t.id.clone());
                 }
             }
-            if ui.small_button("Refresh").clicked() {
-                self.monitors = fancyzones::platform::NativeWindowSystem::new().monitors().unwrap_or_default();
+            if widgets::icon_button(ui, icon::ARROWS_CLOCKWISE, "Refresh monitors").clicked() {
+                refresh = true;
             }
         });
-        let target = self.target();
+        if let Some(id) = pick {
+            self.select(&id);
+        }
+        if refresh {
+            self.monitors = fancyzones::platform::NativeWindowSystem::new()
+                .monitors()
+                .unwrap_or_default();
+        }
         let cfg = &self.snap;
         let applied = store::applied_for(cfg, &target.id);
         if target.id != DEFAULT_TARGET && !cfg.applied_layouts.contains_key(&target.id) {
-            ui.weak("This monitor uses the default layout until you pick one.");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(theme::icon_text(icon::INFO).size(13.0).color(p.text3));
+                ui.label(
+                    RichText::new("This monitor uses the default layout until you pick one.")
+                        .size(12.5)
+                        .color(p.text2),
+                );
+            });
         }
         let custom = cfg.custom_layouts.clone();
         let work = target.work();
         let mut action = None;
 
-        crate::widgets::section(ui, "Templates", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
-                for (i, (kind, name, _)) in TEMPLATES.iter().enumerate() {
-                    let active = applied.kind == *kind;
-                    let r = gallery::card(ui, name, &self.templates[i], &custom, work, active, None);
-                    if r.edit {
-                        action = Some(Action::EditTemplate(i));
-                    } else if r.clicked {
-                        action = Some(Action::Apply(self.templates[i].clone()));
-                    }
-                }
-            });
+        section_header(ui, "Templates", None);
+        let templates = self.templates.clone();
+        card_grid(ui, TEMPLATES.len(), |ui, i, w| {
+            let (kind, name, _) = TEMPLATES[i];
+            let active = applied.kind == kind;
+            let r = gallery::card(ui, w, name, &templates[i], &custom, work, active, None);
+            if r.edit {
+                action = Some(Action::EditTemplate(i));
+            } else if r.clicked {
+                action = Some(Action::Apply(templates[i].clone()));
+            }
         });
-        crate::widgets::section(ui, "Custom", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
-                for c in &custom {
-                    let a = AppliedLayout::custom(c);
-                    let active = applied.kind == LayoutType::Custom && guid_eq(&applied.uuid, &c.uuid);
-                    let hk = store::hotkey_for(&self.snap.layout_hotkeys, &c.uuid);
-                    let r = gallery::card(ui, &c.name, &a, &custom, work, active, hk);
-                    if r.edit {
-                        action = Some(Action::EditCustom(c.uuid.clone()));
-                    } else if r.clicked {
-                        action = Some(Action::Apply(a));
-                    }
-                }
-                if gallery::new_card(ui) {
+
+        let hint_text = (!self.snap.layout_hotkeys.is_empty()).then_some("The number on a layout is its hotkey: press it with the layout-switch modifiers to apply it.");
+        section_header(ui, "Custom layouts", hint_text);
+        let hotkeys = self.snap.layout_hotkeys.clone();
+        card_grid(ui, custom.len() + 1, |ui, i, w| {
+            if i == custom.len() {
+                if gallery::new_card(ui, w) {
                     action = Some(Action::New);
                 }
-            });
-            if !self.snap.layout_hotkeys.is_empty() {
-                ui.weak("The number on a layout is its hotkey: press it with the layout-switch modifiers to apply that layout.");
+                return;
+            }
+            let c = &custom[i];
+            let a = AppliedLayout::custom(c);
+            let active = applied.kind == LayoutType::Custom && guid_eq(&applied.uuid, &c.uuid);
+            let hk = store::hotkey_for(&hotkeys, &c.uuid);
+            let r = gallery::card(ui, w, &c.name, &a, &custom, work, active, hk);
+            if r.edit {
+                action = Some(Action::EditCustom(c.uuid.clone()));
+            } else if r.clicked {
+                action = Some(Action::Apply(a));
             }
         });
 
@@ -395,7 +474,7 @@ impl EditorApp {
                     k => gallery::template_name(k).to_string(),
                 };
                 let id = target.id.clone();
-                self.commit(&format!("Applied “{name}” to {}", target.label), |s| store::apply_layout(s, &id, l));
+                self.commit(&format!("Applied “{name}” to {}", target.short_name()), |s| store::apply_layout(s, &id, l));
             }
             Some(Action::EditTemplate(i)) => self.dialog = Some(Dialog::Template { index: i, layout: self.templates[i].clone() }),
             Some(Action::EditCustom(uuid)) => {
@@ -427,44 +506,63 @@ impl EditorApp {
         let Some(mut dialog) = self.dialog.take() else { return };
         let target = self.target();
         let mut keep = true;
-        let modal = egui::Modal::new(egui::Id::unique("fz-editor-dialog")).show(ctx, |ui| {
-            ui.set_width(380.0);
+        let frame = {
+            let p = theme::pal_ctx(ctx);
+            egui::Frame::new()
+                .fill(p.card)
+                .stroke(Stroke::new(1.0, p.card_border))
+                .corner_radius(14.0)
+                .inner_margin(egui::Margin::same(22))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 12],
+                    blur: 40,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(if p.dark { 140 } else { 60 }),
+                })
+        };
+        let kind = match &dialog {
+            Dialog::Template { .. } => 0,
+            Dialog::Custom { .. } => 1,
+            Dialog::New { .. } => 2,
+            Dialog::ConfirmDelete { .. } => 3,
+        };
+        // One id per kind: a modal remembers its size.
+        let modal = egui::Modal::new(egui::Id::unique(("fz-editor-dialog", kind))).frame(frame).show(ctx, |ui| {
+            ui.set_width(400.0);
+            widgets::reset_rows(ui);
             match &mut dialog {
                 Dialog::Template { index, layout } => {
                     let (kind, name, _) = TEMPLATES[*index];
-                    ui.heading(name);
+                    crate::app::dialog_title(ui, icon::SQUARES_FOUR, name);
+                    widgets::hint(ui, &format!("Template settings, applied to {}.", target.short_name()));
+                    ui.add_space(8.0);
+                    gallery::preview(ui, vec2(400.0, 150.0), layout, &[], target.work(), true);
                     ui.add_space(6.0);
-                    crate::widgets::grid(ui, "template-settings", |ui| {
-                        if gallery::has_zone_count(kind) {
-                            ui.label("Number of zones");
-                            ui.add(egui::DragValue::new(&mut layout.zone_count).range(1..=gallery::MAX_ZONES));
-                            ui.end_row();
-                        }
-                        if gallery::has_spacing(kind) {
-                            ui.label("Space around zones");
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut layout.show_spacing, "");
-                                ui.add_enabled(
-                                    layout.show_spacing,
-                                    egui::DragValue::new(&mut layout.spacing).range(fancyzones::layout::MAX_NEGATIVE_SPACING..=1000).suffix(" px"),
-                                );
-                            });
-                            ui.end_row();
-                        }
-                        ui.label("Highlight distance");
-                        ui.add(egui::DragValue::new(&mut layout.sensitivity_radius).range(0..=1000).suffix(" px"));
-                        ui.end_row();
+                    if gallery::has_zone_count(kind) {
+                        widgets::row(ui, "Number of zones", None, |ui| ui.add(egui::DragValue::new(&mut layout.zone_count).range(1..=gallery::MAX_ZONES)));
+                    }
+                    if gallery::has_spacing(kind) {
+                        widgets::row(ui, "Space around zones", None, |ui| {
+                            ui.add_enabled(
+                                layout.show_spacing,
+                                egui::DragValue::new(&mut layout.spacing).range(fancyzones::layout::MAX_NEGATIVE_SPACING..=1000).suffix(" px"),
+                            );
+                            widgets::toggle_labeled(ui, &mut layout.show_spacing, "Space around zones");
+                        });
+                    }
+                    widgets::row(ui, "Highlight distance", Some("Neighbouring zones within this distance light up too."), |ui| {
+                        ui.add(egui::DragValue::new(&mut layout.sensitivity_radius).range(0..=1000).suffix(" px"))
                     });
                     let err = compute_relative_zones(layout, target.work().0, target.work().1, &[]).err();
                     if let Some(e) = &err {
-                        error_label(ui, &format!("This layout doesn't fit {}: {e}", target.label));
+                        error_label(ui, &format!("This layout doesn't fit {}: {e}", target.short_name()));
                     }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(err.is_none(), egui::Button::new("Save and apply")).clicked() {
+                    ui.add_space(16.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add_enabled_ui(err.is_none(), |ui| widgets::primary_button(ui, "Save and apply")).inner.clicked() {
                             let (l, id, i) = (layout.clone(), target.id.clone(), *index);
                             self.templates[i] = l.clone();
-                            self.commit(&format!("Applied “{name}” to {}", target.label), |s| {
+                            self.commit(&format!("Applied “{name}” to {}", target.short_name()), |s| {
                                 store::set_template(s, l.clone());
                                 store::apply_layout(s, &id, l);
                             });
@@ -476,69 +574,65 @@ impl EditorApp {
                     });
                 }
                 Dialog::Custom { uuid, name, show_spacing, spacing, sensitivity, hotkey, grid } => {
-                    ui.heading("Edit layout");
-                    ui.add_space(6.0);
+                    crate::app::dialog_title(ui, icon::PENCIL_SIMPLE, "Edit layout");
                     let hotkeys = self.snap.layout_hotkeys.clone();
                     let custom = self.snap.custom_layouts.clone();
-                    crate::widgets::grid(ui, "custom-settings", |ui| {
-                        ui.label("Name");
-                        ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
-                        ui.end_row();
-                        if *grid {
-                            ui.label("Space around zones");
-                            ui.horizontal(|ui| {
-                                ui.checkbox(show_spacing, "");
-                                ui.add_enabled(*show_spacing, egui::DragValue::new(spacing).range(fancyzones::layout::MAX_NEGATIVE_SPACING..=1000).suffix(" px"));
-                            });
-                            ui.end_row();
+                    if let Some(c) = fancyzones::layout::find_custom(&custom, uuid) {
+                        ui.add_space(4.0);
+                        gallery::preview(ui, vec2(400.0, 150.0), &AppliedLayout::custom(c), &custom, target.work(), true);
+                        ui.add_space(6.0);
+                    }
+                    widgets::row(ui, "Name", None, |ui| ui.add(egui::TextEdit::singleline(name).desired_width(200.0)));
+                    if *grid {
+                        widgets::row(ui, "Space around zones", None, |ui| {
+                            ui.add_enabled(*show_spacing, egui::DragValue::new(spacing).range(fancyzones::layout::MAX_NEGATIVE_SPACING..=1000).suffix(" px"));
+                            widgets::toggle_labeled(ui, show_spacing, "Space around zones");
+                        });
+                    }
+                    widgets::row(ui, "Highlight distance", None, |ui| ui.add(egui::DragValue::new(sensitivity).range(0..=1000).suffix(" px")));
+                    let label = |k: Option<u8>| match k {
+                        None => "None".to_string(),
+                        Some(k) => {
+                            let other = hotkeys
+                                .iter()
+                                .find(|h| h.key == k && !guid_eq(&h.layout_uuid, uuid))
+                                .and_then(|h| fancyzones::layout::find_custom(&custom, &h.layout_uuid))
+                                .map(|c| format!("  (now {})", c.name))
+                                .unwrap_or_default();
+                            format!("{k}{other}")
                         }
-                        ui.label("Highlight distance");
-                        ui.add(egui::DragValue::new(sensitivity).range(0..=1000).suffix(" px"));
-                        ui.end_row();
-                        ui.label("Layout hotkey");
-                        let label = |k: Option<u8>| match k {
-                            None => "None".to_string(),
-                            Some(k) => {
-                                let other = hotkeys
-                                    .iter()
-                                    .find(|h| h.key == k && !guid_eq(&h.layout_uuid, uuid))
-                                    .and_then(|h| fancyzones::layout::find_custom(&custom, &h.layout_uuid))
-                                    .map(|c| format!(" (now: {})", c.name))
-                                    .unwrap_or_default();
-                                format!("{k}{other}")
-                            }
-                        };
-                        egui::ComboBox::from_id_salt("layout-hotkey").selected_text(label(*hotkey)).show_ui(ui, |ui| {
+                    };
+                    widgets::row(ui, "Layout hotkey", Some("Press it with the layout-switch modifiers."), |ui| {
+                        egui::ComboBox::from_id_salt("layout-hotkey").selected_text(label(*hotkey)).width(120.0).show_ui(ui, |ui| {
                             ui.selectable_value(hotkey, None, label(None));
                             for k in 0..=9u8 {
                                 ui.selectable_value(hotkey, Some(k), label(Some(k)));
                             }
                         });
-                        ui.end_row();
                     });
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Edit zones…").clicked() {
+                        if widgets::icon_text_button(ui, icon::GRID_FOUR, "Edit zones…").clicked() {
                             let u = uuid.clone();
                             self.open_custom_editor(&u);
                             keep = false;
                         }
-                        if ui.button("Duplicate").clicked() {
+                        if widgets::icon_text_button(ui, icon::COPY, "Duplicate").clicked() {
                             let u = uuid.clone();
                             self.commit("Duplicated the layout", |s| {
                                 store::duplicate_custom(s, &u);
                             });
                             keep = false;
                         }
-                        if ui.button(RichText::new("Delete…").color(ERROR)).clicked() {
+                        if ui.add(egui::Button::new(theme::icon_job(icon::TRASH, "Delete…", 13.0, pal(ui).error))).clicked() {
                             dialog_next(&mut self.dialog, Dialog::ConfirmDelete { uuid: uuid.clone(), name: name.clone() });
                             keep = false;
                         }
                     });
-                    ui.separator();
-                    ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let valid = !name.trim().is_empty();
-                        if ui.add_enabled(valid, egui::Button::new("Save")).clicked() {
+                        if ui.add_enabled_ui(valid, |ui| widgets::primary_button(ui, "Save")).inner.clicked() {
                             let (u, n, ss, sp, sr, hk) = (uuid.clone(), name.trim().to_string(), *show_spacing, *spacing, *sensitivity, *hotkey);
                             self.commit(&format!("Saved “{n}”"), |s| {
                                 if let Some(mut c) = fancyzones::layout::find_custom(&s.custom_layouts, &u).cloned() {
@@ -563,22 +657,25 @@ impl EditorApp {
                     });
                 }
                 Dialog::New { name, canvas } => {
-                    ui.heading("Create new layout");
-                    ui.add_space(6.0);
-                    crate::widgets::grid(ui, "new-layout", |ui| {
-                        ui.label("Name");
-                        ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
-                        ui.end_row();
-                        ui.label("Type");
-                        ui.vertical(|ui| {
-                            ui.radio_value(canvas, false, "Grid — split and merge zones; zones never overlap");
-                            ui.radio_value(canvas, true, "Canvas — free-form zones that may overlap");
+                    crate::app::dialog_title(ui, icon::PLUS, "Create new layout");
+                    widgets::hint(ui, &format!("The new layout is applied to {} when you save it.", target.short_name()));
+                    ui.add_space(10.0);
+                    widgets::row(ui, "Name", None, |ui| ui.add(egui::TextEdit::singleline(name).desired_width(200.0)));
+                    widgets::block(ui, |ui| {
+                        let w = (ui.available_width() - 12.0) / 2.0;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            if kind_tile(ui, w, icon::GRID_FOUR, "Grid", "Split and merge zones. Zones never overlap.", !*canvas).clicked() {
+                                *canvas = false;
+                            }
+                            if kind_tile(ui, w, icon::STACK, "Canvas", "Free-form zones that may overlap.", *canvas).clicked() {
+                                *canvas = true;
+                            }
                         });
-                        ui.end_row();
                     });
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Create").clicked() {
+                    ui.add_space(10.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::primary_button(ui, "Create").clicked() {
                             let (n, c) = (name.clone(), *canvas);
                             self.open_new_layout(&n, c);
                             keep = false;
@@ -589,11 +686,12 @@ impl EditorApp {
                     });
                 }
                 Dialog::ConfirmDelete { uuid, name } => {
-                    ui.heading("Delete layout?");
-                    ui.label(format!("“{name}” will be deleted. Monitors using it switch to the default layout."));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(RichText::new("Delete").color(ERROR)).clicked() {
+                    crate::app::dialog_title(ui, icon::TRASH, "Delete layout?");
+                    widgets::hint(ui, &format!("“{name}” will be deleted. Monitors using it switch to the default layout."));
+                    ui.add_space(18.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let p = pal(ui);
+                        if ui.add(egui::Button::new(RichText::new("Delete").font(theme::font_semibold(13.0)).color(egui::Color32::WHITE)).fill(p.error).stroke(Stroke::NONE)).clicked() {
                             let u = uuid.clone();
                             self.commit(&format!("Deleted “{name}”"), |s| store::delete_custom(s, &u));
                             keep = false;
@@ -615,42 +713,134 @@ impl EditorApp {
 
     fn session_ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        let p = pal(ui);
         let mut save = false;
         let mut cancel = false;
-        let Some(s) = self.session.as_mut() else { return };
-        egui::Panel::top("zone-editor-toolbar").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(if s.is_new { "New layout" } else { "Edit layout" }).strong().size(16.0));
-                ui.add(egui::TextEdit::singleline(&mut s.name).desired_width(200.0));
-                ui.separator();
-                toolbar(ui, &mut s.editor);
-                ui.separator();
-                let on_screen_label = if s.on_screen { "Edit in this window" } else { "Edit on screen" };
-                if ui.add_enabled(s.target.connected, egui::Button::new(on_screen_label)).on_hover_text("Edit the zones at real size on the monitor").clicked() {
-                    s.on_screen = !s.on_screen;
-                }
-                if ui.add_enabled(!s.name.trim().is_empty(), egui::Button::new(RichText::new("Save").strong())).clicked() {
-                    save = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
+        let Some(s) = self.session.as_mut() else {
+            return;
+        };
+        egui::Panel::top("zone-editor-toolbar")
+            .frame(
+                egui::Frame::new()
+                    .fill(p.sidebar)
+                    .inner_margin(egui::Margin {
+                        left: 20,
+                        right: 20,
+                        top: 12,
+                        bottom: 10,
+                    })
+                    .stroke(Stroke::new(1.0, p.card_border)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(theme::icon_job(
+                                icon::CARET_LEFT,
+                                "Layouts",
+                                13.5,
+                                p.accent,
+                            ))
+                            .frame(false),
+                        )
+                        .on_hover_text("Discard changes and go back")
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(if s.is_new {
+                            "New layout"
+                        } else {
+                            "Edit layout"
+                        })
+                        .font(theme::font_semibold(15.0))
+                        .color(p.text),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut s.name)
+                            .desired_width(200.0)
+                            .hint_text("Layout name"),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add_enabled_ui(!s.name.trim().is_empty(), |ui| {
+                                widgets::primary_button(ui, "Save")
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            save = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                        let on_screen_label = if s.on_screen {
+                            "Edit in this window"
+                        } else {
+                            "Edit on screen"
+                        };
+                        if ui
+                            .add_enabled_ui(s.target.connected, |ui| {
+                                widgets::icon_text_button(ui, icon::MONITOR, on_screen_label)
+                            })
+                            .inner
+                            .on_hover_text("Edit the zones at real size on the monitor")
+                            .clicked()
+                        {
+                            s.on_screen = !s.on_screen;
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    toolbar(ui, &mut s.editor);
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(theme::icon_text(icon::INFO).size(13.0).color(p.text3));
+                    ui.add(
+                        egui::Label::new(RichText::new(hint(&s.editor)).size(12.0).color(p.text2))
+                            .truncate(),
+                    );
+                });
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(p.bg))
+            .show(ui, |ui| {
+                if s.on_screen {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Editing on {} — use the toolbar at the top of that screen.",
+                                s.target.short_name()
+                            ))
+                            .color(p.text2),
+                        );
+                    });
+                } else {
+                    let avail = ui.available_rect_before_wrap().shrink(28.0);
+                    let rect = fit(avail, s.target.work());
+                    // Monitor bezel around the editor.
+                    let bezel = rect.expand(7.0);
+                    ui.painter().rect_filled(
+                        bezel.translate(vec2(0.0, 3.0)),
+                        14.0,
+                        egui::Color32::from_black_alpha(if p.dark { 90 } else { 30 }),
+                    );
+                    ui.painter().rect_filled(
+                        bezel,
+                        14.0,
+                        if p.dark {
+                            egui::Color32::from_rgb(0x0E, 0x0E, 0x10)
+                        } else {
+                            egui::Color32::from_rgb(0x2A, 0x2A, 0x2E)
+                        },
+                    );
+                    show_editor(ui, &mut s.editor, rect);
                 }
             });
-            ui.weak(hint(&s.editor));
-            ui.add_space(4.0);
-        });
-        egui::CentralPanel::default().show(ui, |ui| {
-            if s.on_screen {
-                ui.centered_and_justified(|ui| {
-                    ui.label(format!("Editing on {} — use the buttons at the top of that screen.", s.target.label));
-                });
-            } else {
-                let avail = ui.available_rect_before_wrap().shrink(8.0);
-                let rect = fit(avail, s.target.work());
-                show_editor(ui, &mut s.editor, rect);
-            }
-        });
         if s.on_screen {
             let (back, sv, cn) = on_screen(&ctx, s);
             if back {
@@ -666,6 +856,148 @@ impl EditorApp {
             self.status = Some(("Changes discarded.".into(), false));
         }
     }
+}
+
+/// A section title in the gallery.
+fn section_header(ui: &mut Ui, title: &str, hint: Option<&str>) {
+    let p = pal(ui);
+    ui.add_space(26.0);
+    ui.label(
+        RichText::new(title)
+            .font(theme::font_semibold(15.0))
+            .color(p.text),
+    );
+    if let Some(h) = hint {
+        ui.label(RichText::new(h).size(12.0).color(p.text2));
+    }
+    ui.add_space(10.0);
+}
+
+/// `n` cards in rows that fill the available width; `add(ui, i, card_w)`.
+fn card_grid(ui: &mut Ui, n: usize, mut add: impl FnMut(&mut Ui, usize, f32)) {
+    let gap = 16.0;
+    let w = ui.available_width();
+    let cols = (((w + gap) / (gallery::CARD_MIN_W + gap)).floor() as usize).clamp(1, 6);
+    let card_w = ((w - gap * (cols as f32 - 1.0)) / cols as f32).min(gallery::CARD_MAX_W);
+    let mut i = 0;
+    while i < n {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for _ in 0..cols {
+                if i >= n {
+                    break;
+                }
+                add(ui, i, card_w);
+                i += 1;
+            }
+        });
+        ui.add_space(gap - ui.spacing().item_spacing.y);
+    }
+}
+
+/// A monitor in the picker: icon, name and resolution in a pill.
+fn monitor_chip(ui: &mut Ui, t: &Target, selected: bool) -> egui::Response {
+    let p = pal(ui);
+    let (glyph, title, detail) = if t.id == DEFAULT_TARGET {
+        (
+            icon::STACK,
+            "Other monitors".to_string(),
+            "Default".to_string(),
+        )
+    } else if t.id == fancyzones::engine::SPAN_MONITOR_ID {
+        (
+            icon::MONITOR,
+            "All monitors".to_string(),
+            "Spanned".to_string(),
+        )
+    } else if !t.connected {
+        (icon::MONITOR, t.id.clone(), "Not connected".to_string())
+    } else {
+        let detail = t
+            .label
+            .split(" (")
+            .nth(1)
+            .and_then(|r| r.split(')').next())
+            .unwrap_or("")
+            .replace('×', " × ");
+        (icon::MONITOR, t.short_name(), detail)
+    };
+    let tf = theme::font_semibold(12.5);
+    let df = theme::font(11.5);
+    let tw = ui.fonts_mut(|f| f.layout_no_wrap(title.clone(), tf.clone(), p.text).size().x);
+    let dw = ui.fonts_mut(|f| {
+        f.layout_no_wrap(detail.clone(), df.clone(), p.text)
+            .size()
+            .x
+    });
+    let size = vec2(40.0 + tw.max(dw) + 14.0, 44.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter();
+    let (fill, stroke) = if selected {
+        (p.accent_soft, Stroke::new(1.5, p.accent))
+    } else if resp.hovered() {
+        (p.control_hover, Stroke::new(1.0, p.card_border))
+    } else {
+        (p.card, Stroke::new(1.0, p.card_border))
+    };
+    painter.rect(rect, 10.0, fill, stroke, egui::StrokeKind::Inside);
+    painter.text(
+        pos2(rect.left() + 20.0, rect.center().y),
+        Align2::CENTER_CENTER,
+        glyph,
+        theme::icon_font(17.0),
+        if selected { p.accent } else { p.text2 },
+    );
+    let italic = !t.connected && t.id != DEFAULT_TARGET;
+    painter.text(
+        pos2(rect.left() + 38.0, rect.center().y - 7.5),
+        Align2::LEFT_CENTER,
+        title,
+        tf,
+        if italic { p.text2 } else { p.text },
+    );
+    painter.text(
+        pos2(rect.left() + 38.0, rect.center().y + 8.5),
+        Align2::LEFT_CENTER,
+        detail,
+        df,
+        p.text2,
+    );
+    resp
+}
+
+/// One of the two layout kinds in the "Create new layout" dialog.
+fn kind_tile(ui: &mut Ui, w: f32, glyph: &str, title: &str, desc: &str, selected: bool) -> egui::Response {
+    let p = pal(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 108.0), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let painter = ui.painter();
+    let (fill, stroke) = if selected {
+        (p.accent_soft, Stroke::new(1.5, p.accent))
+    } else if resp.hovered() {
+        (p.control_hover, Stroke::new(1.0, p.card_border))
+    } else {
+        (p.control, Stroke::new(1.0, p.card_border))
+    };
+    painter.rect(rect, 10.0, fill, stroke, egui::StrokeKind::Inside);
+    painter.text(
+        rect.left_top() + vec2(14.0, 14.0),
+        Align2::LEFT_TOP,
+        glyph,
+        theme::icon_font(22.0),
+        if selected { p.accent } else { p.text2 },
+    );
+    painter.text(
+        rect.left_top() + vec2(14.0, 48.0),
+        Align2::LEFT_TOP,
+        title,
+        theme::font_semibold(13.5),
+        p.text,
+    );
+    let galley = ui.fonts_mut(|f| f.layout(desc.to_string(), theme::font(11.5), p.text2, w - 28.0));
+    painter.galley(rect.left_top() + vec2(14.0, 68.0), galley, p.text2);
+    resp
 }
 
 fn dialog_next(slot: &mut Option<Dialog>, d: Dialog) {
@@ -696,27 +1028,70 @@ fn hint(e: &ZoneEditor) -> &'static str {
 }
 
 fn toolbar(ui: &mut Ui, e: &mut ZoneEditor) {
+    let p = pal(ui);
+    let sep = |ui: &mut Ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(1.0, 22.0), Sense::hover());
+        ui.painter()
+            .vline(r.center().x, r.y_range(), Stroke::new(1.0, p.card_border));
+    };
+    ui.spacing_mut().item_spacing.x = 10.0;
     match e {
         ZoneEditor::Grid(g) => {
-            ui.checkbox(&mut g.show_spacing, "Space around zones");
-            ui.add_enabled(g.show_spacing, egui::DragValue::new(&mut g.spacing).range(fancyzones::layout::MAX_NEGATIVE_SPACING..=1000).suffix(" px"));
-            ui.label("Highlight distance");
-            ui.add(egui::DragValue::new(&mut g.sensitivity_radius).range(0..=1000).suffix(" px"));
-            ui.label(zones_label(g.model.len()));
+            ui.label(theme::icon_text(icon::GRID_FOUR).size(16.0).color(p.accent));
+            ui.label(
+                RichText::new(zones_label(g.model.len()))
+                    .font(theme::font_semibold(13.0))
+                    .color(p.text),
+            );
+            sep(ui);
+            widgets::toggle_labeled(ui, &mut g.show_spacing, "Space around zones");
+            ui.label(RichText::new("Space around zones").color(p.text));
+            ui.add_enabled(
+                g.show_spacing,
+                egui::DragValue::new(&mut g.spacing)
+                    .range(fancyzones::layout::MAX_NEGATIVE_SPACING..=1000)
+                    .suffix(" px"),
+            );
+            sep(ui);
+            ui.label(RichText::new("Highlight distance").color(p.text));
+            ui.add(
+                egui::DragValue::new(&mut g.sensitivity_radius)
+                    .range(0..=1000)
+                    .suffix(" px"),
+            );
         }
         ZoneEditor::Canvas(c) => {
-            if ui.button("Add zone").clicked() {
+            ui.label(theme::icon_text(icon::STACK).size(16.0).color(p.accent));
+            ui.label(
+                RichText::new(zones_label(c.zones.len()))
+                    .font(theme::font_semibold(13.0))
+                    .color(p.text),
+            );
+            sep(ui);
+            if widgets::icon_text_button(ui, icon::PLUS, "Add zone").clicked() {
                 c.add_zone();
             }
-            if ui.add_enabled(c.selected.is_some(), egui::Button::new("Delete zone")).clicked() {
+            if ui
+                .add_enabled_ui(c.selected.is_some(), |ui| {
+                    widgets::icon_text_button(ui, icon::TRASH, "Delete zone")
+                })
+                .inner
+                .clicked()
+            {
                 if let Some(i) = c.selected {
                     c.delete_zone(i);
                 }
             }
-            ui.checkbox(&mut c.magnetic, "Snap to edges");
-            ui.label("Highlight distance");
-            ui.add(egui::DragValue::new(&mut c.sensitivity_radius).range(0..=1000).suffix(" px"));
-            ui.label(zones_label(c.zones.len()));
+            sep(ui);
+            widgets::toggle_labeled(ui, &mut c.magnetic, "Snap to edges");
+            ui.label(RichText::new("Snap to edges").color(p.text));
+            sep(ui);
+            ui.label(RichText::new("Highlight distance").color(p.text));
+            ui.add(
+                egui::DragValue::new(&mut c.sensitivity_radius)
+                    .range(0..=1000)
+                    .suffix(" px"),
+            );
         }
     }
 }
@@ -736,33 +1111,93 @@ fn on_screen(ctx: &egui::Context, s: &mut Session) -> (bool, bool, bool) {
         .with_resizable(false)
         .with_always_on_top();
     let (mut back, mut save, mut cancel) = (false, false, false);
-    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fz-editor-on-screen"), builder, |ui, _class| {
-        if ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)) {
-            back = true;
-        }
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
-            let rect = fit(ui.max_rect(), s.target.work());
-            show_editor(ui, &mut s.editor, rect);
-        });
-        egui::Area::new(egui::Id::unique("fz-on-screen-toolbar"))
-            .anchor(egui::Align2::CENTER_TOP, [0.0, 16.0])
-            .order(egui::Order::Foreground)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(10.0).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&s.name).strong());
-                        ui.separator();
-                        toolbar(ui, &mut s.editor);
-                        ui.separator();
-                        save = ui.button(RichText::new("Save").strong()).clicked();
-                        cancel = ui.button("Cancel").clicked();
-                        back |= ui.button("Back to window").clicked();
-                    });
-                    ui.weak(hint(&s.editor));
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("fz-editor-on-screen"),
+        builder,
+        |ui, _class| {
+            theme::ensure(ui.ctx());
+            if ui
+                .ctx()
+                .input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape))
+            {
+                back = true;
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE)
+                .show(ui, |ui| {
+                    let rect = fit(ui.max_rect(), s.target.work());
+                    show_editor(ui, &mut s.editor, rect);
                 });
-            });
-    });
+            egui::Area::new(egui::Id::unique("fz-on-screen-toolbar"))
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 16.0])
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    let p = pal(ui);
+                    egui::Frame::new()
+                        .fill(p.card)
+                        .stroke(Stroke::new(1.0, p.card_border))
+                        .corner_radius(14.0)
+                        .inner_margin(egui::Margin::symmetric(16, 12))
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 8],
+                            blur: 30,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(90),
+                        })
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(&s.name)
+                                        .font(theme::font_semibold(14.0))
+                                        .color(p.text),
+                                );
+                                ui.add_space(8.0);
+                                toolbar(ui, &mut s.editor);
+                                ui.add_space(8.0);
+                                back |= ui.button("Back to window").clicked();
+                                cancel = ui.button("Cancel").clicked();
+                                save = widgets::primary_button(ui, "Save").clicked();
+                            });
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(hint(&s.editor)).size(12.0).color(p.text2));
+                        });
+                });
+        },
+    );
     (back, save, cancel)
+}
+
+#[cfg(test)]
+impl EditorApp {
+    pub fn test_open_template_dialog(&mut self, i: usize) {
+        self.dialog = Some(Dialog::Template {
+            index: i,
+            layout: self.templates[i].clone(),
+        });
+    }
+    pub fn test_open_custom_dialog(&mut self, uuid: &str) {
+        self.dialog = Some(Dialog::Custom {
+            uuid: uuid.into(),
+            name: "Coding".into(),
+            show_spacing: true,
+            spacing: 8,
+            sensitivity: 20,
+            hotkey: Some(1),
+            grid: true,
+        });
+    }
+    pub fn test_open_new_dialog(&mut self) {
+        self.dialog = Some(Dialog::New {
+            name: "Custom layout 2".into(),
+            canvas: false,
+        });
+    }
+    pub fn test_close_dialog(&mut self) {
+        self.dialog = None;
+    }
+    pub fn test_open_editor(&mut self, uuid: &str) {
+        self.open_custom_editor(uuid);
+    }
 }
 
 impl eframe::App for EditorApp {

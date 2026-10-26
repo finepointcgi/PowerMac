@@ -5,10 +5,10 @@
 //! Zones are kept in work-area pixels; `ref-width` / `ref-height` of the
 //! saved layout are the work area size it was edited on (like FancyZones).
 
-use eframe::egui::{self, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, Ui};
+use eframe::egui::{self, CursorIcon, Pos2, Rect, Sense, Stroke, Ui};
 use fancyzones::layout::{CanvasLayoutInfo, CanvasZone};
 
-use crate::widgets::ACCENT;
+use crate::theme;
 
 /// `CanvasZone.MinZoneWidth` / `MinZoneHeight`.
 pub const MIN_W: i32 = 64;
@@ -387,15 +387,34 @@ impl CanvasEditor {
         // --- drawing
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals().clone();
+        let pal = theme::pal(ui);
+        let accent = pal.accent;
         painter.rect_filled(rect, 0.0, visuals.extreme_bg_color);
         let hover = resp.hover_pos().and_then(|p| hit(&self.zones, &self.draw_order(), p));
         for i in self.draw_order() {
             let z = self.zones[i];
             let r = zr(&z);
             let sel = self.selected == Some(i);
-            let fill = if sel { Color32::from_rgba_unmultiplied(0x2B, 0x88, 0xD8, 170) } else { Color32::from_rgba_unmultiplied(0x2B, 0x88, 0xD8, 90) };
-            painter.rect(r, 4.0, fill, Stroke::new(if sel { 2.5 } else { 1.5 }, ACCENT), egui::StrokeKind::Inside);
-            painter.text(r.center(), egui::Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::proportional(28.0), visuals.text_color());
+            let fill = if sel {
+                pal.accent.gamma_multiply(0.34)
+            } else {
+                pal.accent
+                    .gamma_multiply(if pal.dark { 0.16 } else { 0.12 })
+            };
+            painter.rect(
+                r,
+                6.0,
+                fill,
+                Stroke::new(if sel { 2.5 } else { 1.5 }, accent),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                (i + 1).to_string(),
+                theme::font_semibold(26.0),
+                pal.text,
+            );
             painter.text(
                 r.center() + egui::vec2(0.0, 24.0),
                 egui::Align2::CENTER_CENTER,
@@ -406,10 +425,33 @@ impl CanvasEditor {
             if sel || hover.map(|h| h.0) == Some(i) {
                 let c = close_rect(r);
                 let hot = hover == Some((i, None));
-                painter.rect_filled(c, 4.0, if hot { crate::widgets::ERROR } else { visuals.widgets.inactive.bg_fill });
-                painter.text(c.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(16.0), visuals.strong_text_color());
-                for p in [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()] {
-                    painter.rect_filled(Rect::from_center_size(p, egui::vec2(8.0, 8.0)), 1.0, ACCENT);
+                painter.rect_filled(
+                    c,
+                    4.0,
+                    if hot {
+                        pal.error
+                    } else {
+                        visuals.widgets.inactive.bg_fill
+                    },
+                );
+                painter.text(
+                    c.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "×",
+                    egui::FontId::proportional(16.0),
+                    visuals.strong_text_color(),
+                );
+                for p in [
+                    r.left_top(),
+                    r.right_top(),
+                    r.left_bottom(),
+                    r.right_bottom(),
+                ] {
+                    painter.rect_filled(
+                        Rect::from_center_size(p, egui::vec2(8.0, 8.0)),
+                        1.0,
+                        accent,
+                    );
                 }
             }
         }

@@ -35,7 +35,9 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_BINARY};
+use windows_sys::Win32::System::Registry::{
+    RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD,
+};
 use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::UI::Accessibility::*;
@@ -350,6 +352,33 @@ fn read_guid(subkey: &str) -> Option<String> {
         RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr(), RRF_RT_REG_BINARY, std::ptr::null_mut(), buf.as_mut_ptr() as *mut c_void, &mut size)
     };
     (r == ERROR_SUCCESS && size == 16).then(|| guid_string(&buf))
+}
+
+/// The Windows accent color (`HKCU\Software\Microsoft\Windows\DWM\AccentColor`,
+/// stored as 0xAABBGGRR).
+pub fn system_accent_color() -> Option<(u8, u8, u8)> {
+    let key = wide(r"Software\Microsoft\Windows\DWM");
+    let value = wide("AccentColor");
+    let mut v: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            &mut v as *mut u32 as *mut c_void,
+            &mut size,
+        )
+    };
+    (r == ERROR_SUCCESS).then(|| {
+        (
+            (v & 0xFF) as u8,
+            ((v >> 8) & 0xFF) as u8,
+            ((v >> 16) & 0xFF) as u8,
+        )
+    })
 }
 
 /// Current virtual desktop id (`GetCurrentVirtualDesktopIdFromRegistry`).
@@ -938,13 +967,14 @@ fn refresh_drag(s: &mut HookState) -> Option<OverlayState> {
 }
 
 fn show_feedback(fb: SwitchFeedback) {
+    let ms = fb.flash_ms.unwrap_or(FLASH_ZONES_MS);
     if let Some(f) = fb.flash {
         update_overlay(f);
         with_state(|s| unsafe {
             if s.flash_timer != 0 {
                 KillTimer(std::ptr::null_mut(), s.flash_timer);
             }
-            s.flash_timer = SetTimer(std::ptr::null_mut(), 0, FLASH_ZONES_MS as u32, None);
+            s.flash_timer = SetTimer(std::ptr::null_mut(), 0, ms as u32, None);
         });
     }
     if let Some(l) = fb.label {
