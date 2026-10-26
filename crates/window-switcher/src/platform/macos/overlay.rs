@@ -25,7 +25,7 @@ use super::thumbs;
 use crate::layout::{Layout, Tile};
 use crate::model::{RectF, WindowInfo};
 
-type Layer = Retained<AnyObject>;
+pub(super) type Layer = Retained<AnyObject>;
 
 /// `NSPopUpMenuWindowLevel` — above normal, floating and most panels.
 const PANEL_LEVEL: isize = 101;
@@ -82,43 +82,43 @@ pub struct Model {
 
 // ------------------------------------------------------------ layer helpers
 
-fn nsrect(r: RectF) -> NSRect {
+pub(super) fn nsrect(r: RectF) -> NSRect {
     NSRect::new(NSPoint::new(r.x, r.y), NSSize::new(r.w, r.h))
 }
 
-unsafe fn layer() -> Layer {
+pub(super) unsafe fn layer() -> Layer {
     msg_send![class!(CALayer), layer]
 }
 
-unsafe fn set_frame(l: &AnyObject, r: RectF) {
+pub(super) unsafe fn set_frame(l: &AnyObject, r: RectF) {
     let _: () = msg_send![l, setFrame: nsrect(r)];
 }
 
-unsafe fn set_bg(l: &AnyObject, c: &OwnedColor) {
+pub(super) unsafe fn set_bg(l: &AnyObject, c: &OwnedColor) {
     let _: () = msg_send![l, setBackgroundColor: c.0];
 }
 
-unsafe fn set_radius(l: &AnyObject, r: f64) {
+pub(super) unsafe fn set_radius(l: &AnyObject, r: f64) {
     let _: () = msg_send![l, setCornerRadius: r];
 }
 
-unsafe fn set_hidden(l: &AnyObject, h: bool) {
+pub(super) unsafe fn set_hidden(l: &AnyObject, h: bool) {
     let _: () = msg_send![l, setHidden: h];
 }
 
-unsafe fn add(parent: &AnyObject, child: &AnyObject) {
+pub(super) unsafe fn add(parent: &AnyObject, child: &AnyObject) {
     let _: () = msg_send![parent, addSublayer: child];
 }
 
 /// Top-left-origin rect → Core Animation's y-up coordinates inside a
 /// parent of height `ph`. (We don't use `geometryFlipped`: offscreen
 /// `renderInContext:` draws contents upside down under it.)
-fn flip(r: RectF, ph: f64) -> RectF {
+pub(super) fn flip(r: RectF, ph: f64) -> RectF {
     RectF::new(r.x, ph - r.y - r.h, r.w, r.h)
 }
 
 /// Rasterize an `NSImage` (app icon) at `pts` points × `scale`.
-unsafe fn icon_image(img: &AnyObject, pts: f64, scale: f64) -> Option<Image> {
+pub(super) unsafe fn icon_image(img: &AnyObject, pts: f64, scale: f64) -> Option<Image> {
     let px = (pts * scale).round().max(1.0);
     let mut r = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(px, px));
     let null: *const AnyObject = std::ptr::null();
@@ -126,7 +126,7 @@ unsafe fn icon_image(img: &AnyObject, pts: f64, scale: f64) -> Option<Image> {
     Image::from_borrowed(cg.0)
 }
 
-unsafe fn set_icon(l: &AnyObject, icon: Option<&AnyObject>, pts: f64, scale: f64) {
+pub(super) unsafe fn set_icon(l: &AnyObject, icon: Option<&AnyObject>, pts: f64, scale: f64) {
     match icon.and_then(|i| icon_image(i, pts, scale)) {
         Some(img) => set_contents_image(l, &img),
         None => {
@@ -136,17 +136,17 @@ unsafe fn set_icon(l: &AnyObject, icon: Option<&AnyObject>, pts: f64, scale: f64
     }
 }
 
-unsafe fn set_contents_image(l: &AnyObject, img: &Image) {
+pub(super) unsafe fn set_contents_image(l: &AnyObject, img: &Image) {
     let p = img.raw() as *const AnyObject;
     let _: () = msg_send![l, setContents: p];
 }
 
-unsafe fn system_font(size: f64, weight: f64) -> Retained<AnyObject> {
+pub(super) unsafe fn system_font(size: f64, weight: f64) -> Retained<AnyObject> {
     msg_send![class!(NSFont), systemFontOfSize: size, weight: weight]
 }
 
 /// Width of `s` in `font`.
-unsafe fn text_width(s: &str, font: &AnyObject) -> f64 {
+pub(super) unsafe fn text_width(s: &str, font: &AnyObject) -> f64 {
     let key = NSString::from_str("NSFont");
     let attrs: Retained<AnyObject> = msg_send![class!(NSDictionary), dictionaryWithObject: font, forKey: &*key];
     let ns = NSString::from_str(s);
@@ -154,11 +154,11 @@ unsafe fn text_width(s: &str, font: &AnyObject) -> f64 {
     size.width.ceil()
 }
 
-const WEIGHT_REGULAR: f64 = 0.0;
-const WEIGHT_MEDIUM: f64 = 0.23;
-const WEIGHT_SEMIBOLD: f64 = 0.3;
+pub(super) const WEIGHT_REGULAR: f64 = 0.0;
+pub(super) const WEIGHT_MEDIUM: f64 = 0.23;
+pub(super) const WEIGHT_SEMIBOLD: f64 = 0.3;
 
-unsafe fn text_layer(s: &str, font: &AnyObject, size: f64, color: &OwnedColor, align: &str, scale: f64) -> Layer {
+pub(super) unsafe fn text_layer(s: &str, font: &AnyObject, size: f64, color: &OwnedColor, align: &str, scale: f64) -> Layer {
     let l: Layer = msg_send![class!(CATextLayer), layer];
     let _: () = msg_send![&*l, setFont: font as *const AnyObject as *const c_void];
     let _: () = msg_send![&*l, setFontSize: size];
@@ -175,7 +175,7 @@ unsafe fn text_layer(s: &str, font: &AnyObject, size: f64, color: &OwnedColor, a
 }
 
 /// Aspect-fit a `w`×`h` box into `r`, centered.
-fn fit(r: RectF, w: f64, h: f64) -> RectF {
+pub(super) fn fit(r: RectF, w: f64, h: f64) -> RectF {
     if w <= 0.0 || h <= 0.0 || r.w <= 0.0 || r.h <= 0.0 {
         return r;
     }
@@ -185,7 +185,7 @@ fn fit(r: RectF, w: f64, h: f64) -> RectF {
 }
 
 /// The system accent color (sRGB 0..1).
-fn accent() -> (f64, f64, f64) {
+pub(super) fn accent() -> (f64, f64, f64) {
     let c = NSColor::controlAccentColor();
     match c.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()) {
         Some(c) => (c.redComponent(), c.greenComponent(), c.blueComponent()),
@@ -219,7 +219,7 @@ struct Tree {
 }
 
 /// Icon providers: real app icons from the pid, else from the bundle path.
-fn icon_for(pid: i32, path: &str, cache: &mut HashMap<(i32, String), Option<Retained<AnyObject>>>) -> Option<Retained<AnyObject>> {
+pub(super) fn icon_for(pid: i32, path: &str, cache: &mut HashMap<(i32, String), Option<Retained<AnyObject>>>) -> Option<Retained<AnyObject>> {
     cache.entry((pid, path.to_string())).or_insert_with(|| (if pid > 0 { apps::icon(pid) } else { None }).or_else(|| apps::icon_for_path(path))).clone()
 }
 
@@ -433,15 +433,15 @@ thread_local! {
     static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) };
 }
 
-fn primary_height() -> f64 {
+pub(super) fn primary_height() -> f64 {
     unsafe { CGDisplayBounds(CGMainDisplayID()).size.height }
 }
 
-fn to_cocoa(r: RectF) -> NSRect {
+pub(super) fn to_cocoa(r: RectF) -> NSRect {
     NSRect::new(NSPoint::new(r.x, primary_height() - (r.y + r.h)), NSSize::new(r.w, r.h))
 }
 
-fn backing_scale(mtm: MainThreadMarker, r: RectF) -> f64 {
+pub(super) fn backing_scale(mtm: MainThreadMarker, r: RectF) -> f64 {
     let c = to_cocoa(r);
     let (cx, cy) = (c.origin.x + c.size.width / 2.0, c.origin.y + c.size.height / 2.0);
     let screens = NSScreen::screens(mtm);

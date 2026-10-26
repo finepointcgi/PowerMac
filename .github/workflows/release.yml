@@ -1,0 +1,134 @@
+# Release: push a tag vX.Y.Z (matching the workspace version) and this builds
+# a universal PowerMac.app, packages it as a DMG and a zip, and publishes a
+# GitHub Release with the matching CHANGELOG.md section as its notes.
+#
+# Developer ID signing and notarization run when these repository secrets
+# are set (otherwise the app is ad-hoc signed and the notes say so):
+#   MACOS_CERT_P12_BASE64   Developer ID Application certificate (.p12, base64)
+#   MACOS_CERT_PASSWORD     its password
+#   MACOS_SIGN_IDENTITY     e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   notarytool credentials
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. v1.0.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-14
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check tag matches the workspace version
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$VERSION" = "$TAG" ] || { echo "tag $TAG != workspace version $VERSION"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --workspace --release
+
+      - name: Import signing certificate
+        id: cert
+        env:
+          P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          if [ -z "$P12" ] || [ -z "$IDENTITY" ]; then
+            echo "No Developer ID secrets: building ad-hoc signed."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KC="$RUNNER_TEMP/build.keychain"
+          KC_PW=$(openssl rand -hex 16)
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PW" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build universal PowerMac.app
+        env:
+          UNIVERSAL: "1"
+        run: ./scripts/bundle-macos.sh
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          APP=target/release/PowerMac.app
+          ./scripts/make-dmg.sh "$APP" "dist/PowerMac-$VERSION.dmg"
+          ditto -c -k --keepParent "$APP" "dist/PowerMac-$VERSION.zip"
+
+      - name: Notarize
+        if: steps.cert.outputs.signed == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          DMG="dist/PowerMac-$VERSION.dmg"
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "$DMG"
+          # The zip can't be stapled; staple the app inside and re-zip it.
+          xcrun stapler staple target/release/PowerMac.app
+          rm "dist/PowerMac-$VERSION.zip"
+          ditto -c -k --keepParent target/release/PowerMac.app "dist/PowerMac-$VERSION.zip"
+
+      - name: Checksums
+        run: cd dist && shasum -a 256 PowerMac-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Release notes
+        env:
+          SIGNED: ${{ steps.cert.outputs.signed }}
+        run: |
+          awk -v v="$VERSION" '
+            /^## / { on = ($0 ~ "^## \\[?" v "\\]?") ; next }
+            on' CHANGELOG.md > notes.md
+          if [ "$SIGNED" != "true" ]; then
+            cat >> notes.md <<'EOF'
+
+          ### Opening the app
+
+          This build is not notarized by Apple. After copying PowerMac to Applications, open it once with
+          **right-click → Open** (or run `xattr -dr com.apple.quarantine /Applications/PowerMac.app`).
+          EOF
+          fi
+          cat notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "PowerMac $VERSION" --notes-file notes.md --verify-tag
+          fi

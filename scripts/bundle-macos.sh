@@ -2,18 +2,43 @@
 # Build PowerMac.app: a menu-bar-only app (no Dock icon). macOS ties the
 # Accessibility / Input Monitoring grants to this bundle instead of your terminal.
 # Honors CARGO_TARGET_DIR (the bundle goes to $CARGO_TARGET_DIR/release).
+#
+# Release builds (CI) also use:
+#   UNIVERSAL=1             build aarch64 + x86_64 and merge them with lipo
+#   SIGN_IDENTITY="Developer ID Application: …"
+#                           sign with that identity, hardened runtime and a
+#                           secure timestamp (needed for notarization)
 set -e
 cd "$(dirname "$0")/.."
 TARGET="${CARGO_TARGET_DIR:-target}"
-cargo build --release -p powermac
+BINS="powermac powermac-battery-helper"
+OUT="$TARGET/release"
+
 # The battery charge-limit helper (installed from Settings → Battery, with an
-# admin prompt, from next to the app executable).
-cargo build --release -p battery-limit --bin powermac-battery-helper
-APP="$TARGET/release/PowerMac.app"
+# admin prompt, from next to the app executable) is built with the app.
+if [ "$UNIVERSAL" = "1" ]; then
+  for T in aarch64-apple-darwin x86_64-apple-darwin; do
+    cargo build --release --target "$T" -p powermac
+    cargo build --release --target "$T" -p battery-limit --bin powermac-battery-helper
+  done
+  mkdir -p "$OUT"
+  for B in $BINS; do
+    lipo -create -output "$OUT/$B.universal" \
+      "$TARGET/aarch64-apple-darwin/release/$B" "$TARGET/x86_64-apple-darwin/release/$B"
+  done
+  SUFFIX=.universal
+else
+  cargo build --release -p powermac
+  cargo build --release -p battery-limit --bin powermac-battery-helper
+  SUFFIX=
+fi
+
+APP="$OUT/PowerMac.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp "$TARGET/release/powermac" "$APP/Contents/MacOS/powermac"
-cp "$TARGET/release/powermac-battery-helper" "$APP/Contents/MacOS/powermac-battery-helper"
+for B in $BINS; do
+  cp "$OUT/$B$SUFFIX" "$APP/Contents/MacOS/$B"
+done
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -38,6 +63,17 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+if [ -n "$SIGN_IDENTITY" ]; then
+  # Distribution: Developer ID, hardened runtime, secure timestamp.
+  ENT=scripts/PowerMac.entitlements
+  codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
+  codesign --force --options runtime --timestamp --entitlements "$ENT" -s "$SIGN_IDENTITY" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+  echo "built $APP (signed with $SIGN_IDENTITY)"
+  exit 0
+fi
+
 # Sign with the stable local identity if scripts/create-signing-cert.sh was run,
 # so permission grants survive rebuilds; otherwise ad-hoc (grants reset on
 # every rebuild).

@@ -23,6 +23,7 @@ pub type CGImageRef = *const c_void;
 pub type CGColorRef = *const c_void;
 pub type CGContextRef = *const c_void;
 pub type CGColorSpaceRef = *const c_void;
+pub type CGPathRef = *const c_void;
 
 pub const kAXErrorSuccess: AXError = 0;
 pub const kCFStringEncodingUTF8: u32 = 0x0800_0100;
@@ -165,6 +166,9 @@ extern "C" {
         user_info: *mut c_void,
     ) -> CFMachPortRef;
     pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    pub fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
+    pub fn CGPathCreateWithRoundedRect(rect: CGRect, rx: f64, ry: f64, transform: *const c_void) -> CGPathRef;
+    pub fn CGPathRelease(p: CGPathRef);
     pub fn CGEventGetLocation(e: CGEventRef) -> CGPoint;
     pub fn CGEventGetFlags(e: CGEventRef) -> u64;
     pub fn CGEventGetIntegerValueField(e: CGEventRef, field: u32) -> i64;
@@ -461,4 +465,14 @@ pub struct CgImage(pub CGImageRef);
 unsafe impl objc2::encode::Encode for CgImage {
     const ENCODING: objc2::encode::Encoding =
         objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("CGImage", &[]));
+}
+
+/// `CGPathRef` with its Objective-C encoding (for `CAShapeLayer.path`).
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy)]
+pub struct CgPath(pub CGPathRef);
+
+unsafe impl objc2::encode::Encode for CgPath {
+    const ENCODING: objc2::encode::Encoding =
+        objc2::encode::Encoding::Pointer(&objc2::encode::Encoding::Struct("CGPath", &[]));
 }

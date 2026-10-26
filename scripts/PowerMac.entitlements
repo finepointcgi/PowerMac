@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened-runtime entitlements for Developer ID builds (bundle-macos.sh
+     with SIGN_IDENTITY). Each one backs a usage description in Info.plist. -->
+<plist version="1.0">
+<dict>
+  <!-- Notch Shelf Now Playing (Music, Spotify) and Finder's selection. -->
+  <key>com.apple.security.automation.apple-events</key><true/>
+  <!-- Notch Shelf Mirror widget. -->
+  <key>com.apple.security.device.camera</key><true/>
+  <!-- Sound: per-app volume through Core Audio process taps. -->
+  <key>com.apple.security.device.audio-input</key><true/>
+</dict>
+</plist>

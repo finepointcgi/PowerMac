@@ -93,5 +93,6 @@ nav:
       - Process model and IPC: architecture/ipc.md
   - Development:
       - Building and testing: development/building.md
+      - CI and releases: development/releasing.md
       - Writing documentation: development/docs.md
   - Production readiness: production-readiness.md

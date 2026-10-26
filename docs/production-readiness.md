@@ -1,6 +1,6 @@
 # Production readiness
 
-What stands between the current 0.1.0 and a release other people can install.
+What is still open after 1.0.0, the first public release. See [CI and releases](development/releasing.md) for how releases are built.
 
 ## Known gaps
 
@@ -20,10 +20,9 @@ What stands between the current 0.1.0 and a release other people can install.
 
 ### Distribution (macOS)
 
-- [ ] Developer ID Application certificate; sign with hardened runtime (`codesign --options runtime --timestamp`).
+- [ ] Developer ID Application certificate added as release secrets (the release workflow already signs with the hardened runtime and notarizes once they exist).
 - [x] Embed the battery helper in the bundle and sign it separately (`bundle-macos.sh` does this; switch it to the Developer ID).
-- [ ] Notarize (`xcrun notarytool submit --wait`) and staple (`xcrun stapler staple`).
-- [ ] Ship as a signed, notarized `.dmg` or `.zip`.
+- [x] Ship as a universal `.dmg` and `.zip` from a tagged release.
 - [ ] A real bundle identifier you own instead of `com.powermac.app`, plus an app icon.
 - [x] Usage-description strings in `Info.plist` for Calendars, Camera, Automation (Apple Events), Audio capture.
 - [ ] Auto-update (e.g. Sparkle) or at least an update check.
@@ -35,7 +34,8 @@ What stands between the current 0.1.0 and a release other people can install.
 
 ### Quality
 
-- [ ] CI running `cargo fmt --check`, `cargo clippy --workspace -D warnings`, `cargo test --workspace` on macOS and `cargo check` for Windows.
+- [x] CI running clippy and the tests on macOS and a full build for Windows.
+- [ ] Format the codebase with rustfmt, then enforce `cargo fmt --check` and `clippy -D warnings` in CI.
 - [ ] A written live-test checklist per module (the [Building and testing](development/building.md#live-checks) list as a starting point) run before each release.
 - [ ] Crash reporting or at least panic logging to the log file.
 - [ ] Persist FancyZones zone assignments across restarts.

@@ -4,8 +4,8 @@ PowerMac brings PowerToys-style utilities to **macOS** (and, compile-checked, to
 
 It started as a port of Microsoft PowerToys and grew to cover the gaps people hit when they move to a Mac: window snapping, a window-based Alt+Tab, Dock previews, sensible mouse behaviour, external-monitor brightness, HiDPI on non-Retina screens, a battery charge limit and more.
 
-!!! warning "Status: pre-release (0.1.0)"
-    Most modules have been run live on macOS. The Windows backends compile but have **not** been run on Windows yet. See [Production readiness](production-readiness.md) for what is left before a 1.0.
+!!! info "Version 1.0.0"
+    Download the latest macOS build from the [Releases page](https://github.com/finepointcgi/PowerMac/releases). The Windows backends compile but have **not** been run on Windows yet, so no Windows build is published. See [Production readiness](production-readiness.md) for what is still open.
 
 ## What it does
 

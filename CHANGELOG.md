@@ -1,0 +1,52 @@
+# Changelog
+
+All notable changes to PowerMac are listed here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
+[Semantic Versioning](https://semver.org/).
+
+## [1.0.0] - 2026-10-26
+
+The first release: PowerToys-style utilities for macOS in one menu-bar app.
+Download `PowerMac-1.0.0.dmg`, drag PowerMac to Applications and open it.
+Full documentation: https://finepointcgi.github.io/PowerMac/
+
+### Windows and desktop
+
+- **FancyZones**: Focus, Columns, Rows, Grid and Priority Grid layouts plus custom grid and canvas layouts in a layout editor; Shift+drag into zones, span zones, keyboard snapping, quick layout switching, window cycling within a zone, monitor rotation, per-Space layouts, excluded apps. Compatible with PowerToys FancyZones JSON.
+- **Edge snapping**: Rectangle-style halves, quarters, thirds and maximize, with a preview.
+- **Window Switcher**: Windows-style Alt+Tab over windows (Option+Tab) and over the front app's windows (Option+\`), with live thumbnails; can replace Cmd+Tab.
+- **Dock Previews**: window thumbnails when hovering a Dock icon; optional taskbar-style click-to-cycle.
+- **Menu Bar Manager**: hide menu bar icons behind a chevron, with an always-hidden section, show on hover, auto-rehide and a floating bar for notched MacBooks.
+- **Notch Shelf**: a drop shelf in the notch, plus Home-view widgets (Now Playing, Calendar, Weather, Battery, System Stats, Timer, Quick Toggles, Note, Mirror) and live activities.
+
+### Input
+
+- **Mouse Without Borders**: share keyboard, mouse and clipboard text with PCs running PowerToys, wire-compatible, with automatic LAN discovery.
+- **Mouse tuning**: acceleration off and pointer speed for mice and trackpads, per-device overrides, side buttons for Back/Forward and button remapping.
+- **Scrolling**: reverse the mouse wheel independently of the trackpad, and smooth scrolling for wheel mice.
+- **Mouse Utilities**: Find My Mouse, click highlighter and crosshairs.
+- **Keyboard Manager**: key and shortcut remaps (per app), run programs, open URLs, type text; Paste as plain text; Windows-style keys; Hyper key.
+- **Text Expander**: snippets with date, time, clipboard and cursor variables; espanso import.
+
+### Hardware
+
+- **Displays**: brightness, contrast and volume of external monitors over DDC/CI (Apple Silicon), native brightness for Apple displays, software dimming for the rest; brightness and volume keys act on the display under the pointer.
+- **Display Scaling**: every display mode with a revert-unless-confirmed safety net, HiDPI on non-Retina external displays, custom resolutions.
+- **Sound**: default-device priority rules, block automatic switching to chosen devices, keep the built-in mic with Bluetooth headphones, per-app volume (experimental).
+- **Battery**: charge limit with sailing, heat protection and discharge-to-limit through a privileged helper.
+- **Awake**: keep the Mac awake indefinitely, for a time, until a time or while a process runs.
+
+### Tools
+
+- **Clipboard History** with search, pinning and privacy filters.
+- **Color Picker** with PowerToys color formats and an editor.
+- **Text Extractor**: OCR any screen region.
+- **File Tools**: PowerRename, New+, Image Resizer and Finder basics (Open in Terminal/Editor, Copy Path, hidden files, Eject all, who uses a file), as Finder Quick Actions.
+
+### Known limitations
+
+- macOS only. The Windows code builds but hasn't been run on Windows, so no Windows build is published.
+- Mouse Without Borders: no file transfer, drag-and-drop or clipboard images.
+- FancyZones zone assignments are lost when PowerMac restarts.
+- DDC/CI monitor control needs an Apple Silicon Mac.
+- Several modules use private macOS APIs and may need updates for future macOS versions.

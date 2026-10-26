@@ -1,0 +1,51 @@
+# CI: tests and clippy on macOS, a full build of every crate for Windows, and
+# an app bundle smoke test. Runs on pushes to master/main and on pull requests.
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+    paths-ignore: ["docs/**", "mkdocs.yml", "requirements-docs.txt", "**.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "mkdocs.yml", "requirements-docs.txt", "**.md"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS (test + clippy)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        # Warnings are reported but don't fail the build; errors do.
+        run: cargo clippy --workspace --all-targets
+      - name: Tests
+        run: cargo test --workspace
+      - name: Bundle smoke test
+        run: |
+          ./scripts/bundle-macos.sh
+          codesign --verify --verbose=2 target/release/PowerMac.app
+          target/release/PowerMac.app/Contents/MacOS/powermac --version
+
+  windows:
+    name: Windows (build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The Windows backends are compile-checked only; they haven't been run
+      # on Windows yet, so tests aren't run here.
+      - name: Build
+        run: cargo build --workspace --all-targets

@@ -43,8 +43,10 @@
 
 pub mod config;
 pub mod engine;
+pub mod guard;
 pub mod layout;
 pub mod model;
+pub mod placement;
 mod platform;
 pub mod switcher;
 

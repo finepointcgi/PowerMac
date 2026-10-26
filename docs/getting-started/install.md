@@ -8,6 +8,10 @@
 | CPU | Apple Silicon recommended; Intel works except DDC/CI monitor control | x86_64 |
 | Toolchain | Rust stable (`rustup`), Xcode Command Line Tools | Rust stable, MSVC build tools |
 
+## Download
+
+Get `PowerMac-<version>.dmg` from the [Releases page](https://github.com/finepointcgi/PowerMac/releases), open it and drag PowerMac to Applications. It is a universal app (Apple Silicon and Intel). If the build isn't notarized, open it the first time with right-click → **Open**.
+
 ## Build the app bundle (macOS)
 
 ```bash
