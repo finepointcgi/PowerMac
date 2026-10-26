@@ -27,6 +27,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-# Ad-hoc sign so macOS can track the permission grants for this bundle.
-codesign --force --deep -s - "$APP"
+# Sign with the stable local identity if scripts/create-signing-cert.sh was run,
+# so permission grants survive rebuilds; otherwise ad-hoc (grants reset on
+# every rebuild).
+IDENTITY="PowerMac Local Signing"
+if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+  codesign --force --deep -s "$IDENTITY" "$APP"
+else
+  echo "note: ad-hoc signing; run scripts/create-signing-cert.sh once to keep permissions across rebuilds"
+  codesign --force --deep -s - "$APP"
+fi
 echo "built $APP — move it to /Applications and open it"
