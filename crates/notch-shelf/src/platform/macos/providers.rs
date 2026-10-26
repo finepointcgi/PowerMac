@@ -150,6 +150,9 @@ fn sample_media(cfg: &Config, now: f64, art_for: &mut Option<NowPlaying>, art: &
     if let Some(np) = media::query_media_remote() {
         return np;
     }
+    if let Some(np) = media::query_jxa(now) {
+        return np;
+    }
     if use_applescript(cfg) {
         if let Some((mut np, url)) = media::query_applescript(now) {
             // Fetch artwork once per track.

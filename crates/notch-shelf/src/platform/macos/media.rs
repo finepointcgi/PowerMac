@@ -2,13 +2,18 @@
 //! 1. MediaRemote (private framework; since macOS 15.4 it only answers
 //!    entitled processes, so it usually returns nothing for third-party
 //!    apps — used whenever it does return data);
-//! 2. AppleScript for Music and Spotify (opt-in, only when the app is
+//! 2. the same framework read from JavaScript for Automation: `osascript`
+//!    is an Apple process, so MediaRemote still answers it (any player —
+//!    browsers too — and no Automation prompt; no artwork: the info it
+//!    hands out leaves the image data out);
+//! 3. AppleScript for Music and Spotify (opt-in, only when the app is
 //!    already running; macOS asks once per app for Automation access);
-//! 3. no metadata: the controls post media keys.
+//! 4. no metadata: the controls post media keys.
 
 use std::ffi::{c_char, c_void};
 use std::io::Read;
 use std::process::{Command as Proc, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -67,9 +72,19 @@ fn dict_f64(d: &AnyObject, key: &str) -> Option<f64> {
     dict_get(d, key).map(|v| unsafe { msg_send![&*v, doubleValue] })
 }
 
+/// Whether MediaRemote answered this process last time (then it also takes
+/// our commands).
+static MR_ANSWERS: AtomicBool = AtomicBool::new(false);
+
 /// Ask MediaRemote; `None` when it gives nothing (no player, or not
 /// entitled).
 pub fn query_media_remote() -> Option<NowPlaying> {
+    let r = query_media_remote_inner();
+    MR_ANSWERS.store(r.is_some(), Ordering::Relaxed);
+    r
+}
+
+fn query_media_remote_inner() -> Option<NowPlaying> {
     let mr = media_remote()?;
     let (tx, rx) = mpsc::channel::<Option<NowPlaying>>();
     autoreleasepool(|_| unsafe {
@@ -107,10 +122,64 @@ pub fn query_media_remote() -> Option<NowPlaying> {
     rx.recv_timeout(Duration::from_millis(1200)).ok().flatten()
 }
 
+/// JXA: the current item as one tab-separated line — rate, title, artist,
+/// album, duration, elapsed, sample time (unix), player name. Empty when
+/// nothing is playing.
+const JXA_SCRIPT: &str = r#"ObjC.import('Foundation');
+$.NSBundle.bundleWithPath('/System/Library/PrivateFrameworks/MediaRemote.framework/').load;
+const R = $.NSClassFromString('MRNowPlayingRequest');
+const item = R.localNowPlayingItem;
+const info = (item && !item.isNil()) ? item.nowPlayingInfo : null;
+if (!info || info.isNil()) { ''; } else {
+  const g = k => { const v = info.objectForKey('kMRMediaRemoteNowPlayingInfo' + k); return (v && !v.isNil()) ? v : null; };
+  const str = k => { const v = g(k); return v ? String(ObjC.unwrap(v.description)).replace(/[\t\r\n]+/g, ' ') : ''; };
+  const num = k => { const v = g(k); return v ? String(v.doubleValue) : ''; };
+  const ts = g('Timestamp');
+  const path = R.localNowPlayingPlayerPath;
+  const app = (path && !path.isNil() && !path.client.isNil()) ? String(ObjC.unwrap(path.client.displayName) || '') : '';
+  [num('PlaybackRate'), str('Title'), str('Artist'), str('Album'), num('Duration'), num('ElapsedTime'),
+   ts ? String(ts.timeIntervalSince1970) : '', app].join('\t');
+}"#;
+
+fn osascript_js(script: &str, timeout: Duration) -> Option<String> {
+    run_osascript(&["-l", "JavaScript", "-e", script], timeout)
+}
+
+/// Ask MediaRemote through `osascript` (works where the direct query is
+/// refused).
+pub fn query_jxa(now: f64) -> Option<NowPlaying> {
+    parse_jxa_output(&osascript_js(JXA_SCRIPT, Duration::from_secs(3))?, now)
+}
+
+fn parse_jxa_output(out: &str, now: f64) -> Option<NowPlaying> {
+    let f: Vec<&str> = out.trim_end_matches(['\n', '\r']).split('\t').collect();
+    if f.len() < 8 {
+        return None;
+    }
+    let num = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    let np = NowPlaying {
+        title: f[1].trim().to_string(),
+        artist: f[2].trim().to_string(),
+        album: f[3].trim().to_string(),
+        app: f[7].trim().to_string(),
+        playing: num(f[0]).is_some_and(|r| r > 0.0),
+        duration: num(f[4]).filter(|d| *d > 0.0),
+        elapsed: num(f[5]).filter(|e| *e >= 0.0),
+        sampled_at: num(f[6]).filter(|t| *t > 0.0).unwrap_or(now),
+        artwork: None,
+        source: MediaSource::System,
+    };
+    np.has_track().then_some(np)
+}
+
 /// Run an AppleScript with `osascript` (so a hung player can't block us
 /// for long); stdout on success.
 pub fn osascript(script: &str, timeout: Duration) -> Option<String> {
-    let mut child = Proc::new("/usr/bin/osascript").arg("-e").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    run_osascript(&["-e", script], timeout)
+}
+
+fn run_osascript(args: &[&str], timeout: Duration) -> Option<String> {
+    let mut child = Proc::new("/usr/bin/osascript").args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -174,7 +243,8 @@ pub fn send(cmd: Command, source: MediaSource) {
             }
         }
         MediaSource::System => {
-            let ok = media_remote().and_then(|mr| mr.send).is_some_and(|f| unsafe { f(cmd.mr_command(), std::ptr::null()) } != 0);
+            // Data read through osascript: MediaRemote ignores our commands.
+            let ok = MR_ANSWERS.load(Ordering::Relaxed) && media_remote().and_then(|mr| mr.send).is_some_and(|f| unsafe { f(cmd.mr_command(), std::ptr::null()) } != 0);
             if !ok {
                 super::ffi::dispatch_main(move || rt::post_media_key(cmd.nx_key()));
             }
@@ -192,6 +262,25 @@ mod tests {
         // Read-only: asks for the now-playing info (no playback control).
         assert!(media_remote().is_some());
         let _ = query_media_remote();
+    }
+
+    #[test]
+    fn jxa_query_runs() {
+        // Read-only; prints whatever is playing.
+        assert!(osascript_js(JXA_SCRIPT, Duration::from_secs(5)).is_some());
+        let _ = query_jxa(0.0);
+    }
+
+    #[test]
+    fn parses_jxa_output() {
+        let np = parse_jxa_output("1\tEndless Forest\tPurrple Cat\tEndless Forest\t157.8\t6.6\t1793049331.5\tBrave Browser\n", 5.0).unwrap();
+        assert!(np.playing);
+        assert_eq!((np.title.as_str(), np.artist.as_str(), np.app.as_str()), ("Endless Forest", "Purrple Cat", "Brave Browser"));
+        assert_eq!((np.duration, np.elapsed, np.sampled_at), (Some(157.8), Some(6.6), 1793049331.5));
+        let np = parse_jxa_output("0\tT\t\t\t\t\t\t\n", 5.0).unwrap();
+        assert!(!np.playing && np.duration.is_none() && np.sampled_at == 5.0);
+        assert!(parse_jxa_output("", 5.0).is_none());
+        assert!(parse_jxa_output("1\t\t\t\t\t\t\t", 5.0).is_none());
     }
 
     #[test]
