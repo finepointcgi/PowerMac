@@ -48,6 +48,10 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
         }
     }
 
+    if changed(old.map(|o| &o.scroll_reverser), &new.scroll_reverser) {
+        apply_scroll(running, &new.scroll_reverser);
+    }
+
     if changed(old.map(|o| &o.fancyzones), &new.fancyzones) {
         match (new.fancyzones.enabled, running.zones.is_some()) {
             (true, false) => {
@@ -68,6 +72,26 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
             }
             _ => {}
         }
+    }
+}
+
+fn apply_scroll(running: &mut Running, cfg: &scroll_reverser::Config) {
+    match (cfg.enabled, running.scroll.as_mut()) {
+        (true, Some(h)) => h.update(*cfg),
+        (true, None) => match scroll_reverser::ScrollReverser::start(*cfg) {
+            Ok(h) => {
+                log::info!("scroll reverser: running");
+                running.scroll = Some(h);
+            }
+            Err(e) => log::error!("scroll reverser: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(mut h) = running.scroll.take() {
+                h.stop();
+            }
+            log::info!("scroll reverser: stopped");
+        }
+        (false, None) => {}
     }
 }
 

@@ -41,6 +41,8 @@ struct Ui {
     layouts: Vec<CheckMenuItem>,
     copy_key: MenuItem,
     login: CheckMenuItem,
+    scroll_mouse: CheckMenuItem,
+    scroll_trackpad: CheckMenuItem,
     open_privacy: MenuItem,
     open_config: MenuItem,
     quit: MenuItem,
@@ -80,6 +82,10 @@ pub fn install() -> anyhow::Result<()> {
 
     let copy_key = MenuItem::new("Copy security key", true, None);
     let open_privacy = MenuItem::new("Open Privacy settings…", cfg!(target_os = "macos"), None);
+    let scroll = Submenu::new("Scroll direction", true);
+    let scroll_mouse = CheckMenuItem::new("Reverse mouse wheel", true, false, None);
+    let scroll_trackpad = CheckMenuItem::new("Reverse trackpad", true, false, None);
+    scroll.append_items(&[&scroll_mouse, &scroll_trackpad])?;
     let open_config = MenuItem::new("Open config folder", true, None);
     let login = CheckMenuItem::new("Launch at login", true, crate::login::is_enabled(), None);
     let quit = MenuItem::new("Quit PowerMac", true, None);
@@ -92,6 +98,7 @@ pub fn install() -> anyhow::Result<()> {
         &PredefinedMenuItem::separator(),
         &awake,
         &zones,
+        &scroll,
         &PredefinedMenuItem::separator(),
         &login,
         &open_privacy,
@@ -120,6 +127,8 @@ pub fn install() -> anyhow::Result<()> {
             layouts,
             copy_key,
             login,
+            scroll_mouse,
+            scroll_trackpad,
             open_privacy,
             open_config,
             quit,
@@ -146,6 +155,19 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     if id == ui.quit.id() {
         shutdown();
         std::process::exit(0);
+    }
+    if id == ui.scroll_mouse.id() || id == ui.scroll_trackpad.id() {
+        let (mouse, trackpad) = (ui.scroll_mouse.is_checked(), ui.scroll_trackpad.is_checked());
+        let r = crate::config::edit(|c| {
+            let s = &mut c.scroll_reverser;
+            s.reverse_mouse_vertical = mouse;
+            s.reverse_trackpad_vertical = trackpad;
+            s.enabled = mouse || trackpad || s.reverse_mouse_horizontal || s.reverse_trackpad_horizontal;
+        });
+        if let Err(e) = r {
+            log::warn!("scroll reverser: {e:#}");
+        }
+        return;
     }
     if id == ui.login.id() {
         if let Err(e) = crate::login::set_enabled(ui.login.is_checked()) {
@@ -233,9 +255,15 @@ fn refresh_ui(ui: &mut Ui) {
             r.awake.as_ref().map(|a| a.status()),
             r.zones.as_ref().map(|z| z.config()),
             r.zones.as_ref().and_then(|z| z.monitors().ok()),
+            r.scroll.as_ref().map(|s| s.config()),
         )
     });
-    let Some((mwb, awake, zones, monitors)) = snapshot else { return };
+    let Some((mwb, awake, zones, monitors, scroll)) = snapshot else { return };
+
+    // Scroll reverser
+    let sc = scroll.unwrap_or(scroll_reverser::Config { enabled: false, ..Default::default() });
+    ui.scroll_mouse.set_checked(sc.enabled && sc.reverse_mouse_vertical);
+    ui.scroll_trackpad.set_checked(sc.enabled && sc.reverse_trackpad_vertical);
 
     // Mouse Without Borders
     match &mwb {

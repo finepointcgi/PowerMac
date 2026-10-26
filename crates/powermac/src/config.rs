@@ -21,12 +21,14 @@ pub struct Toggle {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
     #[serde(rename = "mouseWithoutBorders")]
     pub mwb: Module<mwb::Config>,
     pub fancyzones: Toggle,
     pub awake: Module<awake::AwakeConfig>,
+    /// Has its own `enabled` switch.
+    pub scroll_reverser: scroll_reverser::Config,
 }
 
 impl Default for AppConfig {
@@ -35,6 +37,8 @@ impl Default for AppConfig {
             mwb: Module { enabled: true, settings: mwb::Config::default() },
             fancyzones: Toggle { enabled: true },
             awake: Module { enabled: false, settings: awake::AwakeConfig::default() },
+            // Windows has no "natural scrolling" default to undo, so only reverse on macOS.
+            scroll_reverser: scroll_reverser::Config { enabled: cfg!(target_os = "macos"), ..Default::default() },
         }
     }
 }
@@ -70,6 +74,14 @@ impl AppConfig {
         std::fs::write(path, serde_json::to_string_pretty(self)?)?;
         Ok(())
     }
+}
+
+/// Change the config file in use; the config watcher then applies it.
+pub fn edit(f: impl FnOnce(&mut AppConfig)) -> Result<()> {
+    let path = crate::CONFIG_PATH.get().cloned().or_else(AppConfig::default_path).context("no config path")?;
+    let mut c = AppConfig::load_or_default(&path)?;
+    f(&mut c);
+    c.save(&path)
 }
 
 fn rand_id() -> u32 {

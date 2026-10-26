@@ -70,6 +70,7 @@ pub(crate) struct Running {
     pub(crate) mwb: Option<mwb::EngineHandle>,
     pub(crate) zones: Option<fancyzones::Handle>,
     pub(crate) awake: Option<awake::Awake>,
+    pub(crate) scroll: Option<scroll_reverser::Handle>,
 }
 
 /// The config file in use (for the tray's "copy key" / "open config folder").
@@ -87,6 +88,9 @@ pub(crate) fn shutdown() {
         }
         if let Some(a) = &r.awake {
             a.stop();
+        }
+        if let Some(s) = &mut r.scroll {
+            s.stop();
         }
     }
 }
