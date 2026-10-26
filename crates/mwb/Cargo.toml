@@ -1,0 +1,12 @@
+[package]
+name = "mwb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pm-input = { path = "../pm-input" }

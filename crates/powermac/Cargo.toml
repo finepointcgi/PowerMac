@@ -1,0 +1,14 @@
+[package]
+name = "powermac"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pm-input = { path = "../pm-input" }
+mwb = { path = "../mwb" }
+fancyzones = { path = "../fancyzones" }
+awake = { path = "../awake" }
