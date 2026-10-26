@@ -1081,9 +1081,16 @@ name = "keyboard-manager"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
+ "env_logger",
  "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "pm-input",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1540,6 +1547,7 @@ dependencies = [
  "anyhow",
  "awake",
  "dirs 5.0.1",
+ "keyboard-manager",
  "mouse-utils",
  "mwb",
  "scroll-reverser",
@@ -1598,6 +1606,7 @@ dependencies = [
  "dispatch2",
  "env_logger",
  "fancyzones",
+ "keyboard-manager",
  "log",
  "mouse-utils",
  "mwb",

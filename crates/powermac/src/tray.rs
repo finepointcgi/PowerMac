@@ -42,6 +42,7 @@ struct Ui {
     copy_key: MenuItem,
     login: CheckMenuItem,
     find_mouse: MenuItem,
+    paste_plain: MenuItem,
     highlighter: CheckMenuItem,
     crosshairs: CheckMenuItem,
     scroll_mouse: CheckMenuItem,
@@ -94,6 +95,7 @@ pub fn install() -> anyhow::Result<()> {
     let highlighter = CheckMenuItem::new("Highlight clicks", true, false, None);
     let crosshairs = CheckMenuItem::new("Crosshairs", true, false, None);
     mouse.append_items(&[&find_mouse, &highlighter, &crosshairs])?;
+    let paste_plain = MenuItem::new("Paste as plain text", true, None);
     let open_config = MenuItem::new("Open config folder", true, None);
     let login = CheckMenuItem::new("Launch at login", true, crate::login::is_enabled(), None);
     let quit = MenuItem::new("Quit PowerMac", true, None);
@@ -108,6 +110,7 @@ pub fn install() -> anyhow::Result<()> {
         &zones,
         &scroll,
         &mouse,
+        &paste_plain,
         &PredefinedMenuItem::separator(),
         &login,
         &open_privacy,
@@ -139,6 +142,7 @@ pub fn install() -> anyhow::Result<()> {
             scroll_mouse,
             scroll_trackpad,
             find_mouse,
+            paste_plain,
             highlighter,
             crosshairs,
             open_privacy,
@@ -167,6 +171,14 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     if id == ui.quit.id() {
         shutdown();
         std::process::exit(0);
+    }
+    if id == ui.paste_plain.id() {
+        // Paste into the app that was frontmost before the menu opened.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(250));
+            with_running(|r| r.keyboard.as_ref().map(|k| k.paste_plain_text()));
+        });
+        return;
     }
     if id == ui.find_mouse.id() {
         with_running(|r| r.mouse.as_ref().map(|m| m.find_mouse()));

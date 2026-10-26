@@ -71,6 +71,7 @@ pub(crate) struct Running {
     pub(crate) awake: Option<awake::Awake>,
     pub(crate) scroll: Option<scroll_reverser::Handle>,
     pub(crate) mouse: Option<mouse_utils::Handle>,
+    pub(crate) keyboard: Option<keyboard_manager::Handle>,
 }
 
 /// The config file in use (for the tray's "copy key" / "open config folder").
@@ -100,6 +101,9 @@ pub(crate) fn shutdown() {
         }
         if let Some(m) = &mut r.mouse {
             m.stop();
+        }
+        if let Some(k) = r.keyboard.take() {
+            k.stop();
         }
     }
 }

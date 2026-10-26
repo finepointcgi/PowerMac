@@ -73,6 +73,31 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
         }
     }
 
+    if changed(old.map(|o| &o.keyboard_manager), &new.keyboard_manager) {
+        let k = &new.keyboard_manager;
+        match (k.enabled, running.keyboard.as_ref()) {
+            (true, Some(h)) => {
+                if let Err(e) = h.update(k.clone()) {
+                    log::error!("keyboard manager: {e:#}");
+                }
+            }
+            (true, None) => match keyboard_manager::KeyboardManager::start(k.clone()) {
+                Ok(h) => {
+                    log::info!("keyboard manager: running");
+                    running.keyboard = Some(h);
+                }
+                Err(e) => log::error!("keyboard manager: {e:#}"),
+            },
+            (false, Some(_)) => {
+                if let Some(h) = running.keyboard.take() {
+                    h.stop();
+                }
+                log::info!("keyboard manager: stopped");
+            }
+            (false, None) => {}
+        }
+    }
+
     if changed(old.map(|o| &o.fancyzones), &new.fancyzones) {
         match (new.fancyzones.enabled, running.zones.is_some()) {
             (true, false) => {

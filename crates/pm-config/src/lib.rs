@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub scroll_reverser: scroll_reverser::Config,
     /// Find My Mouse, Mouse Highlighter, Crosshairs (each has its own `enabled`).
     pub mouse_utils: mouse_utils::Config,
+    /// Key and shortcut remaps, paste as plain text (has its own `enabled`).
+    pub keyboard_manager: keyboard_manager::Config,
 }
 
 impl Default for AppConfig {
@@ -42,6 +44,7 @@ impl Default for AppConfig {
             // Windows has no "natural scrolling" default to undo, so only reverse on macOS.
             scroll_reverser: scroll_reverser::Config { enabled: cfg!(target_os = "macos"), ..Default::default() },
             mouse_utils: mouse_utils::Config::default(),
+            keyboard_manager: keyboard_manager::Config::default(),
         }
     }
 }

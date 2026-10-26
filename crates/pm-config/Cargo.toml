@@ -12,3 +12,4 @@ mwb = { path = "../mwb" }
 awake = { path = "../awake" }
 scroll-reverser = { path = "../scroll-reverser" }
 mouse-utils = { path = "../mouse-utils" }
+keyboard-manager = { path = "../keyboard-manager" }
