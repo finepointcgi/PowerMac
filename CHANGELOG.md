@@ -6,6 +6,10 @@ All notable changes to PowerMac are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Notch Shelf**: the Bluetooth widget lists every connected device. Devices that don't report a battery (many headphones, such as Pixel Buds) were left out; they now show with an empty ring and "Connected".
+
 ### Added
 
 - **Drag Shelf** (`crates/drag-shelf`, macOS): shake the pointer while dragging files, links, text, images or file promises and a floating shelf opens under it. Items show as a fanned stack of Quick Look thumbnails with a count; drag the stack to take everything or expand it to a grid to pick one. Copy to… / Move to… a folder, Open, Show in Finder, Copy, Share (AirDrop), Remove, Clear, Close; several shelves at once, on every Space and over full-screen apps; emptied shelves close by themselves; shelves with items come back after a restart. Also tray → **New drag shelf** and an optional shortcut. Settings → **Drag Shelf** (Windows & Desktop) with low / medium / high / custom shake sensitivity; `dragShelf` section in `config.json` (older configs load with the defaults). Not supported on Windows yet (reported in the status and on the page).
