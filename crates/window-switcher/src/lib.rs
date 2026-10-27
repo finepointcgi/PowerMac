@@ -107,6 +107,20 @@ pub fn system_hotkey_enabled(id: i32) -> Option<bool> {
     }
 }
 
+/// The windows the switcher would list for `mode` right now, in its order
+/// (front to back). Empty without Accessibility, and on other platforms.
+pub fn list_windows(config: &Config, mode: Mode) -> Vec<WindowInfo> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::macos::list_now(config, mode)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (config, mode);
+        Vec::new()
+    }
+}
+
 /// Current permission state (never prompts).
 pub fn permissions() -> Permissions {
     platform::permissions()

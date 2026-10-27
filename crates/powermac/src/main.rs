@@ -75,6 +75,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: net_cli::NetCmd,
     },
+    /// List the windows the window switcher would show now (`--app`: only
+    /// the front app's, like Cmd+`).
+    SwitcherWindows {
+        #[arg(long)]
+        app: bool,
+    },
     /// Show the privacy permissions this PowerMac has (no prompts).
     Permissions {
         /// Print JSON (what the settings window reads).
@@ -392,6 +398,7 @@ fn main() -> Result<()> {
         }
         Cmd::Workspace { cmd } => workspace_cmd(&path, cmd),
         Cmd::Net { cmd } => net_cli::run(&path, cmd),
+        Cmd::SwitcherWindows { app } => switcher_windows_cmd(&path, app),
         Cmd::Permissions { json } => permissions_cmd(&path, json),
         Cmd::Update { cmd: UpdateCmd::Check { pre } } => update_cmd(&path, pre),
         Cmd::Init { force } => {
@@ -581,6 +588,27 @@ fn workspace_cmd(path: &std::path::Path, cmd: WorkspaceCmd) -> Result<()> {
 }
 
 /// `powermac permissions [--json]`
+fn switcher_windows_cmd(path: &std::path::Path, app: bool) -> Result<()> {
+    let cfg = AppConfig::load_or_default(path)?.window_switcher;
+    let mode = if app { window_switcher::Mode::CurrentApp } else { window_switcher::Mode::AllWindows };
+    if !window_switcher::permissions().accessibility {
+        bail!("needs Accessibility permission to list windows");
+    }
+    let list = window_switcher::list_windows(&cfg, mode);
+    for w in &list {
+        let mut tags = Vec::new();
+        for (on, t) in [(w.minimized, "minimized"), (w.app_hidden, "hidden"), (w.other_space, "other Space"), (w.fullscreen, "full screen")] {
+            if on {
+                tags.push(t);
+            }
+        }
+        let tags = if tags.is_empty() { String::new() } else { format!("  ({})", tags.join(", ")) };
+        println!("{:<24} {}{}", w.app_name, w.title, tags);
+    }
+    println!("{} windows", list.len());
+    Ok(())
+}
+
 fn permissions_cmd(path: &std::path::Path, json: bool) -> Result<()> {
     use settings_ui::permissions as perms;
     let probe = perms::probe_in_process();

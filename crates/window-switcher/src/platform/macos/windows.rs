@@ -198,7 +198,6 @@ const MIN_H: f64 = 40.0;
 /// Every switchable window, in z-order (front to back; windows that aren't
 /// on screen follow). `own_pid`'s windows are marked [`WindowInfo::own`].
 pub fn enumerate(el: &mut Elements, other_spaces: bool, own_pid: i32) -> Vec<WindowInfo> {
-    let own_exe = own_exe();
     if !ax::is_trusted() {
         return vec![];
     }
@@ -222,7 +221,7 @@ pub fn enumerate(el: &mut Elements, other_spaces: bool, own_pid: i32) -> Vec<Win
                 continue;
             }
             let Some(&ci) = cg_index.get(&wid) else { continue };
-            if let Some(info) = build(&cg[ci], &w, app, own_pid, &own_exe) {
+            if let Some(info) = build(&cg[ci], &w, app, own_pid) {
                 seen.insert(wid);
                 el.by_wid.insert(wid, w);
                 found.push((ci, info));
@@ -269,7 +268,7 @@ pub fn enumerate(el: &mut Elements, other_spaces: bool, own_pid: i32) -> Vec<Win
                     continue;
                 }
                 let Some(&ci) = cg_index.get(&wid) else { continue };
-                if let Some(mut info) = build(&cg[ci], &w, app, own_pid, &own_exe) {
+                if let Some(mut info) = build(&cg[ci], &w, app, own_pid) {
                     info.other_space = !info.minimized;
                     seen.insert(wid);
                     found.push((ci, info));
@@ -286,25 +285,7 @@ pub fn enumerate(el: &mut Elements, other_spaces: bool, own_pid: i32) -> Vec<Win
     found.into_iter().map(|(_, w)| w).collect()
 }
 
-/// This executable's path (to recognise PowerMac's own windows, e.g. the
-/// settings window, which runs as a separate process).
-fn own_exe() -> String {
-    static EXE: OnceLock<String> = OnceLock::new();
-    EXE.get_or_init(|| std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())
-        .clone()
-}
-
-fn exe_path(pid: i32) -> String {
-    let mut buf = vec![0u8; 4096];
-    let n = unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
-    if n <= 0 {
-        return String::new();
-    }
-    buf.truncate(n as usize);
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
-fn build(cg: &CgWindow, w: &AxElement, app: &AppInfo, own_pid: i32, own_exe: &str) -> Option<WindowInfo> {
+fn build(cg: &CgWindow, w: &AxElement, app: &AppInfo, own_pid: i32) -> Option<WindowInfo> {
     let minimized = w.bool_attr("AXMinimized").unwrap_or(false);
     if !minimized && (cg.bounds.w < MIN_W || cg.bounds.h < MIN_H) {
         return None;
@@ -322,7 +303,9 @@ fn build(cg: &CgWindow, w: &AxElement, app: &AppInfo, own_pid: i32, own_exe: &st
         app_hidden: app.hidden,
         other_space: !cg.onscreen && !minimized && !app.hidden,
         fullscreen: w.bool_attr("AXFullScreen").unwrap_or(false),
-        own: app.pid == own_pid || (!own_exe.is_empty() && exe_path(app.pid) == own_exe),
+        // Only this process's overlays; the Settings window (its own
+        // process) is listed like any other window.
+        own: app.pid == own_pid,
     })
 }
 

@@ -11,7 +11,7 @@ pub(crate) mod spotlight;
 mod thumbs;
 mod windows;
 
-pub(crate) use runtime::{permissions, Runtime};
+pub(crate) use runtime::{list_now, permissions, Runtime};
 
 /// Offscreen rendering for previews / visual tests (main thread).
 pub mod preview {
