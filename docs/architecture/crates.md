@@ -16,6 +16,8 @@
 | `dock-previews` | Window previews on Dock icons |
 | `menubar-manager` | Hide menu bar icons behind separators |
 | `notch-shelf` | The notch drop shelf and Home-view widgets |
+| `drag-shelf` | Floating Dropover-style shelves: shake detection during drags, drag-session detection, shelves and their persistence, Copy / Move to a folder |
+| `pm-shelf-core` | What the two shelves share: the item model and store, geometry and springs, and on macOS the pasteboard / Quick Look / sharing / Core Animation helpers |
 | `awake` | IOPMAssertion / SetThreadExecutionState controller |
 | `scroll-reverser` | Device classification, wheel reversal, smooth scrolling |
 | `mouse-tuning` | Pointer acceleration / speed, button remapping |

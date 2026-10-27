@@ -8,6 +8,7 @@ anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+pm-shelf-core = { path = "../pm-shelf-core" }
 # IANA time zones for the world clocks (system zoneinfo; no bundled tzdb).
 jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-zoneinfo", "tz-fat"] }
 

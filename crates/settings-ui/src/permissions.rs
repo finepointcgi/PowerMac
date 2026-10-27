@@ -338,6 +338,10 @@ pub fn needs(c: &AppConfig) -> Vec<Need> {
     if c.workspaces.enabled {
         ax.push("Workspaces");
     }
+    let ds = &c.drag_shelf;
+    if ds.enabled && drag_shelf::SUPPORTED && (ds.shake_to_open || ds.hotkey.is_set()) {
+        ax.push("Drag Shelf");
+    }
     if km.enabled || km.paste_plain_text.enabled || km.hyper_key.is_on() {
         ax.push("Keyboard Manager");
         input.push("Keyboard Manager");
@@ -528,6 +532,7 @@ mod tests {
         off.mouse_utils.crosshairs.enabled = false;
         off.display_control.enabled = false;
         off.mouse_tuning.enabled = false;
+        off.drag_shelf.enabled = false;
         assert!(missing_needed(&off, &Probe::default()).is_empty(), "{:?}", needs(&off));
         if cfg!(target_os = "macos") {
             assert_eq!(missing_needed(&c, &Probe::default()), [Perm::Accessibility, Perm::InputMonitoring, Perm::ScreenRecording]);

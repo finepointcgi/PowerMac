@@ -17,6 +17,7 @@ mouse-tuning = { path = "../mouse-tuning" }
 display-control = { path = "../display-control" }
 clipboard-history = { path = "../clipboard-history" }
 notch-shelf = { path = "../notch-shelf" }
+drag-shelf = { path = "../drag-shelf" }
 color-picker = { path = "../color-picker" }
 text-extractor = { path = "../text-extractor" }
 window-switcher = { path = "../window-switcher" }

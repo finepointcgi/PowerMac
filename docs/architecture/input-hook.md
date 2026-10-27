@@ -54,8 +54,10 @@ The order is what the separate taps did at a fresh start of the app (the only de
 | 550 | dock-previews | moves, buttons, scroll, key down | its panel's clicks and keys |
 | 500 | window-switcher | keys, flagsChanged, moves, left button | Option+Tab, Cmd+Tab take-over |
 | 450 | clipboard-history (macOS) | keys | Cmd+Shift+V |
+| 430 | drag-shelf (hotkey) | key down | the optional "new shelf" shortcut; only while one is set |
 | 400 | display-control | keys, `NSSystemDefined` | brightness / volume keys |
 | 300 | fancyzones | buttons, drag, scroll, keys, flagsChanged | drag, hotkeys, layout wheel |
+| 250 | drag-shelf (shake detector) | left button, left drags | passive: never swallows; feeds the shake detector during drags and tells the UI when the button goes up; after FancyZones, which may consume a window drag |
 | 200 | mouse-utils | moves, buttons, keys, flagsChanged | observes almost everything, swallows only its hotkeys |
 
 Ties go to the earlier subscription. The constants are in `pm_hook::priority`.

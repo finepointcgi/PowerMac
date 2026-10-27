@@ -144,6 +144,9 @@ pub(crate) struct ModuleRow {
     /// Core permissions it can't work without.
     pub needs: &'static [Perm],
     pub detail: String,
+    /// Shown instead of nothing when it is on but not running
+    /// ("not supported on Windows").
+    pub why_not: &'static str,
 }
 
 /// The status lines for `rows`, given this process' permissions.
@@ -160,7 +163,7 @@ pub(crate) fn module_statuses(rows: &[ModuleRow], probe: &Probe) -> Vec<ModuleSt
             } else if !missing.is_empty() {
                 (ModuleState::WaitingForPermission, format!("needs {}", missing.join(" and ")))
             } else if !r.running {
-                (ModuleState::Failed, String::new())
+                (ModuleState::Failed, r.why_not.to_string())
             } else {
                 (ModuleState::Running, r.detail.clone())
             };
@@ -173,13 +176,24 @@ fn module_rows(c: &AppConfig, r: &Running, ws_count: usize) -> Vec<ModuleRow> {
     use Perm::*;
     let km = &c.keyboard_manager;
     let mu = &c.mouse_utils;
-    let row = |page, name, enabled, running, needs: &'static [Perm], detail: String| ModuleRow { page, name, enabled, running, needs, detail };
+    let row = |page, name, enabled, running, needs: &'static [Perm], detail: String| ModuleRow { page, name, enabled, running, needs, detail, why_not: "" };
     let awake_active = r.awake.as_ref().is_some_and(|a| a.status().active);
     vec![
         row("fancyzones", "FancyZones", c.fancyzones.enabled, r.zones.is_some(), &[Accessibility], String::new()),
         row("window-switcher", "Window Switcher", c.window_switcher.enabled, r.switcher.is_some(), &[Accessibility], c.window_switcher.trigger_text()),
         row("workspaces", "Workspaces", c.workspaces.enabled, true, &[Accessibility], format!("{ws_count} saved")),
         row("notch-shelf", "Notch Shelf", c.notch_shelf.enabled, r.shelf.is_some(), &[], String::new()),
+        ModuleRow {
+            why_not: drag_shelf::unsupported_reason().unwrap_or(""),
+            ..row(
+                "drag-shelf",
+                "Drag Shelf",
+                c.drag_shelf.enabled,
+                r.drag_shelf.is_some(),
+                if c.drag_shelf.shake_to_open || c.drag_shelf.hotkey.is_set() { &[Accessibility] } else { &[] },
+                r.drag_shelf.as_ref().map(|d| d.status_line()).unwrap_or_default(),
+            )
+        },
         row("dock-previews", "Dock Previews", c.dock_previews.enabled && dock_previews::SUPPORTED, r.dock.is_some(), &[Accessibility], String::new()),
         row("menu-bar", "Menu Bar", c.menu_bar.enabled, r.menubar.is_some(), &[], String::new()),
         row("mouse", "Mouse", c.mouse_tuning.enabled, r.mouse_tuning.is_some(), &[], String::new()),
@@ -599,7 +613,7 @@ mod tests {
 
     #[test]
     fn module_status_lines() {
-        let row = |enabled, running, needs: &'static [Perm]| ModuleRow { page: "x", name: "X", enabled, running, needs, detail: "2 displays".into() };
+        let row = |enabled, running, needs: &'static [Perm]| ModuleRow { page: "x", name: "X", enabled, running, needs, detail: "2 displays".into(), why_not: "" };
         let none = Probe::default();
         let all = Probe::all_granted();
         let rows = [row(false, false, &[]), row(true, true, &[]), row(true, false, &[]), row(true, true, &[Perm::Accessibility])];
@@ -611,6 +625,10 @@ mod tests {
             assert_eq!(s[3].detail, "needs Accessibility");
         }
         assert_eq!(s[1].detail, "2 displays");
+        assert_eq!(s[2].detail, "", "failed: no detail by default");
+        let unsupported = ModuleRow { why_not: "not supported on Windows", ..row(true, false, &[]) };
+        let u = module_statuses(&[unsupported], &all);
+        assert_eq!((u[0].state, u[0].detail.as_str()), (ModuleState::Failed, "not supported on Windows"));
         assert_eq!(s[0].detail, "");
     }
 

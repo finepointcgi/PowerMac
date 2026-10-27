@@ -1,0 +1,24 @@
+[package]
+name = "drag-shelf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Dropover-style floating shelves: shake the pointer while dragging files and a shelf appears at the cursor to park them."
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pm-shelf-core = { path = "../pm-shelf-core" }
+pm-hook = { path = "../pm-hook" }
+pm-input = { path = "../pm-input" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+block2 = "0.6"
+
+[dev-dependencies]
+env_logger = "0.11"

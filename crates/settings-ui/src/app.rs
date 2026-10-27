@@ -21,6 +21,7 @@ use crate::zone_style;
 
 mod automation;
 mod battery;
+mod drag_shelf_page;
 mod mixer;
 mod network;
 mod notch_widgets;
@@ -173,6 +174,11 @@ fn meta(p: Page) -> Meta {
             icon::TRAY,
             Color32::from_rgb(0x3A, 0x3A, 0x3C),
             "A drop shelf and widgets in the notch: park files, links and text, see what's playing, the weather and your next meeting.",
+        ),
+        Page::DragShelf => (
+            icon::HAND_GRABBING,
+            Color32::from_rgb(0xFF, 0x8A, 0x00),
+            "Shake the pointer while dragging files and a shelf opens right there: park them, move between windows and Spaces, drag them out again.",
         ),
         Page::NotchWidgets => (
             icon::LAYOUT,
@@ -741,6 +747,7 @@ impl SettingsApp {
             Page::ClipboardHistory => Some(c.clipboard_history.enabled),
             Page::NotchShelf => Some(c.notch_shelf.enabled),
             Page::NotchWidgets => None,
+            Page::DragShelf => Some(c.drag_shelf.enabled),
             Page::ColorPicker => Some(c.color_picker.enabled),
             Page::TextExtractor => Some(c.text_extractor.enabled),
             Page::FileTools => None,
@@ -774,6 +781,7 @@ impl SettingsApp {
             Page::Displays => c.display_control.enabled = on,
             Page::ClipboardHistory => c.clipboard_history.enabled = on,
             Page::NotchShelf => c.notch_shelf.enabled = on,
+            Page::DragShelf => c.drag_shelf.enabled = on,
             Page::ColorPicker => c.color_picker.enabled = on,
             Page::TextExtractor => c.text_extractor.enabled = on,
             Page::WindowSwitcher => c.window_switcher.enabled = on,
@@ -1301,6 +1309,7 @@ impl SettingsApp {
             Page::ClipboardHistory => self.clipboard_history(ui),
             Page::NotchShelf => self.notch_shelf(ui),
             Page::NotchWidgets => self.notch_widgets_page(ui),
+            Page::DragShelf => self.drag_shelf_page(ui),
             Page::ColorPicker => self.color_picker(ui),
             Page::TextExtractor => self.text_extractor(ui),
             Page::FileTools => self.file_tools(ui),

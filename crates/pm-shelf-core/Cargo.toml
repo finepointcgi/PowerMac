@@ -1,0 +1,17 @@
+[package]
+name = "pm-shelf-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared pieces of PowerMac's shelves (Notch Shelf, Drag Shelf): item model and persistence, geometry and springs, and on macOS the pasteboard / Quick Look / sharing / Core Animation helpers."
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"

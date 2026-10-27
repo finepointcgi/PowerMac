@@ -216,6 +216,8 @@ pub(crate) struct Running {
     pub(crate) display: Option<display_control::Handle>,
     pub(crate) clipboard: Option<clipboard_history::Handle>,
     pub(crate) shelf: Option<notch_shelf::Handle>,
+    /// Floating drag shelves (shake while dragging).
+    pub(crate) drag_shelf: Option<drag_shelf::Handle>,
     pub(crate) color: Option<color_picker::Handle>,
     pub(crate) ocr: Option<text_extractor::Handle>,
     pub(crate) switcher: Option<window_switcher::Handle>,
@@ -245,6 +247,7 @@ impl Running {
             || self.display.is_some()
             || self.clipboard.is_some()
             || self.shelf.is_some()
+            || self.drag_shelf.is_some()
             || self.color.is_some()
             || self.ocr.is_some()
             || self.switcher.is_some()
@@ -309,6 +312,9 @@ pub(crate) fn shutdown() {
         }
         if let Some(s) = r.shelf.take() {
             s.stop();
+        }
+        if let Some(s) = r.drag_shelf.take() {
+            s.stop(); // shelves with items come back at the next start
         }
         if let Some(w) = r.switcher.take() {
             w.stop();
@@ -713,11 +719,11 @@ fn doctor(path: &std::path::Path, prompt: bool) -> Result<()> {
     println!("config: {} ({})", path.display(), if path.exists() { "exists" } else { "missing" });
     let cfg = AppConfig::load_or_default(path)?;
     println!("modules: mwb={} fancyzones={} awake={} scroll={} mouse-tuning={} keyboard={} displays={} \
-              clipboard={} shelf={} color-picker={} text-extractor={} window-switcher={} display-scaling={} \
+              clipboard={} shelf={} drag-shelf={} color-picker={} text-extractor={} window-switcher={} display-scaling={} \
               sound={} battery-limit={} gestures={} hotkeys={} dock-previews={} text-expander={} menu-bar={}",
         cfg.mwb.enabled, cfg.fancyzones.enabled, cfg.awake.enabled, cfg.scroll_reverser.enabled,
         cfg.mouse_tuning.enabled, cfg.keyboard_manager.enabled, cfg.display_control.enabled,
-        cfg.clipboard_history.enabled, cfg.notch_shelf.enabled, cfg.color_picker.enabled,
+        cfg.clipboard_history.enabled, cfg.notch_shelf.enabled, cfg.drag_shelf.enabled, cfg.color_picker.enabled,
         cfg.text_extractor.enabled, cfg.window_switcher.enabled, cfg.display_scaling.enabled,
         cfg.audio.enabled, cfg.battery_limit.enabled, cfg.gestures.bindings.len(), cfg.keyboard_manager.hotkeys.len(),
         cfg.dock_previews.enabled, cfg.text_expander.enabled, cfg.menu_bar.enabled);

@@ -35,6 +35,8 @@ pub enum Page {
     /// The Notch Shelf's Home view: pages, widget instances and their
     /// settings, the widget gallery, layout import / export.
     NotchWidgets,
+    /// Floating shelves opened by shaking the pointer while dragging.
+    DragShelf,
     ColorPicker,
     TextExtractor,
     FileTools,
@@ -61,13 +63,14 @@ pub enum Page {
 
 impl Page {
     /// Sidebar order (grouped by [`Page::section`]).
-    pub const ALL: [Page; 25] = [
+    pub const ALL: [Page; 26] = [
         Page::General,
         Page::FancyZones,
         Page::WindowSwitcher,
         Page::Workspaces,
         Page::NotchShelf,
         Page::NotchWidgets,
+        Page::DragShelf,
         Page::DockPreviews,
         Page::MenuBar,
         Page::MouseTuning,
@@ -103,6 +106,7 @@ impl Page {
             Page::ClipboardHistory => "Clipboard History",
             Page::NotchShelf => "Notch Shelf",
             Page::NotchWidgets => "Notch Widgets",
+            Page::DragShelf => "Drag Shelf",
             Page::ColorPicker => "Color Picker",
             Page::TextExtractor => "Text Extractor",
             Page::FileTools => "File Tools",
@@ -145,7 +149,7 @@ impl Page {
     pub fn section(self) -> Option<&'static str> {
         Some(match self {
             Page::General | Page::Welcome => return None,
-            Page::FancyZones | Page::WindowSwitcher | Page::Workspaces | Page::NotchShelf | Page::NotchWidgets | Page::DockPreviews | Page::MenuBar => {
+            Page::FancyZones | Page::WindowSwitcher | Page::Workspaces | Page::NotchShelf | Page::NotchWidgets | Page::DragShelf | Page::DockPreviews | Page::MenuBar => {
                 "Windows & Desktop"
             }
             Page::MouseTuning
@@ -656,6 +660,11 @@ pub fn hotkey_uses(c: &AppConfig) -> Vec<HotkeyUse> {
             v.push(hk_use(Page::Displays, name, h.win, h.ctrl, h.alt, h.shift, h.code));
         }
     }
+    let ds = &c.drag_shelf;
+    if ds.enabled && drag_shelf::SUPPORTED && ds.hotkey.is_set() {
+        let h = ds.hotkey;
+        v.push(hk_use(Page::DragShelf, "New drag shelf", h.win, h.ctrl, h.alt, h.shift, h.code));
+    }
     let wsp = &c.workspaces;
     if wsp.enabled && wsp.hotkey.is_set() {
         let h = wsp.hotkey;
@@ -936,6 +945,8 @@ pub struct AppDraft {
     pub display_hotkeys: [String; 7],
     /// Workspaces: the shortcut that opens the editor.
     pub workspaces_hotkey: String,
+    /// Drag Shelf: the shortcut that opens an empty shelf.
+    pub drag_shelf_hotkey: String,
     /// Automation hotkeys (`keyboardManager.hotkeys`), with the trigger as text.
     pub hotkeys: Vec<HotkeyRow>,
     /// Shortcuts of other files (FancyZones), for the conflict check.
@@ -977,6 +988,10 @@ impl AppDraft {
                 .map(|h| format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)),
             workspaces_hotkey: {
                 let h = cfg.workspaces.hotkey;
+                format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
+            },
+            drag_shelf_hotkey: {
+                let h = cfg.drag_shelf.hotkey;
                 format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
             },
             hotkeys: k.hotkeys.iter().map(HotkeyRow::from_hotkey).collect(),
@@ -1121,6 +1136,16 @@ impl AppDraft {
         if c.workspaces.capture.excluded_apps.iter().any(|a| a.trim().is_empty()) {
             errs.push(problem(Page::Workspaces, "Excluded apps: remove the empty entry."));
         }
+
+        // Drag Shelf
+        match parse_hk(&self.drag_shelf_hotkey) {
+            Ok((w, ct, a, sh, code)) => c.drag_shelf.hotkey = drag_shelf::Hotkey::new(w, ct, a, sh, code),
+            Err(e) => errs.push(problem(Page::DragShelf, format!("Shortcut: {e}"))),
+        }
+        let ds = &mut c.drag_shelf;
+        ds.max_shelves = ds.max_shelves.clamp(1, drag_shelf::model::MAX_SHELVES as u32);
+        ds.auto_close_delay_ms = ds.auto_close_delay_ms.min(60_000);
+        ds.custom_shake = ds.custom_shake.clamped();
 
         // Text Extractor
         match parse_hk(&self.ocr_hotkey) {
@@ -1644,6 +1669,45 @@ mod tests {
         for p in [Page::WindowSwitcher, Page::ColorPicker, Page::ClipboardHistory, Page::MouseTuning] {
             assert!(pages.contains(&p), "{p:?} in {pages:?}");
         }
+    }
+
+    #[test]
+    fn drag_shelf_round_trips_through_the_draft() {
+        let n = now();
+        let mut cfg = AppConfig::with_new_key();
+        cfg.drag_shelf.sensitivity = drag_shelf::Sensitivity::Custom;
+        cfg.drag_shelf.custom_shake.reversals = 99;
+        cfg.drag_shelf.max_shelves = 0;
+        cfg.drag_shelf.remove_after_drag_out = false;
+        let mut d = AppDraft::new(cfg.clone(), n);
+        assert_eq!(d.drag_shelf_hotkey, "");
+        assert_eq!(Page::from_name("drag-shelf"), Some(Page::DragShelf));
+        assert_eq!(Page::DragShelf.section(), Some("Windows & Desktop"));
+        assert!(Page::ALL.contains(&Page::DragShelf));
+        // Out-of-range values are fixed up on save.
+        let c = d.build(n).unwrap();
+        assert_eq!((c.drag_shelf.max_shelves, c.drag_shelf.custom_shake.reversals), (1, 10));
+        assert!(!c.drag_shelf.remove_after_drag_out);
+        // The shortcut is parsed, kept and checked against the others.
+        d.drag_shelf_hotkey = "Ctrl+Alt+D".into();
+        let c = d.build(n).unwrap();
+        assert_eq!(c.drag_shelf.hotkey, drag_shelf::Hotkey::new(false, true, true, false, 0x44));
+        let again = AppDraft::new(c.clone(), n);
+        assert_eq!(parse_hk(&again.drag_shelf_hotkey), parse_hk(&d.drag_shelf_hotkey));
+        if drag_shelf::SUPPORTED {
+            assert!(hotkey_uses(&c).iter().any(|u| u.page == Page::DragShelf));
+            d.color_hotkey = "Ctrl+Alt+D".into();
+            let errs = d.build(n).unwrap_err();
+            assert!(errs.iter().any(|e| e.message.contains("New drag shelf") || e.page == Page::DragShelf), "{errs:?}");
+            d.color_hotkey = AppDraft::new(cfg.clone(), n).color_hotkey;
+        }
+        d.drag_shelf_hotkey = "Ctrl+Nope".into();
+        let errs = d.build(n).unwrap_err();
+        assert_eq!(errs[0].page, Page::DragShelf);
+        // Off: no shortcut registered.
+        let mut off = c.clone();
+        off.drag_shelf.enabled = false;
+        assert!(!hotkey_uses(&off).iter().any(|u| u.page == Page::DragShelf));
     }
 
     #[test]

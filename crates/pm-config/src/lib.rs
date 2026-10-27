@@ -50,6 +50,9 @@ pub struct AppConfig {
     pub clipboard_history: clipboard_history::Config,
     /// The drop shelf in the notch (has its own `enabled`).
     pub notch_shelf: notch_shelf::Config,
+    /// Floating shelves opened by shaking the pointer during a drag (has
+    /// its own `enabled`; on by default on macOS, unsupported on Windows).
+    pub drag_shelf: drag_shelf::Config,
     pub color_picker: Module<color_picker::Config>,
     pub text_extractor: Module<text_extractor::Config>,
     /// Alt+Tab-style window switcher (has its own `enabled`).
@@ -135,6 +138,7 @@ impl Default for AppConfig {
             display_control: display_control::Config::default(),
             clipboard_history: clipboard_history::Config::default(),
             notch_shelf: notch_shelf::Config::default(),
+            drag_shelf: drag_shelf::Config::default(),
             color_picker: Module { enabled: color_picker::SUPPORTED, settings: color_picker::Config::default() },
             text_extractor: Module { enabled: text_extractor::SUPPORTED, settings: text_extractor::Config::default() },
             window_switcher: window_switcher::Config::default(),
@@ -524,6 +528,8 @@ mod tests {
         assert_eq!(c.clipboard_history, d.clipboard_history);
         assert!(!c.clipboard_history.enabled);
         assert_eq!(c.notch_shelf, d.notch_shelf);
+        assert_eq!(c.drag_shelf, drag_shelf::Config::default());
+        assert_eq!(c.drag_shelf.enabled, drag_shelf::SUPPORTED);
         assert_eq!(c.color_picker.enabled, d.color_picker.enabled);
         assert_eq!(c.color_picker.settings, d.color_picker.settings);
         assert_eq!(c.text_extractor.settings, d.text_extractor.settings);
@@ -555,9 +561,11 @@ mod tests {
         c2.text_expander.snippets.push(text_expander::Snippet::new(";sig", "Best,\nAda"));
         let v = serde_json::to_value(&c2).unwrap();
         for k in ["mouseTuning", "displayControl", "clipboardHistory", "notchShelf", "colorPicker", "textExtractor", "windowSwitcher",
-                  "displayScaling", "audio", "batteryLimit", "gestures", "dockPreviews", "textExpander", "menuBar", "workspaces", "updates", "setup"] {
+                  "displayScaling", "audio", "batteryLimit", "gestures", "dockPreviews", "textExpander", "menuBar", "workspaces", "updates", "setup", "dragShelf"] {
             assert!(v.get(k).is_some(), "{k}");
         }
+        assert_eq!(v["dragShelf"]["sensitivity"], "medium");
+        assert_eq!(v["dragShelf"]["maxShelves"], 5);
         assert_eq!(v["colorPicker"]["enabled"], false);
         assert_eq!(v["colorPicker"]["copiedFormat"], "RGB");
         assert_eq!(v["keyboardManager"]["windowsStyle"]["finderCutPaste"], false);
@@ -586,6 +594,11 @@ mod tests {
         assert!(p.setup.completed && p.setup.remind_missing_permissions);
         assert_eq!(p.workspaces.hotkey, workspaces::Hotkey::new(false, true, true, false, 87));
         assert!(p.workspaces.enabled);
+        // A partial dragShelf section keeps the other defaults.
+        let p: AppConfig = serde_json::from_str(r#"{"dragShelf": {"sensitivity": "high", "hotkey": {"ctrl": true, "alt": true, "code": 68}}}"#).unwrap();
+        assert_eq!(p.drag_shelf.sensitivity, drag_shelf::Sensitivity::High);
+        assert!(p.drag_shelf.hotkey.is_set() && p.drag_shelf.shake_to_open && p.drag_shelf.remove_after_drag_out);
+        assert_eq!(p.drag_shelf.max_shelves, 5);
     }
 
     /// Display Control skips Display Scaling's virtual displays by these numbers.

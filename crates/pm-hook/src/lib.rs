@@ -168,8 +168,13 @@ pub mod priority {
     pub const DOCK_PREVIEWS: i32 = 550;
     pub const WINDOW_SWITCHER: i32 = 500;
     pub const CLIPBOARD_HISTORY: i32 = 450;
+    /// Drag Shelf's "new shelf" hotkey (a local shortcut like the others).
+    pub const DRAG_SHELF_HOTKEY: i32 = 430;
     pub const DISPLAY_CONTROL: i32 = 400;
     pub const FANCYZONES: i32 = 300;
+    /// Drag Shelf's shake detector: observes left-button drags, never
+    /// swallows; after FancyZones, which may consume a window drag.
+    pub const DRAG_SHELF: i32 = 250;
     pub const MOUSE_UTILS: i32 = 200;
 }
 

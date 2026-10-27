@@ -1204,3 +1204,47 @@ fn int5_shots() {
     assert_eq!(back.gestures, cfg.gestures);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The Drag Shelf page, light and dark, with the default and the custom
+/// sensitivity (`drag-shelf-*.png`).
+#[test]
+fn drag_shelf_shots() {
+    if std::env::var_os("PM_UI_SHOTS").is_none() && std::env::var_os("PM_UI_SHOTS_ALWAYS").is_none() {
+        return;
+    }
+    if !has_gpu() {
+        return;
+    }
+    let dir = out_dir();
+    let d = scratch("drag-shelf");
+    let path = d.join("config.json");
+    for (variant, custom) in [("", false), ("-custom", true)] {
+        let mut cfg = pm_config::AppConfig::with_new_key();
+        cfg.drag_shelf.enabled = true;
+        cfg.drag_shelf.hotkey = drag_shelf::Hotkey::new(false, true, true, false, 0x44);
+        if custom {
+            cfg.drag_shelf.sensitivity = drag_shelf::Sensitivity::Custom;
+            cfg.drag_shelf.custom_shake = drag_shelf::ShakeThresholds { reversals: 4, window_ms: 800, min_segment_px: 30, min_distance_px: 260 };
+        }
+        cfg.save(&path).unwrap();
+        for (theme, tn) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
+            for (size, suffix) in [(win(1100.0, 780.0), ""), (win(1100.0, 1300.0), "-full")] {
+                let mut app = SettingsApp::new(path.clone());
+                app.set_page(Page::DragShelf);
+                let mut h = Harness::builder()
+                    .with_size(size)
+                    .with_theme(theme)
+                    .with_accessibility_check(false)
+                    .wgpu()
+                    .build_ui_state(|ui, app: &mut SettingsApp| app.draw(ui), app);
+                h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
+                h.state_mut().set_alt_tab_for_test(false, vec![]);
+                save(&mut h, &dir, &format!("drag-shelf{variant}-{tn}{suffix}"));
+            }
+        }
+        // Looking didn't change the config.
+        let back = pm_config::AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(back.drag_shelf, cfg.drag_shelf);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

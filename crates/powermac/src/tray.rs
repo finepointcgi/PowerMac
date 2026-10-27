@@ -109,6 +109,8 @@ struct Tools {
     clip_shown: Option<Vec<(u64, String)>>,
     switcher: MenuItem,
     shelf: MenuItem,
+    /// Opens an empty floating drag shelf at the pointer.
+    drag_shelf: MenuItem,
     /// Opens the settings window on the Notch Widgets page.
     notch_widgets: MenuItem,
     displays: Submenu,
@@ -121,7 +123,7 @@ struct Tools {
     menubar_show: MenuItem,
     hidden_checked_at: std::time::Instant,
     /// The hotkeys shown as accelerators (to update only on change).
-    accels: [Option<String>; 4],
+    accels: [Option<String>; 5],
     finder_checked_at: std::time::Instant,
 }
 
@@ -205,6 +207,7 @@ pub fn install() -> anyhow::Result<()> {
     let clip_clear = MenuItem::new("Clear history", true, None);
     let switcher = MenuItem::new("Window switcher", false, None);
     let shelf = MenuItem::new("Show shelf", false, None);
+    let drag_shelf = MenuItem::new("New drag shelf", false, None);
     let notch_widgets = MenuItem::new("Notch widgets…", cfg!(target_os = "macos"), None);
     let displays = Submenu::new("Displays", false);
     let finder = CheckMenuItem::new(
@@ -264,6 +267,7 @@ pub fn install() -> anyhow::Result<()> {
         &clip,
         &switcher,
         &shelf,
+        &drag_shelf,
         &notch_widgets,
         &displays,
         &menubar_show,
@@ -332,6 +336,7 @@ pub fn install() -> anyhow::Result<()> {
                 clip_shown: None,
                 switcher,
                 shelf,
+                drag_shelf,
                 notch_widgets,
                 displays,
                 displays_shown: None,
@@ -869,6 +874,12 @@ fn on_tools_click(t: &mut Tools, id: &tray_icon::menu::MenuId) -> bool {
         });
     } else if id == t.shelf.id() {
         with_running(|r| r.shelf.as_ref().map(|s| s.expand()));
+    } else if id == t.drag_shelf.id() {
+        // Once the menu has closed, so the shelf opens where the pointer is.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            with_running(|r| r.drag_shelf.as_ref().map(|d| d.new_shelf_at_cursor()));
+        });
     } else if id == t.notch_widgets.id() {
         open_settings_page("notch-widgets");
     } else if id == t.menubar_show.id() {
@@ -978,6 +989,8 @@ struct ToolsSnapshot {
     clipboard: Option<ClipState>,
     switcher: Option<window_switcher::Hotkey>,
     shelf: bool,
+    /// The drag shelf runs (and its hotkey, if any).
+    drag_shelf: Option<drag_shelf::Hotkey>,
     /// The menu bar manager runs (and shows its hidden items).
     menubar: Option<bool>,
     displays: Option<Vec<display_control::DisplayInfo>>,
@@ -994,6 +1007,7 @@ fn refresh_tools(t: &mut Tools) {
         }),
         switcher: r.switcher.as_ref().map(|w| w.config().trigger),
         shelf: r.shelf.is_some(),
+        drag_shelf: r.drag_shelf.as_ref().map(|_| cfg.drag_shelf.hotkey),
         menubar: r.menubar.as_ref().map(|m| m.expansion() != menubar_manager::Expansion::Collapsed),
         displays: r.display.as_ref().map(|d| d.displays()),
     }) else {
@@ -1010,6 +1024,9 @@ fn refresh_tools(t: &mut Tools) {
     let a = s.switcher.and_then(|h| accel_text(h.win, h.ctrl, h.alt, h.shift, h.code));
     set_accel(&t.switcher, &mut t.accels[2], a);
     t.shelf.set_enabled(s.shelf);
+    t.drag_shelf.set_enabled(s.drag_shelf.is_some());
+    let a = s.drag_shelf.filter(|h| h.is_set()).and_then(|h| accel_text(h.win, h.ctrl, h.alt, h.shift, h.code));
+    set_accel(&t.drag_shelf, &mut t.accels[4], a);
     t.menubar_show.set_enabled(s.menubar.is_some());
     t.menubar_show.set_text(if s.menubar == Some(true) { "Hide menu bar items again" } else { "Show hidden menu bar items" });
 

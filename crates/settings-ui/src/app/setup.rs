@@ -35,10 +35,10 @@ pub(super) struct Group {
 pub(super) const GROUPS: [Group; 5] = [
     Group {
         name: "Windows & Desktop",
-        blurb: "Snap windows into zones, switch between windows, save whole desktops, and a shelf in the notch.",
+        blurb: "Snap windows into zones, switch between windows, save whole desktops, and shelves in the notch and under the pointer.",
         icon: icon::SQUARES_FOUR,
         tint: Color32::from_rgb(0x5E, 0x5C, 0xE6),
-        pages: &[Page::FancyZones, Page::WindowSwitcher, Page::Workspaces, Page::NotchShelf, Page::DockPreviews, Page::MenuBar],
+        pages: &[Page::FancyZones, Page::WindowSwitcher, Page::Workspaces, Page::NotchShelf, Page::DragShelf, Page::DockPreviews, Page::MenuBar],
     },
     Group {
         name: "Mouse & Keyboard",

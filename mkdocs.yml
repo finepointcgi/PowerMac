@@ -76,6 +76,7 @@ nav:
           - Menu Bar Manager: features/menu-bar.md
           - Notch Shelf and widgets: features/notch-shelf.md
           - Notch widgets (gallery, Script, xbar, Web): features/notch-widgets.md
+          - Drag Shelf: features/drag-shelf.md
       - Input:
           - Mouse Without Borders: features/mouse-without-borders.md
           - Pairing with Windows: features/mouse-without-borders-pairing.md

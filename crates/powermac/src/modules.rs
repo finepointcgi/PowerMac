@@ -159,6 +159,9 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
     if changed(old.map(|o| &o.notch_shelf), &new.notch_shelf) {
         apply_notch_shelf(running, &new.notch_shelf);
     }
+    if changed(old.map(|o| &o.drag_shelf), &new.drag_shelf) {
+        apply_drag_shelf(running, &new.drag_shelf);
+    }
     if changed(old.map(|o| &o.color_picker), &new.color_picker) {
         apply_color_picker(running, &new.color_picker);
     }
@@ -545,6 +548,43 @@ fn apply_notch_shelf(running: &mut Running, cfg: &notch_shelf::Config) {
             log::info!("notch shelf: stopped");
         }
         (false, None) => {}
+    }
+}
+
+/// Start, update or stop the Drag Shelf (shake the pointer while dragging
+/// files to park them on a floating shelf). Not supported on Windows: the
+/// module stays off there and its status line says so.
+fn apply_drag_shelf(running: &mut Running, cfg: &drag_shelf::Config) {
+    let want = cfg.enabled && drag_shelf::SUPPORTED;
+    match (want, running.drag_shelf.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("drag shelf: settings applied");
+        }
+        (true, None) => match drag_shelf::DragShelf::start(cfg.clone(), data_dir()) {
+            Ok(h) => {
+                log::info!(
+                    "drag shelf: running ({}{})",
+                    if cfg.shake_to_open { format!("shake while dragging, {:?} sensitivity", cfg.sensitivity).to_lowercase() } else { "shake off".into() },
+                    if cfg.hotkey.is_set() { format!(", {} opens a shelf", cfg.hotkey) } else { String::new() }
+                );
+                running.drag_shelf = Some(h);
+            }
+            Err(e) => log::error!("drag shelf: {e:#}"),
+        },
+        (false, Some(_)) => {
+            if let Some(h) = running.drag_shelf.take() {
+                h.stop();
+            }
+            log::info!("drag shelf: stopped");
+        }
+        (false, None) => {
+            if cfg.enabled {
+                if let Some(why) = drag_shelf::unsupported_reason() {
+                    log::info!("drag shelf: {why}");
+                }
+            }
+        }
     }
 }
 
