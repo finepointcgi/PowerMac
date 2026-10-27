@@ -545,11 +545,12 @@ pub fn launcher(d: &mut CardDraw, c: &Card, w: f64, h: f64, ctx: &Ctx) {
 pub struct BtEntry {
     pub symbol: &'static str,
     pub label: String,
-    pub level: u8,
+    /// `None`: connected, but the device doesn't report a battery.
+    pub level: Option<u8>,
 }
 
 /// Devices → rings: AirPods get one ring for the buds (the lower one) and
-/// one for the case.
+/// one for the case; a device without a battery reading gets an empty ring.
 pub fn bt_entries(devices: &[BtDevice], only: &[String]) -> Vec<BtEntry> {
     let mut out = vec![];
     for dev in devices {
@@ -557,16 +558,20 @@ pub fn bt_entries(devices: &[BtDevice], only: &[String]) -> Vec<BtEntry> {
             continue;
         }
         let short = short_name(&dev.name);
+        if dev.levels.is_empty() {
+            out.push(BtEntry { symbol: dev.kind.symbol(), label: short, level: None });
+            continue;
+        }
         let buds: Vec<u8> = dev.levels.iter().filter(|(p, _)| matches!(p, Part::Left | Part::Right)).map(|(_, l)| *l).collect();
         if let Some(m) = buds.iter().min() {
-            out.push(BtEntry { symbol: dev.kind.symbol(), label: short.clone(), level: *m });
+            out.push(BtEntry { symbol: dev.kind.symbol(), label: short.clone(), level: Some(*m) });
         }
         if let Some((_, l)) = dev.levels.iter().find(|(p, _)| *p == Part::Main) {
-            out.push(BtEntry { symbol: dev.kind.symbol(), label: short.clone(), level: *l });
+            out.push(BtEntry { symbol: dev.kind.symbol(), label: short.clone(), level: Some(*l) });
         }
         if let Some((_, l)) = dev.levels.iter().find(|(p, _)| *p == Part::Case) {
             let sym = if dev.kind == BtKind::AirPodsPro { "airpodspro.chargingcase.wireless.fill" } else { "airpods.chargingcase.fill" };
-            out.push(BtEntry { symbol: sym, label: "Case".into(), level: *l });
+            out.push(BtEntry { symbol: sym, label: "Case".into(), level: Some(*l) });
         }
     }
     out
@@ -596,7 +601,7 @@ pub fn bluetooth(d: &mut CardDraw, c: &Card, w: f64, h: f64, ctx: &Ctx) {
     };
     let entries = bt_entries(devs, only);
     if entries.is_empty() {
-        return message_at(d, ctx, w, 28.0, "dot.radiowaves.left.and.right", "No connected device reports a battery", Some(("Bluetooth Settings", Act::OpenUrl("x-apple.systempreferences:com.apple.BluetoothSettings".into()))));
+        return message_at(d, ctx, w, 28.0, "dot.radiowaves.left.and.right", "No Bluetooth device is connected", Some(("Bluetooth Settings", Act::OpenUrl("x-apple.systempreferences:com.apple.BluetoothSettings".into()))));
     }
     let cols = ((w / 66.0).floor() as usize).clamp(1, 8);
     let n = entries.len().min(cols);
@@ -606,10 +611,15 @@ pub fn bluetooth(d: &mut CardDraw, c: &Card, w: f64, h: f64, ctx: &Ctx) {
     for (i, e) in entries.iter().take(n).enumerate() {
         let cx = x0 + pitch * (i as f64 + 0.5);
         let cc = Point::new(cx, PAD + r + 6.0);
-        let col = if bluetooth::level_is_low(e.level) { RED } else { GREEN };
-        d.p(Prim::Ring { c: cc, radius: r, width: 4.5, frac: e.level as f64 / 100.0, color: col, track: W(0.12) });
+        let (frac, col, text) = match e.level {
+            Some(l) => (l as f64 / 100.0, if bluetooth::level_is_low(l) { RED } else { GREEN }, format!("{l}%")),
+            // No battery reading: just the track.
+            None => (0.0, GREEN, "Connected".to_string()),
+        };
+        d.p(Prim::Ring { c: cc, radius: r, width: 4.5, frac, color: col, track: W(0.12) });
         d.sym(Rect::new(cc.x - 14.0, cc.y - 11.0, 28.0, 22.0), e.symbol, 15.0, Weight::Medium, W(0.92));
-        d.text(Rect::new(cx - pitch / 2.0, cc.y + r + 7.0, pitch, 16.0), format!("{}%", e.level), rounded(13.0, Weight::Semibold), W(0.95), Align::Center);
+        let size = if e.level.is_some() { 13.0 } else { 10.5 };
+        d.text(Rect::new(cx - pitch / 2.0, cc.y + r + 7.0, pitch, 16.0), text, rounded(size, Weight::Semibold), W(if e.level.is_some() { 0.95 } else { 0.7 }), Align::Center);
         d.text(Rect::new(cx - pitch / 2.0 + 2.0, cc.y + r + 23.0, pitch - 4.0, 13.0), e.label.clone(), font(10.0, Weight::Medium), W(0.5), Align::Center);
     }
     let _ = h;
@@ -1074,7 +1084,15 @@ mod tests {
             BtDevice { name: "Magic Mouse".into(), kind: BtKind::Mouse, address: String::new(), levels: vec![(Part::Main, 71)] },
         ]);
         let e = bt_entries(f.data.bluetooth.as_ref().unwrap(), &[]);
-        assert_eq!(e.iter().map(|e| (e.label.as_str(), e.level)).collect::<Vec<_>>(), vec![("AirPods Pro", 15), ("Case", 60), ("Mouse", 71)]);
+        assert_eq!(e.iter().map(|e| (e.label.as_str(), e.level)).collect::<Vec<_>>(), vec![("AirPods Pro", Some(15)), ("Case", Some(60)), ("Mouse", Some(71))]);
+        // Headphones without a battery reading still show up.
+        let mut with_buds = f.data.bluetooth.clone().unwrap();
+        with_buds.push(BtDevice { name: "Pixel Buds Pro 2".into(), kind: BtKind::Headphones, address: String::new(), levels: vec![] });
+        let e = bt_entries(&with_buds, &[]);
+        assert_eq!((e[3].label.as_str(), e[3].level), ("Pixel Buds Pro 2", None));
+        let mut g = Fixture::new();
+        g.data.bluetooth = Some(with_buds);
+        assert!(texts(&draw(WidgetKind::Bluetooth, &s, &g.ui, 340.0, &g.ctx(None))).contains(&"Connected".to_string()));
         for w in sizes(WidgetKind::Bluetooth) {
             let d = draw(WidgetKind::Bluetooth, &s, &f.ui, w, &f.ctx(None));
             inside(&d, w, CARD_H);

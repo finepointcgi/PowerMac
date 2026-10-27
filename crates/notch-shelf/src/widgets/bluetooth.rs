@@ -125,8 +125,8 @@ fn hex_u32(v: Option<&Value>) -> Option<u32> {
     u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
 }
 
-/// Connected devices with a battery from `system_profiler
-/// SPBluetoothDataType -json`.
+/// Connected devices from `system_profiler SPBluetoothDataType -json`, with
+/// their battery levels when they report any (many headphones don't).
 pub fn parse_system_profiler(json: &str) -> Vec<BtDevice> {
     let Ok(v) = serde_json::from_str::<Value>(json) else { return vec![] };
     let mut out = vec![];
@@ -147,9 +147,6 @@ pub fn parse_system_profiler(json: &str) -> Vec<BtDevice> {
                                 levels.push((part, l));
                             }
                         }
-                    }
-                    if levels.is_empty() {
-                        continue;
                     }
                     let minor = d.get("device_minorType").and_then(|m| m.as_str()).unwrap_or("");
                     out.push(BtDevice {
@@ -218,13 +215,14 @@ mod tests {
     #[test]
     fn parses_system_profiler() {
         let d = parse_system_profiler(SONOMA);
-        assert_eq!(d.len(), 2, "no battery → skipped; not connected → skipped");
+        assert_eq!(d.len(), 3, "not connected → skipped; no battery → kept without levels");
         assert_eq!(d[0].kind, BtKind::AirPodsPro);
         assert_eq!(d[0].address, "ac:90:85:12:34:56");
         assert_eq!(d[0].levels, vec![(Part::Left, 100), (Part::Right, 98), (Part::Case, 45)]);
         assert_eq!(d[0].min_level(), Some(98));
         assert_eq!(d[1].kind, BtKind::Mouse);
         assert_eq!(d[1].levels, vec![(Part::Main, 71)]);
+        assert_eq!((d[2].name.as_str(), d[2].kind, d[2].levels.len()), ("MX Keys", BtKind::Keyboard, 0));
         assert!(parse_system_profiler("not json").is_empty());
         assert!(parse_system_profiler("{}").is_empty());
         // Older layout.
@@ -242,7 +240,7 @@ mod tests {
             HidBattery { name: "Magic Trackpad".into(), address: "".into(), percent: 15 },
         ];
         let m = merge(prof.clone(), &hid, &[]);
-        assert_eq!(m.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["Magic Mouse", "Magic Trackpad", "Mitch's AirPods Pro"]);
+        assert_eq!(m.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["Magic Mouse", "Magic Trackpad", "Mitch's AirPods Pro", "MX Keys"]);
         assert_eq!(m[0].levels, vec![(Part::Main, 71)], "system_profiler wins");
         assert_eq!(m[1].kind, BtKind::Trackpad);
         assert!(level_is_low(m[1].levels[0].1));
