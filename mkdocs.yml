@@ -62,7 +62,8 @@ nav:
   - Home: index.md
   - Getting started:
       - Install and first run: getting-started/install.md
-      - Permissions (macOS): getting-started/permissions.md
+      - Permissions and setup (macOS): getting-started/permissions.md
+      - Updates: getting-started/updates.md
       - Command line: getting-started/cli.md
       - Configuration files: getting-started/configuration.md
   - Features:
@@ -70,6 +71,7 @@ nav:
       - Windows and desktop:
           - FancyZones and edge snapping: features/fancyzones.md
           - Window Switcher: features/window-switcher.md
+          - Workspaces: features/workspaces.md
           - Dock Previews: features/dock-previews.md
           - Menu Bar Manager: features/menu-bar.md
           - Notch Shelf and widgets: features/notch-shelf.md

@@ -24,6 +24,8 @@ All settings are plain JSON files that you can edit with the settings window, th
 |---|---|
 | `clipboard/` | Clipboard history: `index.json` and `blobs/`. |
 | `color-picker-history.json` | Picked colors, newest first. |
+| `workspaces.json` | Saved workspaces (PowerToys' format). |
+| `update-status.json` | The last update check. |
 | Notch shelf data | Items parked on the shelf. |
 | `*-status.json` / `*-request.json` | Status and requests exchanged with the settings window (see [Process model and IPC](../architecture/ipc.md)). |
 
@@ -49,6 +51,9 @@ All settings are plain JSON files that you can edit with the settings window, th
 | `dockPreviews` | [Dock Previews](../features/dock-previews.md) | on |
 | `textExpander` | [Text Expander](../features/text-expander.md) | off |
 | `menuBar` | [Menu Bar Manager](../features/menu-bar.md) | off |
+| `workspaces` | [Workspaces](../features/workspaces.md) (the workspaces are in `workspaces.json`) | on, no shortcut |
+| `updates` | [Updates](updates.md): `check`, `includePrereleases`, `lastCheck` | daily check on |
+| `setup` | The setup window: `completed`, `remindMissingPermissions`, `completedVersion` | not completed |
 
 Every field is optional. Missing sections and fields take their defaults, so config files written by older versions keep loading. Unknown widget kinds written by newer versions are ignored instead of rejecting the file.
 

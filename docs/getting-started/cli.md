@@ -5,7 +5,15 @@ The `powermac` executable runs the app and every helper window. All subcommands 
 | Command | What it does |
 |---|---|
 | `powermac` / `powermac run [--no-tray]` | Run every enabled module with the tray icon (default). |
-| `powermac settings [--page <name>]` | Open the settings window, optionally on a page (`notch-widgets`, `sound`, `notch-shelf`, … — a page title in lowercase with dashes). An open window comes to the front. |
+| `powermac --version` | Print the version (the workspace version in `Cargo.toml`). |
+| `powermac settings [--page <name>]` | Open the settings window, optionally on a page (`notch-widgets`, `sound`, `notch-shelf`, … — a page title in lowercase with dashes; `welcome` opens the setup, `permissions` its Permissions step). An open window comes to the front. |
+| `powermac workspace list` | List the saved [workspaces](../features/workspaces.md) (id, name, windows, last launch). |
+| `powermac workspace capture [<name>]` | Save the windows on screen as a new workspace ("Workspace N" without a name). |
+| `powermac workspace launch <name\|id>` | Restore a workspace; prints each app's result (exit code 1 when one failed). |
+| `powermac workspace edit` | Open the Workspaces editor. |
+| `powermac permissions [--json]` | Each privacy permission, its state and the enabled features that use it; `--json` prints the live state for scripts (the settings window runs this to bypass macOS' per-process caching). Never prompts. |
+| `powermac update check [--pre]` | Ask GitHub Releases for a newer version (one request; nothing is downloaded); see [Updates](updates.md). |
+| `powermac mwb doctor` | Everything that decides whether a Windows PC can pair with this Mac, plus the PowerShell to run on the PC ([Pairing with Windows](../features/mouse-without-borders-pairing.md)). |
 | `powermac editor [--monitor <id>]` | Open the FancyZones layout editor. |
 | `powermac init [--force]` | Write a default `config.json` with a new Mouse Without Borders key and print the key. |
 | `powermac gen-key` | Print a new Mouse Without Borders security key. |

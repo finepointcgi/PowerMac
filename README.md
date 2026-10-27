@@ -36,6 +36,7 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
 | **Awake** | Keep the computer (and optionally the display) awake: indefinitely, for a set time, until a set time, or while a process runs. |
 | **Window Switcher** | Windows-style Alt+Tab: Option+Tab cycles through **windows** (not apps) in most-recently-used order with live previews; Option+` cycles the front app's windows. Can also replace Cmd+Tab (one switch; the macOS switcher comes back on quit, failure or after a crash) and previews the selected window in place while you switch. Q/W/M/H/F quit, close, minimize, hide or full-screen the selected window. |
 | **Notch Shelf** | Turns the notch into a drop shelf: drag files, links, text or images to the top of the screen, park them, and drag them out again later. Macs without a notch can get a "virtual notch". The Home view is a **widget platform**: pages of cards in three sizes — Now Playing, Calendar, Weather, Battery, System Stats, Timer, Note, Mirror, Reminders, World Clocks, Bluetooth batteries, Sound, **Quick Controls** (Awake, Pick color, Extract text, Clipboard history, Window switcher, Lock screen, Show desktop) and build-your-own **Script**, **xbar plugins**, **Web / JSON**, **Shortcuts** and **Launcher** widgets. Settings → **Notch Widgets** (tray → *Notch widgets…*) has a gallery, a generated settings form with a Test run, and layout export / import ([docs](docs/features/notch-widgets.md)). |
+| **Workspaces** | PowerToys Workspaces: save the apps and windows on your screens (frames, displays, states, documents, optionally browser tabs) as a named workspace and restore it later — apps that aren't running are started and every window goes back where it was. Tray → **Workspaces** (one item per workspace, Capture desktop…, Edit workspaces…), Settings → Workspaces, an optional shortcut for the editor and `powermac workspace list\|capture\|launch\|edit`. Imports PowerToys' `workspaces.json`. |
 | **Dock Previews** | Rest the pointer on a Dock icon and a panel shows that app's windows (live thumbnails); click one to bring it forward, W/M to close/minimize, scroll to cycle. Optionally, clicking the front app's icon minimizes or cycles its windows, like the Windows taskbar (macOS). |
 | **Menu Bar** | Off by default. Hides menu bar icons behind a chevron (Ice/Bartender style), with an always-hidden section, show on hover, auto-rehide and a floating bar; warns about icons hidden behind the notch and moves icons between sections from Settings (macOS). |
 | **Mouse** (mouse tuning) | Turn pointer acceleration off and set the speed, separately for mice and trackpads, with per-device overrides (macOS). Side buttons go back/forward; the middle and side buttons can be remapped to Mission Control, App Exposé, Launchpad, copy/paste or any shortcut. |
@@ -51,14 +52,25 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
 | **Text Extractor** | Ctrl+Option+T (Win+Shift+T): drag over any part of the screen and the text in it is copied (Vision OCR on macOS, Windows.Media.Ocr on Windows). |
 | **File Tools** | **PowerRename** (bulk rename with search/replace, regex and previews), **New+** (new files and folders from your templates), **Image Resizer** and the **Finder basics**: Open in Terminal / Editor, Copy Path, Eject all drives, show hidden files, what is using a file. All from Finder Quick Actions (Explorer context menu on Windows) once installed from Settings → File Tools or the tray. |
 
-## Quick start (macOS)
+## Install
+
+Download `PowerMac-<version>-macos-<arch>.dmg` from [Releases](https://github.com/finepointcgi/PowerMac/releases), open it and drag PowerMac onto Applications.
+
+The app isn't notarized by Apple (there is no paid developer account behind it), so on a Mac other than the one that built it, the first launch is blocked: open PowerMac once, click **Done**, then go to **System Settings → Privacy & Security**, scroll to **Security** and click **Open Anyway** next to the PowerMac message (or run `xattr -dr com.apple.quarantine /Applications/PowerMac.app`). Later launches open normally.
+
+On first launch a short **setup** walks through what PowerMac does, which feature groups to turn on, and the permissions they need — each with its live status, a button that opens exactly the right System Settings pane, and a **Restart PowerMac** button, because macOS gives Input Monitoring and Screen Recording only to a freshly started app. It's in the menu as **Setup & permissions…** whenever you need it again.
+
+PowerMac checks GitHub once a day for a newer release and offers it in the menu and in Settings → General (notes and a Download button; nothing is installed by itself). Turn it off there or with `"updates": {"check": false}`.
+
+## Quick start from source (macOS)
 
 ```bash
 ./scripts/bundle-macos.sh                # builds target/release/PowerMac.app
 open target/release/PowerMac.app         # or move it to /Applications first
+./scripts/package-dmg.sh                 # PowerMac-<version>-macos-<arch>.dmg (+ .sha256)
 ```
 
-The first launch creates a config with a new Mouse Without Borders key. Everything else is in the tray menu: **Settings…**, Awake modes, FancyZones layouts, scroll direction, mouse utilities, Paste as plain text, Copy security key, Launch at login, **Sound** (output and input devices, per-app volume presets), and a **Tools** section: Pick color, Extract text, Clipboard history (picker, recent items, pause, clear), Window switcher, Show shelf, Displays (brightness/volume presets per external display), Show hidden menu bar items, the Finder Quick Actions switch, Eject all drives and Show hidden files.
+The first launch creates a config with a new Mouse Without Borders key and opens the setup. Everything else is in the tray menu: **Settings…**, **Setup & permissions…** (a **⚠ Needs …** line and a dot on the icon while a permission is missing; **Update available** when there is one), **Workspaces**, Awake modes, FancyZones layouts, scroll direction, mouse utilities, Paste as plain text, Copy security key, Launch at login, **Sound** (output and input devices, per-app volume presets), and a **Tools** section: Pick color, Extract text, Clipboard history (picker, recent items, pause, clear), Window switcher, Show shelf, Displays (brightness/volume presets per external display), Show hidden menu bar items, the Finder Quick Actions switch, Eject all drives and Show hidden files.
 
 ### Command line
 
@@ -76,6 +88,11 @@ cargo build --release
 ./target/release/powermac new --dir ~/Desktop    # New+ (what the Finder Quick Action runs)
 ./target/release/powermac resize --size 50% *.jpg  # Image Resizer (without a size option: its window)
 ./target/release/powermac finder eject-all       # also open-terminal, copy-path, show-hidden, who-uses, … (no arguments: help)
+./target/release/powermac workspace list         # also capture [NAME], launch NAME|ID, edit
+./target/release/powermac permissions            # each permission, its state and who uses it (--json)
+./target/release/powermac update check           # ask GitHub for a newer release (nothing is installed)
+./target/release/powermac mwb doctor             # pairing diagnostics for Windows PCs
+./target/release/powermac --version
 ```
 
 Config lives at `~/Library/Application Support/PowerMac/config.json` (`%APPDATA%\PowerMac\config.json` on Windows), with FancyZones layouts in `fancyzones.json` and PowerRename/New+ settings in `file-tools.json` next to it. Changes take effect within about a second, whether they come from the settings window, the tray or a text editor. Config files from older versions keep loading; new sections get their defaults. The same folder holds the clipboard history (`clipboard/`), the notch shelf, the color history, and `display-status.json` / `display-set.json`, through which the settings window (a separate process that never talks to the monitors itself) shows and changes display values via the running app. Resolution & HiDPI, Sound, Menu Bar and the notch widgets work the same way (`display-scaling-status.json` / `-request.json`, `audio-…`, `menubar-…`, `notch-…`: widget results, reminder lists, refresh / show-page requests), and `settings-request.json` lets the tray switch an open settings window to a page; `display-scaling-state.json` records what Display Scaling changed, so a crash is undone on the next start.
@@ -104,9 +121,9 @@ The settings window checks shortcuts across all modules and won't save two modul
 | **Administrator password** (once) | Resolution & HiDPI's optional permanent display override (a plist in /Library/Displays) |
 | none | Color Picker (system loupe, Carbon hotkey), Notch Shelf, Displays sliders, resolutions and HiDPI, Sound's device rules, pointer speed/acceleration, File Tools |
 
-Settings → General (and each module's page) shows their status and links to the right panes. A module whose permission is missing logs a message and keeps the rest of PowerMac running.
+The setup and **Settings → General → Permissions & Health** show their live status (with the exact System Settings pane for each), the shared input hook's health and whether each module runs or waits for a permission. A module whose permission is missing waits for it and keeps the rest of PowerMac running.
 
-macOS ties these grants to the app's code signature. The bundle is ad-hoc signed, so after rebuilding `PowerMac.app` you may need to remove it from both lists and add it again.
+macOS ties these grants to the app's code signature. Run `scripts/create-signing-cert.sh` once so local builds keep their grants; otherwise, after rebuilding `PowerMac.app`, remove the old PowerMac entry with **−** and add the new app with **+** (the setup shows these steps when it detects an outdated entry), then restart PowerMac.
 
 ## Layout
 
@@ -133,7 +150,9 @@ crates/dock-previews     window previews on Dock icons (AX tree, ScreenCaptureKi
 crates/text-expander     abbreviation expansion (event tap / LL hook), variables, espanso import
 crates/menubar-manager   hide menu bar icons behind separators, notch detection, floating bar
 crates/pm-ui             shared egui theme and widgets
-crates/pm-config         the shared config.json model, launch-at-login
+crates/workspaces        capture / restore desktops of apps and windows, the Workspaces editor
+crates/pm-update         update check against GitHub Releases (semver, once a day, via curl)
+crates/pm-config         the shared config.json model, status/request files, launch-at-login
 crates/settings-ui       egui settings window (runs as `powermac settings`)
 crates/powermac          the app: tray, module lifecycle, config reload, clipboard bridge
 ```
@@ -163,4 +182,5 @@ On a Mac with permissions granted, these were also run live:
 - **Sound:** per-app volume on macOS is experimental (process taps, macOS 14.4+); levels are kept per bundle id.
 - **Text Expansion / Settings:** characters the bundled fonts lack (e.g. the ツ in the default `;shrug` snippet) are drawn as boxes in the settings window; they expand correctly.
 - **Menu Bar:** moving icons from Settings synthesizes a Cmd-drag and needs Accessibility; Cmd-dragging them yourself always works. Only one manager per process.
-- **Not ported yet:** Mouse Jump, Always On Top, Workspaces.
+- **Not ported yet:** Mouse Jump, Always On Top.
+- **Distribution:** releases aren't notarized (see Install); updates are offered, not installed.

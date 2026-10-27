@@ -38,6 +38,16 @@ pub const NOTCH_REQUEST_FILE: &str = "notch-request.json";
 /// the window is already open).
 pub const SETTINGS_REQUEST_FILE: &str = "settings-request.json";
 
+/// The app itself: permissions as the app sees them, input-hook health and
+/// one status line per module (written by the app every 2 s).
+pub const APP_STATUS_FILE: &str = "app-status.json";
+/// The app itself: restart, launch / capture a workspace, check for
+/// updates (written by the settings window).
+pub const APP_REQUEST_FILE: &str = "app-request.json";
+/// The last update check (`pm_update::UpdateState`; written by whoever ran
+/// it, the app's daily check or the settings window's "Check now").
+pub const UPDATE_STATUS_FILE: &str = "update-status.json";
+
 /// A status older than this means the app (or the module) isn't running.
 pub const STATUS_FRESH_MS: u64 = 10_000;
 /// Requests older than this are ignored.
@@ -321,6 +331,107 @@ pub enum SettingsRequest {
     ShowPage { page: String },
 }
 
+// ---------------------------------------------------------------------------
+// The app itself
+
+/// Permissions as the running app sees them. macOS caches some of them per
+/// process (Screen Recording, Input Monitoring): a grant made while the app
+/// runs only shows up here after a restart, which is how the settings
+/// window knows to offer "Restart PowerMac".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AppPermissions {
+    pub accessibility: bool,
+    pub input_monitoring: bool,
+    pub screen_recording: bool,
+}
+
+/// A slow input-hook handler (see `pm_hook::stats`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SlowHandler {
+    pub name: String,
+    /// Calls slower than `pm_hook::SLOW_HANDLER` (10 ms).
+    pub slow: u64,
+    pub calls: u64,
+    pub max_ms: u64,
+}
+
+/// Health of the shared input hook (`pm_hook::status`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HookHealth {
+    /// "idle", "starting", "active", "listenOnly", "disabled", "unavailable".
+    pub state: String,
+    /// Details (why it is unavailable, whether keys arrive listen-only).
+    pub detail: String,
+    /// The tap is installed and enabled right now.
+    pub healthy: bool,
+    /// macOS Secure Event Input (a password field): no keys reach the tap.
+    pub secure_input: bool,
+    /// How often macOS disabled the tap and it was turned back on.
+    pub reenabled: u64,
+    pub subscribers: Vec<String>,
+    pub slow_handlers: Vec<SlowHandler>,
+}
+
+/// Whether a module runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModuleState {
+    Running,
+    /// On, but a permission it needs is missing (it starts or works fully
+    /// once it is granted, some modules only after a restart).
+    WaitingForPermission,
+    /// On, but it didn't start (see the log).
+    Failed,
+    #[default]
+    Off,
+}
+
+/// One module's line in Settings → General → Permissions & Health.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ModuleStatus {
+    /// Settings page name ("fancyzones", "window-switcher", ...).
+    pub page: String,
+    pub name: String,
+    pub state: ModuleState,
+    /// "needs Accessibility", "2 displays", ...
+    pub detail: String,
+}
+
+/// What the running app reports about itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AppStatus {
+    pub version: String,
+    pub pid: u32,
+    /// Unix seconds.
+    pub started_at: u64,
+    /// The executable (inside PowerMac.app when started from the bundle).
+    pub executable: String,
+    pub permissions: AppPermissions,
+    pub hook: HookHealth,
+    pub modules: Vec<ModuleStatus>,
+}
+
+/// A request from the settings window to the running app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum AppRequest {
+    /// Quit cleanly and start again (`open -n` of the bundle), so new
+    /// permissions take effect; the settings window reopens on `reopen_page`.
+    Restart { reopen_page: Option<String> },
+    /// Restore a saved workspace (by id or name).
+    LaunchWorkspace { id: String },
+    /// Snapshot the desktop as a new workspace and open the editor.
+    CaptureWorkspace { name: String },
+    OpenWorkspacesEditor,
+    /// Check GitHub for a newer version now.
+    CheckUpdates,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +498,25 @@ mod tests {
         let back: NotchStatus = read_fresh(&cfg, NOTCH_STATUS_FILE, STATUS_FRESH_MS).unwrap();
         assert_eq!(back, ns);
         assert_eq!((back.widgets["a"].value.as_deref(), back.widgets["b"].error.as_str()), (Some("42"), "Timed out"));
+
+        let req = AppRequest::Restart { reopen_page: Some("welcome".into()) };
+        write(&cfg, APP_REQUEST_FILE, &req).unwrap();
+        assert_eq!(read::<AppRequest>(&cfg, APP_REQUEST_FILE).unwrap().data, req);
+        let j = std::fs::read_to_string(dir.join(APP_REQUEST_FILE)).unwrap();
+        assert!(j.contains("\"action\": \"restart\"") && j.contains("\"reopenPage\""), "{j}");
+        let req = AppRequest::LaunchWorkspace { id: "{A}".into() };
+        write(&cfg, APP_REQUEST_FILE, &req).unwrap();
+        assert_eq!(read::<AppRequest>(&cfg, APP_REQUEST_FILE).unwrap().data, req);
+        let st = AppStatus {
+            version: "1.0.0".into(),
+            permissions: AppPermissions { accessibility: true, ..Default::default() },
+            hook: HookHealth { state: "active".into(), healthy: true, ..Default::default() },
+            modules: vec![ModuleStatus { page: "fancyzones".into(), name: "FancyZones".into(), state: ModuleState::WaitingForPermission, detail: "needs Accessibility".into() }],
+            ..Default::default()
+        };
+        write(&cfg, APP_STATUS_FILE, &st).unwrap();
+        assert_eq!(read_fresh::<AppStatus>(&cfg, APP_STATUS_FILE, STATUS_FRESH_MS), Some(st));
+        assert!(std::fs::read_to_string(dir.join(APP_STATUS_FILE)).unwrap().contains("\"waitingForPermission\""));
 
         let old = Stamped { at: 1, data: MenuBarRequest::List };
         assert!(!old.is_fresh(REQUEST_FRESH_MS));

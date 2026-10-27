@@ -64,6 +64,22 @@ MWB normally ends up with two sockets per peer, one in each direction. Sending d
 * **Connecting back.** When a PC connects in, PowerMac remembers its source address (`ip : port+1`, the same port rule as PowerToys) and uses it to dial back even if the PC's name doesn't resolve on the Mac. PowerMac also puts the PC to the right of the Mac in its layout, even with discovery off (like `AddToMachinePool`). If the dial-back fails, the single socket is used.
 * **Diagnostics.** The engine keeps the last 16 incoming connections ("connected", "trusted as 'PC'", or why the connection ended) and the LLMNR counters. The app writes them to `mwb-diagnostics.json` next to `config.json`, and `powermac mwb doctor` prints them. A `Test-NetConnection` from the PC shows up there as `ended before the handshake: failed to fill whole buffer`, because it connects and hangs up.
 
+## In the settings window
+
+**Settings → Mouse Without Borders → Pairing with Windows** shows the same information without a terminal:
+
+- **This Mac's name** in upper case (what to type in PowerToys' Connect dialog) with a copy button, and the Mac's **IP addresses** (the LAN address is marked; VPN tunnels too).
+- **Name lookups (LLMNR)**: whether the responder runs, how many queries it saw and answered, and the last one it answered.
+- **Recent connection attempts** (from `mwb-diagnostics.json`, written by the running app): when a PC connected, from where, and whether it was trusted or turned away (a different key, an unknown name).
+- **Learned addresses**: machines that connected from an address are reached there again.
+- **On the Windows PC**: the three steps above with copy buttons for the name, the security key, the IP-mapping line (for example `MACBOOK-PRO 10.0.0.112`, filled in with your values) and each PowerShell check.
+- **Run diagnostics** runs `powermac mwb doctor` and shows its output in a scrollable box, with **Copy output**.
+
+<figure markdown="span">
+  ![Pairing with Windows card](../assets/screenshots/settings-mwb-pairing.png){ loading=lazy }
+  <figcaption>The pairing card: name, addresses, LLMNR, connection attempts and the steps for the PC.</figcaption>
+</figure>
+
 ## `powermac mwb doctor`
 
 The doctor prints:

@@ -1,0 +1,10 @@
+[package]
+name = "pm-update"
+version.workspace = true
+edition.workspace = true
+description = "PowerMac update check: GitHub Releases, semver comparison, once a day"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true

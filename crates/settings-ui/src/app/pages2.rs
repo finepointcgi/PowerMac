@@ -58,7 +58,7 @@ impl SettingsApp {
 
     /// Run `f` on another thread; its result shows under the card that
     /// started it (`what`) once it's done.
-    fn run_background(&mut self, what: &'static str, f: impl FnOnce() -> Result<String, String> + Send + 'static) {
+    pub(super) fn run_background(&mut self, what: &'static str, f: impl FnOnce() -> Result<String, String> + Send + 'static) {
         if !self.busy.insert(what) {
             return;
         }

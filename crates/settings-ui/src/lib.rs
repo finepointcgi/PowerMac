@@ -9,6 +9,7 @@
 mod app;
 pub mod editor;
 pub mod model;
+pub mod permissions;
 mod platform;
 mod record;
 #[cfg(test)]
@@ -19,6 +20,22 @@ mod mu_color;
 mod zone_style;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static CLI_EXE: OnceLock<PathBuf> = OnceLock::new();
+
+/// The `powermac` executable this window belongs to. With it the window
+/// asks a fresh `powermac permissions --json` for the live permission state
+/// (macOS caches some answers per process), runs `powermac mwb doctor` and
+/// starts the app or the Workspaces editor when the app isn't running.
+/// Without it (tests) those fall back to in-process checks or are disabled.
+pub fn set_cli_exe(exe: PathBuf) {
+    let _ = CLI_EXE.set(exe);
+}
+
+pub(crate) fn cli_exe() -> Option<&'static PathBuf> {
+    CLI_EXE.get()
+}
 
 /// Open the settings window for the config file at `config_path` and block
 /// until it is closed. Must be called on the main thread.
@@ -34,14 +51,14 @@ pub fn run_with_page(config_path: PathBuf, page: Option<String>) -> anyhow::Resu
         if p.is_none() {
             log::warn!("settings: no page named {n:?}");
         }
-        p
+        p.map(|p| (p, n.to_string()))
     });
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("PowerMac Settings")
             .with_app_id("com.powermac.settings")
             .with_inner_size([1000.0, 720.0])
-            .with_min_inner_size([720.0, 480.0])
+            .with_min_inner_size([720.0, 520.0])
             .with_icon(platform::icon())
             .with_active(true),
         ..Default::default()
@@ -52,8 +69,8 @@ pub fn run_with_page(config_path: PathBuf, page: Option<String>) -> anyhow::Resu
         Box::new(move |_cc| {
             platform::become_foreground_app();
             let mut app = app::SettingsApp::new(config_path);
-            if let Some(p) = start {
-                app.set_page(p);
+            if let Some((_, name)) = &start {
+                app.open_named(name);
             }
             Ok(Box::new(app))
         }),

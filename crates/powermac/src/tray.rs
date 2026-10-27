@@ -29,8 +29,21 @@ const LAYOUTS: &[(&str, fancyzones::LayoutType, i32)] = &[
 ];
 
 struct Ui {
-    _tray: TrayIcon,
+    tray: TrayIcon,
+    menu: Menu,
     settings: MenuItem,
+    /// "Setup & permissions…"
+    setup: MenuItem,
+    /// "Needs Accessibility…" (only in the menu while something is missing).
+    alert: MenuItem,
+    alert_shown: Option<String>,
+    alert_checked_at: Option<std::time::Instant>,
+    /// "Update available: vX.Y.Z" (only while one is).
+    update: MenuItem,
+    update_shown: Option<String>,
+    /// The icon has the warning dot.
+    badged: bool,
+    workspaces: Workspaces,
     mwb_status: MenuItem,
     mwb_find: MenuItem,
     mwb_switch: Submenu,
@@ -66,6 +79,16 @@ type SoundSig = Option<(Vec<(char, String, String, bool)>, Option<Vec<(String, S
 
 /// Per-app volume presets in the Sound submenu (percent).
 const APP_PRESETS: [u32; 5] = [25, 50, 75, 100, 150];
+
+/// The Workspaces submenu.
+struct Workspaces {
+    menu: Submenu,
+    capture: MenuItem,
+    edit: MenuItem,
+    /// (workspaces.json stamp, module on, count) of what's shown.
+    shown: Option<(Option<std::time::SystemTime>, bool, usize)>,
+    checked_at: Option<std::time::Instant>,
+}
 
 /// The "Tools" part of the menu.
 struct Tools {
@@ -114,6 +137,12 @@ thread_local! {
 pub fn install() -> anyhow::Result<()> {
     let menu = Menu::new();
     let settings = MenuItem::new("Settings…", true, None);
+    let setup = MenuItem::new("Setup & permissions…", true, None);
+    let alert = MenuItem::new("Permissions missing", true, None);
+    let update = MenuItem::new("Update available", true, None);
+    let ws_menu = Submenu::new("Workspaces", true);
+    let ws_capture = MenuItem::new("Capture desktop…", true, None);
+    let ws_edit = MenuItem::new("Edit workspaces…", true, None);
     let title = MenuItem::new("PowerMac", false, None);
 
     let mwb_status = MenuItem::new("Mouse Without Borders: off", false, None);
@@ -191,6 +220,7 @@ pub fn install() -> anyhow::Result<()> {
 
     menu.append_items(&[
         &settings,
+        &setup,
         &PredefinedMenuItem::separator(),
         &title,
         &PredefinedMenuItem::separator(),
@@ -202,6 +232,7 @@ pub fn install() -> anyhow::Result<()> {
         &awake,
         &sound,
         &zones,
+        &ws_menu,
         &scroll,
         &mouse,
         &paste_plain,
@@ -226,7 +257,7 @@ pub fn install() -> anyhow::Result<()> {
         &quit,
     ])?;
 
-    let builder = TrayIconBuilder::new().with_menu(Box::new(menu)).with_tooltip("PowerMac");
+    let builder = TrayIconBuilder::new().with_menu(Box::new(menu.clone())).with_tooltip("PowerMac");
     #[cfg(target_os = "macos")]
     let builder = builder.with_icon_templated(icon());
     #[cfg(not(target_os = "macos"))]
@@ -235,8 +266,17 @@ pub fn install() -> anyhow::Result<()> {
 
     UI.with(|u| {
         *u.borrow_mut() = Some(Ui {
-            _tray: tray,
+            tray,
+            menu,
             settings,
+            setup,
+            alert,
+            alert_shown: None,
+            alert_checked_at: None,
+            update,
+            update_shown: None,
+            badged: false,
+            workspaces: Workspaces { menu: ws_menu, capture: ws_capture, edit: ws_edit, shown: None, checked_at: None },
             mwb_status,
             mwb_find,
             mwb_switch,
@@ -329,6 +369,30 @@ fn on_click(ui: &mut Ui, id: &tray_icon::menu::MenuId) {
     }
     if id == ui.settings.id() {
         open_settings();
+        return;
+    }
+    if id == ui.setup.id() {
+        open_settings_page("welcome");
+        return;
+    }
+    if id == ui.alert.id() {
+        open_settings_page("permissions");
+        return;
+    }
+    if id == ui.update.id() {
+        open_settings_page("general");
+        return;
+    }
+    if id == ui.workspaces.capture.id() {
+        crate::app_glue::capture_workspace(String::new());
+        return;
+    }
+    if id == ui.workspaces.edit.id() {
+        crate::app_glue::open_workspaces_editor();
+        return;
+    }
+    if let Some(ws) = id.as_ref().strip_prefix("ws-launch:") {
+        crate::app_glue::launch_workspace(ws.to_string());
         return;
     }
     if id == ui.edit_layouts.id() {
@@ -468,6 +532,8 @@ fn refresh() {
 fn refresh_ui(ui: &mut Ui) {
     refresh_tools(&mut ui.tools);
     refresh_sound(ui);
+    refresh_alerts(ui);
+    refresh_workspaces(&mut ui.workspaces);
     let snapshot = try_with_running(|r| {
         (
             r.mwb.as_ref().map(|m| m.status()),
@@ -638,9 +704,14 @@ fn open_config_dir() {
     let _ = std::process::Command::new("explorer").arg(&dir).spawn();
 }
 
-/// 32x32 icon: a screen outline split into three zones. Black (template) on
-/// macOS so it follows the menu bar's appearance; blue on Windows.
 fn icon() -> Icon {
+    icon_with(false)
+}
+
+/// 32x32 icon: a screen outline split into three zones. Black (template) on
+/// macOS so it follows the menu bar's appearance; blue on Windows. With
+/// `badge`, a dot in the top-right corner (a permission is missing).
+fn icon_with(badge: bool) -> Icon {
     const N: usize = 32;
     let (r, g, b) = if cfg!(target_os = "macos") { (0, 0, 0) } else { (0x2b, 0x88, 0xd8) };
     let mut px = vec![0u8; N * N * 4];
@@ -674,6 +745,22 @@ fn icon() -> Icon {
     for y in t + 4..=bb - 4 {
         for x in l + 4..=11 {
             set(x, y);
+        }
+    }
+    if badge {
+        // Clear a ring, then the dot (orange on Windows; the menu bar color on macOS).
+        let (cx, cy) = (26.0f32, 6.0f32);
+        let dot = if cfg!(target_os = "macos") { [0, 0, 0, 255] } else { [0xE8, 0x7A, 0x00, 255] };
+        for y in 0..N {
+            for x in 0..N {
+                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                let i = (y * N + x) * 4;
+                if d <= 5.5 {
+                    px[i..i + 4].copy_from_slice(&dot);
+                } else if d <= 7.5 {
+                    px[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
+                }
+            }
         }
     }
     Icon::from_rgba(px, N as u32, N as u32).expect("valid icon")
@@ -961,8 +1048,81 @@ fn eject_all() {
     });
 }
 
+/// The "permissions missing" line, the update line and the icon's dot.
+fn refresh_alerts(ui: &mut Ui) {
+    // Permission checks are cheap, but not every 2 s while nothing changes.
+    if ui.alert_checked_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(4)) {
+        ui.alert_checked_at = Some(std::time::Instant::now());
+        let missing = crate::app_glue::missing_permissions();
+        let text = (!missing.is_empty()).then(|| {
+            let names: Vec<&str> = missing.iter().map(|p| p.title()).collect();
+            format!("⚠ Needs {} — fix…", names.join(", "))
+        });
+        if text != ui.alert_shown {
+            if ui.alert_shown.is_some() {
+                let _ = ui.menu.remove(&ui.alert);
+            }
+            if let Some(t) = &text {
+                ui.alert.set_text(t);
+                let _ = ui.menu.insert(&ui.alert, 2);
+            }
+            ui.alert_shown = text;
+        }
+    }
+    let offer = crate::app_glue::offered_update().map(|r| r.version);
+    if offer != ui.update_shown {
+        if ui.update_shown.is_some() {
+            let _ = ui.menu.remove(&ui.update);
+        }
+        if let Some(v) = &offer {
+            ui.update.set_text(format!("Update available: v{v}…"));
+            let _ = ui.menu.insert(&ui.update, 2 + usize::from(ui.alert_shown.is_some()));
+        }
+        ui.update_shown = offer;
+    }
+    let badge = ui.alert_shown.is_some();
+    if badge != ui.badged {
+        ui.badged = badge;
+        let img = icon_with(badge);
+        #[cfg(target_os = "macos")]
+        let _ = ui.tray.set_icon_templated(Some(img));
+        #[cfg(not(target_os = "macos"))]
+        let _ = ui.tray.set_icon(Some(img));
+        let _ = ui.tray.set_tooltip(Some(if badge { "PowerMac — a permission is missing" } else { "PowerMac" }));
+    }
+}
+
+/// One item per saved workspace (launches it), then capture / edit.
+fn refresh_workspaces(w: &mut Workspaces) {
+    if w.checked_at.is_some_and(|t| t.elapsed() < Duration::from_secs(4)) && w.shown.is_some() {
+        return;
+    }
+    w.checked_at = Some(std::time::Instant::now());
+    let on = current_config().workspaces.enabled;
+    let stamp = crate::app_glue::workspaces_stamp();
+    let list = crate::app_glue::workspace_list();
+    let sig = (stamp, on, list.len());
+    if w.shown == Some(sig) {
+        return;
+    }
+    while w.menu.remove_at(0).is_some() {}
+    if !on {
+        let _ = w.menu.append(&MenuItem::new("Workspaces is off", false, None));
+    } else if list.is_empty() {
+        let _ = w.menu.append(&MenuItem::new("No workspaces yet", false, None));
+    }
+    for (id, name) in &list {
+        let _ = w.menu.append(&MenuItem::with_id(format!("ws-launch:{id}"), name, on, None));
+    }
+    let _ = w.menu.append(&PredefinedMenuItem::separator());
+    w.capture.set_enabled(on);
+    let _ = w.menu.append(&w.capture);
+    let _ = w.menu.append(&w.edit);
+    w.shown = Some(sig);
+}
+
 /// A system notification (macOS: through osascript; elsewhere only logged).
-fn notify(title: &str, text: &str) {
+pub(crate) fn notify(title: &str, text: &str) {
     #[cfg(target_os = "macos")]
     {
         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");

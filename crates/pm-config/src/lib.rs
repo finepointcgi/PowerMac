@@ -7,6 +7,7 @@
 
 pub mod bridge;
 pub mod login;
+pub mod mwb_help;
 
 use std::path::{Path, PathBuf};
 
@@ -64,6 +65,52 @@ pub struct AppConfig {
     pub text_expander: text_expander::Config,
     /// Hide menu bar icons behind a chevron (has its own `enabled`; off by default).
     pub menu_bar: menubar_manager::Config,
+    /// Saved desktops of apps and windows (has its own `enabled`; the
+    /// workspaces themselves are in `workspaces.json`).
+    pub workspaces: workspaces::Config,
+    /// Checking GitHub for a newer version.
+    pub updates: UpdatesConfig,
+    /// First-run setup (the welcome window).
+    pub setup: SetupConfig,
+}
+
+/// `updates` section: a daily check of GitHub Releases (nothing is
+/// downloaded or installed automatically).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdatesConfig {
+    /// Check once a day while PowerMac runs.
+    pub check: bool,
+    /// Offer beta versions too.
+    pub include_prereleases: bool,
+    /// When the last automatic or manual check ran (Unix seconds).
+    pub last_check: Option<u64>,
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig { check: true, include_prereleases: false, last_check: None }
+    }
+}
+
+/// `setup` section: the welcome window (`powermac settings --page welcome`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupConfig {
+    /// The welcome window was finished or closed; it isn't opened at
+    /// startup any more (unless a permission is missing, see below).
+    pub completed: bool,
+    /// Open the setup's Permissions step at startup when a permission an
+    /// enabled module needs is missing.
+    pub remind_missing_permissions: bool,
+    /// The version that completed the setup.
+    pub completed_version: String,
+}
+
+impl Default for SetupConfig {
+    fn default() -> Self {
+        SetupConfig { completed: false, remind_missing_permissions: true, completed_version: String::new() }
+    }
 }
 
 impl Default for AppConfig {
@@ -88,6 +135,9 @@ impl Default for AppConfig {
             dock_previews: dock_previews::Config::default(),
             text_expander: text_expander::Config::default(),
             menu_bar: menubar_manager::Config::default(),
+            workspaces: workspaces::Config::default(),
+            updates: UpdatesConfig::default(),
+            setup: SetupConfig::default(),
         }
     }
 }
@@ -433,6 +483,9 @@ mod tests {
         assert_eq!(c.menu_bar, d.menu_bar);
         assert!(!c.menu_bar.enabled);
         assert_eq!(c.keyboard_manager.hyper_key, keyboard_manager::HyperKeyConfig::default());
+        assert_eq!(c.workspaces, workspaces::Config::default());
+        assert!(c.updates.check && !c.updates.include_prereleases && c.updates.last_check.is_none());
+        assert!(!c.setup.completed && c.setup.remind_missing_permissions);
 
         // New sections are written with camelCase keys and read back.
         let mut c2 = c.clone();
@@ -447,7 +500,7 @@ mod tests {
         c2.text_expander.snippets.push(text_expander::Snippet::new(";sig", "Best,\nAda"));
         let v = serde_json::to_value(&c2).unwrap();
         for k in ["mouseTuning", "displayControl", "clipboardHistory", "notchShelf", "colorPicker", "textExtractor", "windowSwitcher",
-                  "displayScaling", "audio", "dockPreviews", "textExpander", "menuBar"] {
+                  "displayScaling", "audio", "dockPreviews", "textExpander", "menuBar", "workspaces", "updates", "setup"] {
             assert!(v.get(k).is_some(), "{k}");
         }
         assert_eq!(v["colorPicker"]["enabled"], false);
@@ -461,11 +514,23 @@ mod tests {
         assert_eq!(back.keyboard_manager.hyper_key.mode, keyboard_manager::HyperMode::Hyper);
         assert_eq!(back.text_expander.snippets.last().unwrap().trigger, ";sig");
         assert!(back.keyboard_manager.windows_style.enabled && !back.keyboard_manager.windows_style.finder_cut_paste);
+        assert_eq!(v["updates"]["includePrereleases"], false);
+        assert_eq!(v["setup"]["remindMissingPermissions"], true);
+        assert_eq!(v["workspaces"]["launch"]["timeoutSecs"], 15);
         // A partial new section keeps the other fields' defaults.
         let p: AppConfig = serde_json::from_str(r#"{"colorPicker": {"copiedFormat": "HSL"}, "textExtractor": {"enabled": true}}"#).unwrap();
         assert_eq!(p.color_picker.settings.copied_format, "HSL");
         assert_eq!(p.color_picker.settings.hotkey, color_picker::Hotkey::default_for_platform());
         assert!(p.text_extractor.enabled);
+        let p: AppConfig = serde_json::from_str(
+            r#"{"updates": {"lastCheck": 1800000000}, "setup": {"completed": true},
+                "workspaces": {"hotkey": {"ctrl": true, "alt": true, "code": 87}}}"#,
+        )
+        .unwrap();
+        assert!(p.updates.check && p.updates.last_check == Some(1_800_000_000));
+        assert!(p.setup.completed && p.setup.remind_missing_permissions);
+        assert_eq!(p.workspaces.hotkey, workspaces::Hotkey::new(false, true, true, false, 87));
+        assert!(p.workspaces.enabled);
     }
 
     /// Display Control skips Display Scaling's virtual displays by these numbers.

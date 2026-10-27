@@ -9,6 +9,9 @@
 | `powermac editor` | hotkey / tray | FancyZones layout editor |
 | `powermac clipboard` | hotkey / tray | Clipboard history picker |
 | `powermac color-picker --editor` | after a pick | Color editor |
+| `powermac workspace edit` | tray / hotkey / settings | Workspaces editor |
+| `powermac permissions --json` | settings, every second while a permission row is visible | Reports the live permission state of a fresh process |
+| `powermac mwb doctor` | settings → Run diagnostics | Pairing diagnostics (stdout shown in the window) |
 | `powermac rename` / `new` / `resize` / `finder` | Finder Quick Actions | File tools |
 
 Helper windows are separate processes because each egui event loop needs a main thread and the tray app's main thread runs AppKit. The app keeps at most one process per kind; asking again brings the existing window to the front.
@@ -33,8 +36,16 @@ All files live next to `config.json` and are written atomically (temp file + ren
 | `notch-status.json` | app → settings | Script / xbar / Web widget results, reminder lists, widget permission states | every 2 s while the shelf runs |
 | `notch-request.json` | settings → app | refresh a widget, open the notch on a page | polled every 250 ms |
 | `settings-request.json` | tray → settings | switch an open settings window to a page (tray → Notch widgets…) | polled every second |
+| `app-status.json` | app → settings | version, pid, executable, permissions as the app sees them, input-hook health (state, re-enables, slow handlers), one status per module | every 2 s |
+| `app-request.json` | settings → app | restart (reopening a settings page), launch / capture a workspace, open the Workspaces editor, check for updates | polled every 250 ms |
+| `update-status.json` | app or settings → both | the last update check (`pm_update::UpdateState`) | after each check |
+| `mwb-diagnostics.json` | app → settings, `mwb doctor` | incoming connection attempts, learned addresses, LLMNR responder counters | every 5 s |
 
 Status files carry a timestamp (`at`, ms since the epoch); the settings window treats stale status as "app not running". Requests carry one too and old ones are ignored, so a request written while the app was down never fires later.
+
+## Restarting
+
+**Restart PowerMac** (setup, Settings → General) writes `{"action": "restart", "reopenPage": "permissions"}`. The app shuts every module down cleanly, runs `open -n PowerMac.app --args --config <path> run --wait-pid <old pid> --open-settings <page>` (or starts its executable directly outside a bundle) and exits; the new instance waits for the old pid to be gone, starts the modules with fresh permissions and reopens the settings window. The settings window closes itself after sending the request. Without a running app it starts one the same way.
 
 ## Other channels
 

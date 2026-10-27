@@ -28,9 +28,19 @@ The documentation site has its own workflow (`docs.yml`, see [Writing documentat
 1. checks that the tag matches the workspace version;
 2. runs the tests in release mode;
 3. builds a **universal** (Apple Silicon + Intel) `PowerMac.app` with `UNIVERSAL=1 scripts/bundle-macos.sh`;
-4. packages `PowerMac-X.Y.Z.dmg` (`scripts/make-dmg.sh`) and `PowerMac-X.Y.Z.zip`, plus `SHA256SUMS.txt`;
+4. packages `PowerMac-X.Y.Z-macos-universal.dmg` (`scripts/package-dmg.sh` with `UNIVERSAL=1 SKIP_BUILD=1`) and `PowerMac-X.Y.Z-macos-universal.zip`, plus `SHA256SUMS.txt` (the app's update check looks for `-macos-<arch>` / `-universal` DMGs in the release assets);
 5. signs and notarizes them when the Apple secrets are set;
 6. publishes a GitHub Release with the changelog section as its notes.
+
+The workflow ad-hoc signs (CI doesn't have the local "PowerMac Local Signing" identity) unless the Developer ID secrets below are set. Don't publish anything by hand: the app's [update check](../getting-started/updates.md) offers every non-draft release to everyone running PowerMac.
+
+## A DMG on your Mac
+
+```bash
+CARGO_TARGET_DIR=target scripts/package-dmg.sh
+```
+
+builds the bundle, makes `target/PowerMac-X.Y.Z-macos-arm64.dmg` (the architecture of this Mac; `UNIVERSAL=1` for both), signs it with the local identity when it exists, runs `hdiutil verify` and prints the size and SHA-256 (also written to `….dmg.sha256`). `FANCY=1` adds a background picture with an arrow to Applications (drawn by `scripts/dmg-background.py`; laying out the window asks Finder through AppleScript, so macOS asks once for Automation). The image isn't notarized; on other Macs the first launch needs **Open Anyway** in Privacy & Security (see [Install](../getting-started/install.md#opening-a-build-that-isnt-notarized)).
 
 To rebuild an existing tag, run the workflow by hand (**Actions → release → Run workflow**) with the tag name; it replaces the assets.
 

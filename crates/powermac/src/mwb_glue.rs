@@ -347,28 +347,7 @@ fn ago(at_ms: u64) -> String {
 
 /// Copy-pasteable PowerShell for the Windows side.
 pub(crate) fn powershell_steps(name: &str, ip: &str, port: u16, key_hint: &str) -> String {
-    let upper = name.to_uppercase();
-    let msg = port.wrapping_add(1);
-    format!(
-        r#"# 1. Can the PC reach this Mac's Mouse Without Borders port?
-Test-NetConnection {ip} -Port {msg}
-# 2. Does the Mac's name resolve the way PowerToys resolves it (Dns.GetHostEntry)?
-Resolve-DnsName {upper} -LlmnrOnly
-[System.Net.Dns]::GetHostEntry("{upper}").AddressList
-#    No answer: LLMNR may be off by policy (EnableMulticast = 0 here means off):
-Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' -Name EnableMulticast -ErrorAction SilentlyContinue
-#    ...or the network is "Public" (run as administrator to change it):
-Get-NetConnectionProfile
-Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Private
-# 3. Optional (one direction is enough): let the Mac connect to the PC too (administrator):
-New-NetFirewallRule -DisplayName "Mouse Without Borders (PowerMac)" -Direction Inbound -Protocol TCP -LocalPort {base},{msg} -RemoteAddress {ip} -Action Allow -Profile Private,Domain
-# 4. If step 2 finds nothing: PowerToys Settings > Mouse Without Borders > Advanced >
-#    "IP address mapping", one line (name, space, address):
-#        {upper} {ip}
-# 5. PowerToys Settings > Mouse Without Borders > "Connect": security key {key_hint},
-#    computer name {upper}   (the NAME, not the IP address)"#,
-        base = port,
-    )
+    pm_config::mwb_help::powershell_steps(name, ip, port, key_hint)
 }
 
 /// `powermac mwb doctor`: everything that decides whether a Windows PC can pair with this Mac.

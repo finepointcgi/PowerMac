@@ -10,7 +10,25 @@
 
 ## Download
 
-Get `PowerMac-<version>.dmg` from the [Releases page](https://github.com/finepointcgi/PowerMac/releases), open it and drag PowerMac to Applications. It is a universal app (Apple Silicon and Intel). If the build isn't notarized, open it the first time with right-click → **Open**.
+Get `PowerMac-<version>-macos-<arch>.dmg` from the [Releases page](https://github.com/finepointcgi/PowerMac/releases) (`arm64` for Apple Silicon, `universal` for any Mac), open it and drag PowerMac onto **Applications**.
+
+### Opening a build that isn't notarized
+
+PowerMac isn't notarized by Apple (that needs a paid developer account), so the first time you open it on a Mac macOS says it can't check it for malicious software. To open it anyway:
+
+1. Open PowerMac once and click **Done** in the warning.
+2. Open **System Settings → Privacy & Security** and scroll down to the **Security** section: there is a line saying PowerMac "was blocked to protect your Mac".
+3. Click **Open Anyway**, confirm with your password or Touch ID, and click **Open**.
+
+macOS remembers this; later launches open normally. (In Terminal, `xattr -dr com.apple.quarantine /Applications/PowerMac.app` does the same.) Updates are offered in the app, see [Updates](updates.md).
+
+## Package a disk image
+
+```bash
+./scripts/package-dmg.sh
+```
+
+builds the bundle (below) and writes `$CARGO_TARGET_DIR/PowerMac-<version>-macos-<arch>.dmg` with the app and an Applications link, signs it with the local identity when there is one, verifies it and prints its SHA-256 (also in `….dmg.sha256`). `UNIVERSAL=1` makes a universal image, `SKIP_BUILD=1` packages an existing bundle, `FANCY=1` adds a background with an arrow (it lays out the window with Finder through AppleScript, so macOS asks once to let Terminal control Finder).
 
 ## Build the app bundle (macOS)
 
@@ -50,9 +68,10 @@ When run from a terminal, macOS attributes permissions to the terminal app, not 
 ## First launch
 
 1. PowerMac creates `config.json` with defaults and a fresh **Mouse Without Borders security key** (see [Configuration files](configuration.md)).
-2. A menu-bar icon appears. Its menu has **Settings…**, Awake modes, FancyZones layouts, scroll direction, mouse utilities, Paste as plain text, Copy security key, Launch at login, and a **Tools** section (Pick color, Extract text, Clipboard history, Window switcher, Show shelf, Displays presets, Finder Quick Actions).
-3. Modules whose permission is missing log a message and stay off; the rest keep running. Open **Settings → General** to see each permission's status, with buttons that open the right System Settings pane. [Permissions](permissions.md) explains which module needs what.
-4. Run `powermac doctor` at any time to print the config location, permission status and detected screens.
+2. The **setup** opens: what PowerMac is, which feature groups to turn on, the permissions those need (with live status, buttons for the right System Settings panes and a **Restart PowerMac** button), and the shortcuts of what you chose. Skipping or closing it is remembered; **Setup & permissions…** in the menu brings it back. See [Permissions](permissions.md#the-setup-window).
+3. A menu-bar icon appears. Its menu has **Settings…**, **Setup & permissions…** (with a **⚠ Needs …** line and a dot on the icon while a permission is missing, and **Update available** when there is one), Awake modes, Workspaces, FancyZones layouts, scroll direction, mouse utilities, Paste as plain text, Copy security key, Launch at login, and a **Tools** section (Pick color, Extract text, Clipboard history, Window switcher, Show shelf, Displays presets, Finder Quick Actions).
+4. Modules whose permission is missing wait for it; the rest keep running. Open **Settings → General** to see each permission's status, with buttons that open the right System Settings pane. [Permissions](permissions.md) explains which module needs what.
+5. Run `powermac doctor` at any time to print the config location, permission status and detected screens.
 
 <figure markdown="span">
   ![Clicking through the settings window and searching it](../assets/gifs/settings-tour.gif){ loading=lazy }

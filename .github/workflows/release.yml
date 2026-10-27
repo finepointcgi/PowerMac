@@ -80,11 +80,16 @@ jobs:
         run: ./scripts/bundle-macos.sh
 
       - name: Package
+        env:
+          UNIVERSAL: "1"
+          SKIP_BUILD: "1"
+          DMG_DIR: dist
         run: |
-          mkdir -p dist
-          APP=target/release/PowerMac.app
-          ./scripts/make-dmg.sh "$APP" "dist/PowerMac-$VERSION.dmg"
-          ditto -c -k --keepParent "$APP" "dist/PowerMac-$VERSION.zip"
+          # PowerMac-X.Y.Z-macos-universal.dmg (+ .sha256); the update check
+          # in the app looks for this name.
+          ./scripts/package-dmg.sh
+          rm -f dist/*.sha256
+          ditto -c -k --keepParent target/release/PowerMac.app "dist/PowerMac-$VERSION-macos-universal.zip"
 
       - name: Notarize
         if: steps.cert.outputs.signed == 'true'
@@ -93,14 +98,14 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          DMG="dist/PowerMac-$VERSION.dmg"
+          DMG="dist/PowerMac-$VERSION-macos-universal.dmg"
           xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD" --wait
           xcrun stapler staple "$DMG"
           # The zip can't be stapled; staple the app inside and re-zip it.
           xcrun stapler staple target/release/PowerMac.app
-          rm "dist/PowerMac-$VERSION.zip"
-          ditto -c -k --keepParent target/release/PowerMac.app "dist/PowerMac-$VERSION.zip"
+          rm "dist/PowerMac-$VERSION-macos-universal.zip"
+          ditto -c -k --keepParent target/release/PowerMac.app "dist/PowerMac-$VERSION-macos-universal.zip"
 
       - name: Checksums
         run: cd dist && shasum -a 256 PowerMac-* > SHA256SUMS.txt && cat SHA256SUMS.txt
@@ -117,8 +122,10 @@ jobs:
 
           ### Opening the app
 
-          This build is not notarized by Apple. After copying PowerMac to Applications, open it once with
-          **right-click → Open** (or run `xattr -dr com.apple.quarantine /Applications/PowerMac.app`).
+          This build is not notarized by Apple. Copy PowerMac to Applications and open it; when macOS says it
+          can't check it for malicious software, open **System Settings → Privacy & Security**, scroll down and
+          click **Open Anyway** next to the PowerMac message (or run
+          `xattr -dr com.apple.quarantine /Applications/PowerMac.app`).
           EOF
           fi
           cat notes.md

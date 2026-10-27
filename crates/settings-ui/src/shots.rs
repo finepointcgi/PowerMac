@@ -643,3 +643,217 @@ fn widget_shots() {
     assert_eq!(back.notch_shelf.widgets.len(), 13);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The setup, Settings → General (Permissions & Health, Updates), the
+/// Workspaces page and Mouse Without Borders' pairing card, light and dark.
+#[test]
+fn setup_shots() {
+    use crate::permissions::{Grant, Perm, Probe};
+    use pm_config::bridge::{AppPermissions, AppStatus, HookHealth, ModuleState, ModuleStatus, SlowHandler};
+    if std::env::var_os("PM_UI_SHOTS").is_none() && std::env::var_os("PM_UI_SHOTS_ALWAYS").is_none() {
+        return;
+    }
+    if !has_gpu() {
+        return;
+    }
+    let dir = out_dir();
+    let d = scratch("setup");
+    let path = d.join("config.json");
+    let mut cfg = pm_config::AppConfig::with_new_key();
+    cfg.mwb.settings.machine_name = "MacBook-Pro".into();
+    cfg.mwb.settings.matrix = vec!["MacBook-Pro".into(), "studio-pc".into()];
+    cfg.clipboard_history.enabled = true;
+    cfg.window_switcher.enabled = true;
+    cfg.audio.enabled = true;
+    cfg.audio.per_app_volume = true;
+    cfg.workspaces.hotkey = workspaces::Hotkey::new(false, true, true, false, 0x57);
+    cfg.save(&path).unwrap();
+
+    // Two saved workspaces.
+    let mon = |id: &str, name: &str, x: i32, w: i32, h: i32, primary: bool| workspaces::Monitor {
+        id: id.into(),
+        name: name.into(),
+        number: if primary { 0 } else { 1 },
+        frame: workspaces::Rect::new(x, 0, w, h),
+        work_area: workspaces::Rect::new(x, 33, w, h - 33),
+        scale: 2.0,
+        primary,
+    };
+    let app = |name: &str, bundle: &str, x: i32, y: i32, w: i32, h: i32, m: &str| workspaces::App {
+        id: format!("{bundle}-{x}"),
+        name: name.into(),
+        bundle_id: bundle.into(),
+        path: format!("/Applications/{name}.app"),
+        frame: workspaces::Rect::new(x, y, w, h),
+        monitor_id: m.into(),
+        ..Default::default()
+    };
+    let now = workspaces::model::now_unix();
+    let ws = vec![
+        workspaces::Workspace {
+            id: "{11111111-0000-0000-0000-000000000001}".into(),
+            name: "Coding".into(),
+            creation_time: now - 86_400 * 3,
+            last_launched_time: Some(now - 7200),
+            monitors: vec![mon("m1", "Built-in Retina Display", 0, 1512, 982, true), mon("m2", "LG UltraFine", 1512, 2560, 1440, false)],
+            apps: vec![
+                app("Xcode", "com.apple.dt.Xcode", 1512, 0, 1700, 1440, "m2"),
+                app("Terminal", "com.apple.Terminal", 3212, 0, 860, 1440, "m2"),
+                app("Safari", "com.apple.Safari", 0, 33, 1512, 949, "m1"),
+            ],
+            ..Default::default()
+        },
+        workspaces::Workspace {
+            id: "{11111111-0000-0000-0000-000000000002}".into(),
+            name: "Writing".into(),
+            creation_time: now - 86_400,
+            monitors: vec![mon("m1", "Built-in Retina Display", 0, 1512, 982, true)],
+            apps: vec![app("Pages", "com.apple.iWork.Pages", 0, 33, 1000, 949, "m1"), app("Notes", "com.apple.Notes", 1000, 33, 512, 949, "m1")],
+            ..Default::default()
+        },
+    ];
+    workspaces::store::save(&d, &ws).unwrap();
+
+    // What a running app reports.
+    let mstat = |page: &str, name: &str, state: ModuleState, detail: &str| ModuleStatus { page: page.into(), name: name.into(), state, detail: detail.into() };
+    let app_status = AppStatus {
+        version: env!("CARGO_PKG_VERSION").into(),
+        pid: 4242,
+        started_at: 0,
+        executable: "/Applications/PowerMac.app/Contents/MacOS/powermac".into(),
+        permissions: AppPermissions { accessibility: true, input_monitoring: true, screen_recording: false },
+        hook: HookHealth {
+            state: "active".into(),
+            healthy: true,
+            reenabled: 1,
+            subscribers: vec!["keyboard-manager".into(), "mwb".into(), "window-switcher".into(), "fancyzones".into(), "mouse-utils".into()],
+            slow_handlers: vec![SlowHandler { name: "fancyzones".into(), slow: 3, calls: 18_204, max_ms: 14 }],
+            ..Default::default()
+        },
+        modules: vec![
+            mstat("fancyzones", "FancyZones", ModuleState::Running, ""),
+            mstat("window-switcher", "Window Switcher", ModuleState::Running, "Option+Tab"),
+            mstat("workspaces", "Workspaces", ModuleState::Running, "2 saved"),
+            mstat("notch-shelf", "Notch Shelf", ModuleState::Running, ""),
+            mstat("scrolling", "Scrolling", ModuleState::Running, ""),
+            mstat("clipboard-history", "Clipboard History", ModuleState::Running, ""),
+            mstat("sound", "Sound", ModuleState::WaitingForPermission, "needs System Audio Recording"),
+            mstat("text-extractor", "Text Extractor", ModuleState::WaitingForPermission, "needs Screen & System Audio Recording"),
+            mstat("mouse-without-borders", "Mouse Without Borders", ModuleState::Running, "Connected: STUDIO-PC"),
+            mstat("color-picker", "Color Picker", ModuleState::Failed, ""),
+            mstat("awake", "Awake", ModuleState::Off, ""),
+        ],
+    };
+    let release = pm_update::Release {
+        tag: "v1.2.0".into(),
+        version: "1.2.0".into(),
+        name: "PowerMac 1.2.0".into(),
+        notes: "### Added\n- **Workspaces**: capture and restore a desktop of apps.\n- A first-run setup with live permission status.\n\n### Fixed\n- Permissions after rebuilding the app.".into(),
+        url: "https://github.com/finepointcgi/PowerMac/releases/tag/v1.2.0".into(),
+        prerelease: false,
+        published_at: "2026-11-20T10:12:00Z".into(),
+        download_url: Some("https://github.com/finepointcgi/PowerMac/releases/download/v1.2.0/PowerMac-1.2.0-macos-arm64.dmg".into()),
+        download_name: Some("PowerMac-1.2.0-macos-arm64.dmg".into()),
+        download_size: Some(9_437_184),
+    };
+    let update = pm_update::UpdateState {
+        checked_at: pm_update::now_secs() - 1800,
+        current: env!("CARGO_PKG_VERSION").into(),
+        outcome: Some(pm_update::CheckOutcome::Available { release }),
+        error: None,
+    };
+    let diag = serde_json::json!({
+        "at": 0,
+        "machineName": "MacBook-Pro",
+        "incoming": [
+            {"from": "10.0.0.35:50123", "at": 1, "result": "rejected: different security key"},
+            {"from": "10.0.0.35:50131", "at": 2, "result": "trusted as 'STUDIO-PC'"}
+        ],
+        "learned": [{"name": "STUDIO-PC", "addr": "10.0.0.35"}],
+        "peers": [],
+        "llmnr": {"running": true, "name": "MACBOOK-PRO", "port": 5355, "queries": 14, "answered": 3,
+                  "lastAnswer": {"from": "10.0.0.35:61001", "name": "MACBOOK-PRO", "answer": "10.0.0.112", "at": 3}}
+    });
+    let mut diag = diag;
+    let nowms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    diag["incoming"][0]["at"] = (nowms - 600_000).into();
+    diag["incoming"][1]["at"] = (nowms - 240_000).into();
+    std::fs::write(d.join("mwb-diagnostics.json"), serde_json::to_string(&diag).unwrap()).unwrap();
+    let doctor = "== This Mac\nMouse Without Borders enabled: true\nmachine name: MacBook-Pro   (type MACBOOK-PRO in PowerToys; case doesn't matter)\nIPv4: 10.0.0.112/24  <- LAN address Windows should use\nTCP 15101 (MWB messages): listening - powermac (pid 4242)\n\n== Security key\nvalid: true (16 characters after removing whitespace; PowerToys needs >= 16)\nbit-31 quirk: not affected (magic 0x00a1b2c3)\n\n== Name lookups from Windows (LLMNR, UDP 5355)\nquery MACBOOK-PRO at 127.0.0.1:5355: answered 10.0.0.112\n\n== Summary\nno problems found on this Mac".to_string();
+    pm_config::bridge::write(&path, pm_config::bridge::UPDATE_STATUS_FILE, &update).unwrap();
+    let fresh = |status: &AppStatus| {
+        pm_config::bridge::write(&path, pm_config::bridge::APP_STATUS_FILE, status).unwrap();
+        pm_config::MwbStatus {
+            running: true,
+            machine_name: "MacBook-Pro".into(),
+            machines: vec![pm_config::MwbMachine { name: "STUDIO-PC".into(), address: "10.0.0.35".into(), connected: true, discovered: true }],
+            ..Default::default()
+        }
+        .stamp()
+        .save_for(&path)
+        .unwrap();
+    };
+
+    // Live probe: Accessibility and Input Monitoring granted; Screen
+    // Recording granted here but not in the running app (restart needed);
+    // audio capture missing.
+    let probe = Probe {
+        accessibility: Grant::Granted,
+        input_monitoring: Grant::Granted,
+        screen_recording: Grant::Granted,
+        audio_capture: Grant::Denied,
+    };
+    let first_run = Probe { accessibility: Grant::Denied, input_monitoring: Grant::Denied, screen_recording: Grant::Denied, audio_capture: Grant::NotDetermined };
+    for (theme, tn) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
+        for (size, suffix) in [(win(1000.0, 720.0), ""), (win(1000.0, 1500.0), "-full"), (win(1000.0, 2500.0), "-tall")] {
+            let mut app = SettingsApp::new(path.clone());
+            app.set_pairing_for_test(
+                vec![("10.0.0.112".parse().unwrap(), true, false), ("100.64.12.7".parse().unwrap(), false, true)],
+                Some(doctor.clone()),
+            );
+            let mut h = Harness::builder()
+                .with_size(size)
+                .with_theme(theme)
+                .with_accessibility_check(false)
+                .wgpu()
+                .build_ui_state(|ui, app: &mut SettingsApp| app.draw(ui), app);
+            h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
+            h.state_mut().set_alt_tab_for_test(false, vec![]);
+            // The setup, as on a first launch (nothing granted, app not running yet).
+            h.state_mut().set_app_status_for_test(None);
+            h.state_mut().set_probe_for_test(first_run.clone(), &[]);
+            h.state_mut().open_named("welcome");
+            let tall = suffix == "-tall";
+            for (step, name) in [(0, "welcome"), (1, "features"), (2, "permissions"), (3, "done")] {
+                if tall {
+                    break;
+                }
+                h.state_mut().set_setup_step_for_test(step);
+                save(&mut h, &dir, &format!("setup-{name}-{tn}{suffix}"));
+            }
+            // Permissions after granting: one needs a restart, one has an outdated entry.
+            fresh(&app_status);
+            h.state_mut().set_app_status_for_test(Some(app_status.clone()));
+            h.state_mut().set_probe_for_test(probe.clone(), &[Perm::AudioCapture]);
+            h.state_mut().set_setup_step_for_test(2);
+            if !tall {
+                save(&mut h, &dir, &format!("setup-permissions-granted-{tn}{suffix}"));
+            }
+            // Settings pages.
+            h.state_mut().set_update_state_for_test(update.clone());
+            h.state_mut().set_probe_for_test(probe.clone(), &[]);
+            for (page, name) in [(Page::General, "general"), (Page::Workspaces, "workspaces"), (Page::Mwb, "mwb")] {
+                if tall && page == Page::Workspaces {
+                    continue;
+                }
+                fresh(&app_status);
+                h.state_mut().set_page(page);
+                h.state_mut().reload_status_for_test();
+                h.state_mut().set_app_status_for_test(Some(app_status.clone()));
+                h.state_mut().set_update_state_for_test(update.clone());
+                save(&mut h, &dir, &format!("final-{name}-{tn}{suffix}"));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

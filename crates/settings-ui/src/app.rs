@@ -22,6 +22,8 @@ use crate::zone_style;
 mod notch_widgets;
 mod pages;
 mod pages2;
+mod pages3;
+mod setup;
 
 /// Wait this long after the last change before writing the file.
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -184,6 +186,16 @@ fn meta(p: Page) -> Meta {
             Color32::from_rgb(0x63, 0x63, 0x70),
             "Tuck menu bar icons away behind a chevron, and find the ones the notch hides.",
         ),
+        Page::Workspaces => (
+            icon::STACK,
+            Color32::from_rgb(0x30, 0xB0, 0xC7),
+            "Save the apps and windows on your screens as a workspace, and bring them all back with one click.",
+        ),
+        Page::Welcome => (
+            icon::SPARKLE,
+            Color32::from_rgb(0x0A, 0x7A, 0xF5),
+            "Set up PowerMac: choose features and grant permissions.",
+        ),
         Page::TextExpander => (
             icon::TEXT_AA,
             Color32::from_rgb(0xFF, 0x8C, 0x1A),
@@ -312,6 +324,16 @@ pub struct SettingsApp {
     notch_status: Option<pm_config::bridge::NotchStatus>,
     /// Page switches asked for by the tray menu while the window is open.
     settings_requests: pm_config::bridge::RequestReader,
+
+    // Setup, permissions, health, updates (app/setup.rs)
+    setup: setup::SetupUi,
+    /// What the running app reports about itself (permissions, hook, modules).
+    app_status: Option<pm_config::bridge::AppStatus>,
+    /// The last update check.
+    update_state: Option<pm_update::UpdateState>,
+    // Workspaces and MWB pairing (app/pages3.rs)
+    ws: pages3::WorkspacesUi,
+    pairing: pages3::PairingUi,
 }
 
 impl SettingsApp {
@@ -384,6 +406,11 @@ impl SettingsApp {
             nw: Default::default(),
             notch_status: pm_config::bridge::read_fresh(&config_path, pm_config::bridge::NOTCH_STATUS_FILE, pm_config::bridge::STATUS_FRESH_MS),
             settings_requests: pm_config::bridge::RequestReader::new(&config_path, pm_config::bridge::SETTINGS_REQUEST_FILE),
+            setup: Default::default(),
+            app_status: pm_config::bridge::read_fresh(&config_path, pm_config::bridge::APP_STATUS_FILE, pm_config::bridge::STATUS_FRESH_MS),
+            update_state: pm_config::bridge::read(&config_path, pm_config::bridge::UPDATE_STATUS_FILE).map(|s| s.data),
+            ws: Default::default(),
+            pairing: Default::default(),
             config_path,
         };
         if !s.config_path.exists() {
@@ -591,13 +618,12 @@ impl SettingsApp {
             self.display_status = pm_config::DisplayStatus::load_for(&self.config_path);
             self.display_local.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(4));
             self.poll_new_modules();
+            self.poll_setup();
+            self.poll_pages3();
             if let Some(pm_config::bridge::SettingsRequest::ShowPage { page }) =
                 self.settings_requests.poll::<pm_config::bridge::SettingsRequest>(&self.config_path, pm_config::bridge::SETTINGS_REQUEST_FILE)
             {
-                match Page::from_name(&page) {
-                    Some(p) => self.set_page(p),
-                    None => log::warn!("settings: no page named {page:?}"),
-                }
+                self.open_named(&page);
             }
             if now - self.perms_at >= Duration::from_secs(2) {
                 self.perms_at = now;
@@ -663,6 +689,8 @@ impl SettingsApp {
             Page::DockPreviews => Some(c.dock_previews.enabled),
             Page::TextExpander => Some(c.text_expander.enabled),
             Page::MenuBar => Some(c.menu_bar.enabled),
+            Page::Workspaces => Some(c.workspaces.enabled),
+            Page::Welcome => None,
         }
     }
 
@@ -691,7 +719,8 @@ impl SettingsApp {
             Page::DockPreviews => c.dock_previews.enabled = on,
             Page::TextExpander => c.text_expander.enabled = on,
             Page::MenuBar => c.menu_bar.enabled = on,
-            Page::General | Page::FileTools | Page::NotchWidgets => {}
+            Page::Workspaces => c.workspaces.enabled = on,
+            Page::General | Page::FileTools | Page::NotchWidgets | Page::Welcome => {}
         }
     }
 
@@ -704,6 +733,20 @@ impl SettingsApp {
     pub fn set_page(&mut self, p: Page) {
         self.search.clear();
         self.go(p);
+    }
+
+    /// Show the page named `name` (`--page`, the tray): "permissions" opens
+    /// the setup on its Permissions step.
+    pub fn open_named(&mut self, name: &str) {
+        match Page::from_name(name) {
+            Some(Page::Welcome) => {
+                let n = name.to_ascii_lowercase();
+                self.setup.step = if n.contains("permission") { setup::STEP_PERMISSIONS } else { 0 };
+                self.set_page(Page::Welcome);
+            }
+            Some(p) => self.set_page(p),
+            None => log::warn!("settings: no page named {name:?}"),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1131,7 +1174,7 @@ impl SettingsApp {
         let m = meta(page);
         let p = pal(ui);
         ui.add_space(30.0);
-        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools | Page::NotchWidgets);
+        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools | Page::NotchWidgets | Page::Welcome);
         let mut on = self.module_on(page).unwrap_or(false);
         card_frame(&p)
             .inner_margin(egui::Margin::same(20))
@@ -1200,6 +1243,8 @@ impl SettingsApp {
             Page::DockPreviews => self.dock_previews(ui),
             Page::TextExpander => self.text_expander(ui),
             Page::MenuBar => self.menu_bar(ui),
+            Page::Workspaces => self.workspaces_page(ui),
+            Page::Welcome => self.general(ui),
         }
     }
 
@@ -1208,6 +1253,10 @@ impl SettingsApp {
 
     fn general(&mut self, ui: &mut Ui) {
         self.hero(ui, |_, _| {});
+        self.health_card(ui);
+        if self.update_state.as_ref().is_some_and(|s| s.available(env!("CARGO_PKG_VERSION")).is_some()) {
+            self.updates_card(ui);
+        }
         let mut go = None;
         let mut set = None;
         card_with(
@@ -1273,27 +1322,6 @@ impl SettingsApp {
                 ui.add_space(8.0);
             }
         });
-        if let Some((ax, input)) = self.perms {
-            card_with(
-                ui,
-                "Permissions",
-                Some("Grant these to PowerMac.app in System Settings → Privacy & Security, then restart PowerMac."),
-                |ui| {
-                    for (name, desc, ok, pane) in [
-                        ("Accessibility", "Needed to move and resize windows and to send keys.", ax, "Privacy_Accessibility"),
-                        ("Input Monitoring", "Needed to see the mouse and keyboard for hotkeys and gestures.", input, "Privacy_ListenEvent"),
-                        ("Screen Recording", "Needed by Text Extractor to read the screen, and for window thumbnails in the Window Switcher.", self.screen_recording, "Privacy_ScreenCapture"),
-                    ] {
-                        row(ui, name, Some(desc), |ui| {
-                            status_pill(ui, ok, if ok { "Granted" } else { "Not granted" });
-                            if !ok && ui.button("Open Settings…").clicked() {
-                                crate::platform::open_privacy_pane(pane);
-                            }
-                        });
-                    }
-                },
-            );
-        }
         card(ui, "Configuration files", |ui| {
             for (name, path) in [
                 ("Settings", self.config_path.clone()),
@@ -1320,14 +1348,9 @@ impl SettingsApp {
                 },
             );
         });
-        card(ui, "About", |ui| {
-            row(
-                ui,
-                &format!("PowerMac {}", env!("CARGO_PKG_VERSION")),
-                Some("PowerToys-style utilities for macOS and Windows."),
-                |_| {},
-            );
-        });
+        if !self.update_state.as_ref().is_some_and(|s| s.available(env!("CARGO_PKG_VERSION")).is_some()) {
+            self.updates_card(ui);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1450,6 +1473,10 @@ impl SettingsApp {
                 });
             },
         );
+
+        self.pairing_card(ui, &status);
+        let d = &mut self.app;
+        let s = &mut d.cfg.mwb.settings;
 
         card_with(
             ui,
@@ -3114,7 +3141,9 @@ impl SettingsApp {
     }
     pub fn reload_status_for_test(&mut self) {
         self.display_status = pm_config::DisplayStatus::load_for(&self.config_path);
+        self.mwb_status = pm_config::MwbStatus::load_for(&self.config_path);
         self.poll_new_modules();
+        self.poll_pages3();
     }
     pub fn set_devices_for_test(&mut self, d: Vec<mouse_tuning::DeviceInfo>) {
         self.devices = Some(d);
@@ -3143,7 +3172,18 @@ impl SettingsApp {
         theme::ensure(&ctx);
         let p = pal(ui);
         if ctx.input(|i| i.viewport().close_requested()) {
+            if self.page == Page::Welcome {
+                // Closing the setup counts as dismissing it.
+                self.complete_setup();
+            }
             self.flush();
+        }
+        if self.page == Page::Welcome {
+            self.draw_setup(ui);
+            let r = ui.max_rect();
+            self.toast(&ctx, Rect::from_min_max(r.min, pos2(r.max.x, r.max.y - 66.0)));
+            self.tick(&ctx);
+            return;
         }
         if !self.search.trim().is_empty() {
             self.recording = None;

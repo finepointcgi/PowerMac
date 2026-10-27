@@ -183,6 +183,17 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
     if changed(old.map(|o| &o.menu_bar), &new.menu_bar) {
         apply_menu_bar(running, &new.menu_bar);
     }
+    if changed(old.map(|o| &o.workspaces), &new.workspaces) {
+        let w = &new.workspaces;
+        let want = w.enabled && w.hotkey.is_set();
+        let same = old.is_some_and(|o| o.workspaces.enabled == w.enabled && o.workspaces.hotkey == w.hotkey);
+        if !(same && running.workspaces_hotkey.is_some() == want) {
+            running.workspaces_hotkey = None; // unsubscribes
+            if want {
+                running.workspaces_hotkey = Some(crate::app_glue::workspaces_hotkey(w.hotkey));
+            }
+        }
+    }
 }
 
 fn apply_menu_bar(running: &mut Running, cfg: &menubar_manager::Config) {

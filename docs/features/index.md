@@ -7,6 +7,7 @@ Every module can be turned on or off on its own in **Settings** or in `config.js
 | [FancyZones](fancyzones.md) | on | Shift+drag, Ctrl+Option+Arrow, Ctrl+Option+\` | Accessibility, Input Monitoring | yes |
 | [Edge snapping](fancyzones.md#edge-snapping) | on (macOS) | drag to an edge | Accessibility | off (Windows has Snap) |
 | [Window Switcher](window-switcher.md) | on | Option+Tab, Option+\` | Accessibility (+ Screen Recording for thumbnails) | Alt+\` |
+| [Workspaces](workspaces.md) | on | none (set one for the editor) | Accessibility | yes |
 | [Dock Previews](dock-previews.md) | on | hover a Dock icon | Accessibility (+ Screen Recording) | no-op |
 | [Menu Bar Manager](menu-bar.md) | off | click the chevron | Accessibility | no-op |
 | [Notch Shelf](notch-shelf.md) · [widgets](notch-widgets.md) | on with a notch | drag to the notch | none (widgets: see page) | top-center shelf |

@@ -1,7 +1,7 @@
 //! Helper windows that run as separate processes of this executable (their
 //! event loops can't share the tray app's main loop): the settings window,
-//! the FancyZones layout editor, the clipboard history picker and the color
-//! picker editor. Each slot holds at most one process; asking for it again
+//! the FancyZones layout editor, the clipboard history picker, the color
+//! picker editor and the Workspaces editor. Each slot holds at most one process; asking for it again
 //! while it runs brings it to the front instead of starting a second one.
 
 use std::process::Child;
@@ -24,6 +24,8 @@ pub static EDITOR: Slot = Slot::new();
 pub static CLIPBOARD: Slot = Slot::new();
 /// `powermac color-picker --editor`
 pub static COLOR_EDITOR: Slot = Slot::new();
+/// `powermac workspace edit` (the Workspaces editor)
+pub static WORKSPACES: Slot = Slot::new();
 
 /// Start `<this exe> --config <config> <args…>` in `slot`, or bring the
 /// process already running there to the front. Callable from any thread.

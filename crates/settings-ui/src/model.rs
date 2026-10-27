@@ -44,14 +44,20 @@ pub enum Page {
     DockPreviews,
     TextExpander,
     MenuBar,
+    /// Saved desktops of apps and windows.
+    Workspaces,
+    /// The first-run setup (welcome, features, permissions, tips). Not in
+    /// the sidebar: it takes the whole window.
+    Welcome,
 }
 
 impl Page {
     /// Sidebar order (grouped by [`Page::section`]).
-    pub const ALL: [Page; 20] = [
+    pub const ALL: [Page; 21] = [
         Page::General,
         Page::FancyZones,
         Page::WindowSwitcher,
+        Page::Workspaces,
         Page::NotchShelf,
         Page::NotchWidgets,
         Page::DockPreviews,
@@ -93,6 +99,8 @@ impl Page {
             Page::DockPreviews => "Dock Previews",
             Page::TextExpander => "Text Expansion",
             Page::MenuBar => "Menu Bar",
+            Page::Workspaces => "Workspaces",
+            Page::Welcome => "Welcome",
         }
     }
 
@@ -111,14 +119,17 @@ impl Page {
         if n.is_empty() {
             return None;
         }
+        if matches!(n.as_str(), "welcome" | "setup" | "onboarding" | "permissions" | "setuppermissions") {
+            return Some(Page::Welcome);
+        }
         Page::ALL.into_iter().find(|p| squash(p.title()) == n || squash(&format!("{p:?}")) == n)
     }
 
     /// The sidebar group the page is listed under (`None`: above the groups).
     pub fn section(self) -> Option<&'static str> {
         Some(match self {
-            Page::General => return None,
-            Page::FancyZones | Page::WindowSwitcher | Page::NotchShelf | Page::NotchWidgets | Page::DockPreviews | Page::MenuBar => {
+            Page::General | Page::Welcome => return None,
+            Page::FancyZones | Page::WindowSwitcher | Page::Workspaces | Page::NotchShelf | Page::NotchWidgets | Page::DockPreviews | Page::MenuBar => {
                 "Windows & Desktop"
             }
             Page::MouseTuning
@@ -627,6 +638,11 @@ pub fn hotkey_uses(c: &AppConfig) -> Vec<HotkeyUse> {
             v.push(hk_use(Page::Displays, name, h.win, h.ctrl, h.alt, h.shift, h.code));
         }
     }
+    let wsp = &c.workspaces;
+    if wsp.enabled && wsp.hotkey.is_set() {
+        let h = wsp.hotkey;
+        v.push(hk_use(Page::Workspaces, "Workspaces editor", h.win, h.ctrl, h.alt, h.shift, h.code));
+    }
     v.retain(|u| u.combo.vk != 0);
     v
 }
@@ -834,6 +850,8 @@ pub struct AppDraft {
     pub switch_trigger: String,
     pub switch_app_trigger: String,
     pub display_hotkeys: [String; 7],
+    /// Workspaces: the shortcut that opens the editor.
+    pub workspaces_hotkey: String,
     /// Shortcuts of other files (FancyZones), for the conflict check.
     #[serde(skip)]
     pub external_hotkeys: Vec<HotkeyUse>,
@@ -871,6 +889,10 @@ impl AppDraft {
             },
             display_hotkeys: dc_hotkey_list(&cfg.display_control.hotkeys)
                 .map(|h| format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)),
+            workspaces_hotkey: {
+                let h = cfg.workspaces.hotkey;
+                format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
+            },
             external_hotkeys: Vec::new(),
             cfg,
         }
@@ -987,6 +1009,15 @@ impl AppDraft {
             Err(e) => errs.push(problem(Page::ColorPicker, format!("Shortcut: {e}"))),
         }
         errs.extend(validate_color_formats(&c.color_picker.settings).into_iter().map(|e| problem(Page::ColorPicker, e)));
+
+        // Workspaces
+        match parse_hk(&self.workspaces_hotkey) {
+            Ok((w, ct, a, sh, code)) => c.workspaces.hotkey = workspaces::Hotkey::new(w, ct, a, sh, code),
+            Err(e) => errs.push(problem(Page::Workspaces, format!("Shortcut: {e}"))),
+        }
+        if c.workspaces.capture.excluded_apps.iter().any(|a| a.trim().is_empty()) {
+            errs.push(problem(Page::Workspaces, "Excluded apps: remove the empty entry."));
+        }
 
         // Text Extractor
         match parse_hk(&self.ocr_hotkey) {

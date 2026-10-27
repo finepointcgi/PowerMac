@@ -1,6 +1,7 @@
 //! PowerMac: PowerToys-style utilities (Mouse Without Borders, FancyZones,
 //! Awake, Keyboard Manager, Color Picker, ...) in one cross-platform app.
 
+mod app_glue;
 mod audio_glue;
 mod children;
 mod clipboard;
@@ -38,6 +39,13 @@ enum Cmd {
         /// Don't show the menu-bar / notification-area icon.
         #[arg(long)]
         no_tray: bool,
+        /// Open the settings window on this page once running (used when
+        /// PowerMac restarts itself from the settings window).
+        #[arg(long, hide = true)]
+        open_settings: Option<String>,
+        /// Wait for this process (the previous instance) to exit first.
+        #[arg(long, hide = true)]
+        wait_pid: Option<u32>,
     },
     /// Write a default config file with a freshly generated MWB key.
     Init {
@@ -51,6 +59,23 @@ enum Cmd {
     Mwb {
         #[command(subcommand)]
         cmd: MwbCmd,
+    },
+    /// Saved desktops of apps and windows: `list`, `capture [NAME]`,
+    /// `launch NAME|ID`, `edit` (the editor window).
+    Workspace {
+        #[command(subcommand)]
+        cmd: WorkspaceCmd,
+    },
+    /// Show the privacy permissions this PowerMac has (no prompts).
+    Permissions {
+        /// Print JSON (what the settings window reads).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check GitHub for a newer PowerMac (one request; nothing is installed).
+    Update {
+        #[command(subcommand)]
+        cmd: UpdateCmd,
     },
     /// Show config location, permissions and screens.
     Doctor {
@@ -138,6 +163,29 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum WorkspaceCmd {
+    /// List the saved workspaces.
+    List,
+    /// Save the windows on screen as a new workspace ("Workspace N" when
+    /// no name is given).
+    Capture { name: Option<String> },
+    /// Restore a workspace by name or id.
+    Launch { name: String },
+    /// Open the Workspaces editor.
+    Edit,
+}
+
+#[derive(Subcommand)]
+enum UpdateCmd {
+    /// Ask GitHub Releases now and print the result.
+    Check {
+        /// Consider pre-releases too.
+        #[arg(long)]
+        pre: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum MwbCmd {
     /// Check everything that decides whether a Windows PC can pair with this
     /// Mac (name, ports, key, LLMNR, VPN, firewall, recent connection
@@ -169,6 +217,8 @@ pub(crate) struct Running {
     /// Shared so that listing / moving items (which wait for the main
     /// thread) can run without holding `RUNNING`.
     pub(crate) menubar: Option<Arc<menubar_manager::Handle>>,
+    /// The Workspaces editor shortcut (a `pm_hook` subscription).
+    pub(crate) workspaces_hotkey: Option<pm_hook::Guard>,
 }
 
 impl Running {
@@ -267,6 +317,7 @@ pub(crate) fn shutdown() {
         }
         drop(r.color.take());
         drop(r.ocr.take());
+        drop(r.workspaces_hotkey.take());
     }
 }
 
@@ -305,8 +356,17 @@ fn main() -> Result<()> {
         Some(p) => p,
         None => AppConfig::default_path().context("no config directory on this platform")?,
     };
-    match cli.cmd.unwrap_or(Cmd::Run { no_tray: false }) {
-        Cmd::Run { no_tray } => run(&path, !no_tray),
+    match cli.cmd.unwrap_or(Cmd::Run { no_tray: false, open_settings: None, wait_pid: None }) {
+        Cmd::Run { no_tray, open_settings, wait_pid } => {
+            if let Some(pid) = wait_pid {
+                app_glue::wait_for_exit(pid);
+            }
+            app_glue::NO_TRAY.store(no_tray, std::sync::atomic::Ordering::Relaxed);
+            run(&path, !no_tray, open_settings)
+        }
+        Cmd::Workspace { cmd } => workspace_cmd(&path, cmd),
+        Cmd::Permissions { json } => permissions_cmd(&path, json),
+        Cmd::Update { cmd: UpdateCmd::Check { pre } } => update_cmd(&path, pre),
         Cmd::Init { force } => {
             if path.exists() && !force {
                 bail!("{} already exists (use --force to overwrite)", path.display());
@@ -325,7 +385,12 @@ fn main() -> Result<()> {
         }
         Cmd::Doctor { prompt } => doctor(&path, prompt),
         Cmd::Mwb { cmd: MwbCmd::Doctor } => mwb_glue::doctor(&path),
-        Cmd::Settings { page } => settings_ui::run_with_page(path, page),
+        Cmd::Settings { page } => {
+            if let Ok(exe) = std::env::current_exe() {
+                settings_ui::set_cli_exe(exe);
+            }
+            settings_ui::run_with_page(path, page)
+        }
         Cmd::Clipboard => {
             let cfg = AppConfig::load_or_default(&path)?;
             clipboard_history::run_picker(clipboard_history::data_dir_for_config(&path), cfg.clipboard_history)
@@ -444,7 +509,91 @@ fn install_ctrlc() {
     });
 }
 
-fn run(path: &std::path::Path, tray: bool) -> Result<()> {
+/// `powermac workspace …`
+fn workspace_cmd(path: &std::path::Path, cmd: WorkspaceCmd) -> Result<()> {
+    let cfg = AppConfig::load_or_default(path)?.workspaces;
+    let dir = pm_config::data_dir_for(path);
+    match cmd {
+        WorkspaceCmd::List => {
+            let list = workspaces::list(&dir)?;
+            if list.is_empty() {
+                println!("no workspaces yet (capture one with `powermac workspace capture`)");
+            }
+            let now = workspaces::model::now_unix();
+            for w in list {
+                let last = w.last_launched_time.map(|t| workspaces::model::relative_time(t, now)).unwrap_or_else(|| "never".into());
+                println!("{}  {}  ({} windows, launched {last})", w.id, w.name, w.apps.len());
+            }
+            Ok(())
+        }
+        WorkspaceCmd::Capture { name } => {
+            if !workspaces::has_permissions() {
+                bail!("capturing windows needs Accessibility permission (System Settings → Privacy & Security → Accessibility)");
+            }
+            let ws = workspaces::capture_and_save(&dir, name.as_deref().unwrap_or(""), &cfg)?;
+            println!("saved \"{}\" ({}) with {} windows", ws.name, ws.id, ws.apps.len());
+            Ok(())
+        }
+        WorkspaceCmd::Launch { name } => {
+            if !workspaces::has_permissions() {
+                bail!("moving windows needs Accessibility permission (System Settings → Privacy & Security → Accessibility)");
+            }
+            let report = workspaces::launch(&dir, &name, &cfg, &|ev| {
+                if ev.status.is_final() {
+                    println!("  {}: {}{}", ev.app, ev.status.label(), ev.detail.as_deref().map(|d| format!(" ({d})")).unwrap_or_default());
+                }
+            })?;
+            println!("{} in {:.1} s", report.summary(), report.elapsed.as_secs_f32());
+            if !report.all_ok() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        WorkspaceCmd::Edit => workspaces::run_editor_with(dir, cfg),
+    }
+}
+
+/// `powermac permissions [--json]`
+fn permissions_cmd(path: &std::path::Path, json: bool) -> Result<()> {
+    use settings_ui::permissions as perms;
+    let probe = perms::probe_in_process();
+    if json {
+        println!("{}", serde_json::to_string(&probe)?);
+        return Ok(());
+    }
+    let cfg = AppConfig::load_or_default(path)?;
+    for n in perms::needs(&cfg) {
+        let g = probe.get(n.perm);
+        let used = if n.features.is_empty() { "not used by the enabled features".to_string() } else { n.features.join(", ") };
+        println!("{:<32} {:<14} {used}", n.perm.title(), format!("{g:?}"));
+        if !g.granted() && cfg!(target_os = "macos") {
+            println!("{:<32} open {}", "", n.perm.settings_url());
+        }
+    }
+    Ok(())
+}
+
+/// `powermac update check [--pre]`
+fn update_cmd(path: &std::path::Path, pre: bool) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let r = pm_update::check(&pm_update::CheckOptions::new(version, pre));
+    let mut st: pm_update::UpdateState = pm_config::bridge::read(path, pm_config::bridge::UPDATE_STATUS_FILE).map(|s| s.data).unwrap_or_default();
+    let failed = r.as_ref().err().map(|e| e.to_string());
+    st.record(version, r);
+    if path.parent().is_some_and(|d| d.exists()) {
+        let _ = pm_config::bridge::write(path, pm_config::bridge::UPDATE_STATUS_FILE, &st);
+    }
+    println!("{}", st.summary(version));
+    if let Some(r) = st.available(version) {
+        println!("{} — {}", r.name, r.best_link());
+    }
+    if let Some(e) = failed {
+        bail!("{e}");
+    }
+    Ok(())
+}
+
+fn run(path: &std::path::Path, tray: bool, open_settings: Option<String>) -> Result<()> {
     // First launch (e.g. opening PowerMac.app): create a config with a fresh key.
     if !path.exists() {
         AppConfig::with_new_key().save(path)?;
@@ -463,6 +612,7 @@ fn run(path: &std::path::Path, tray: bool) -> Result<()> {
     let mut running = Running::default();
     modules::apply(&mut running, None, &cfg);
     modules::watch(path, cfg.clone());
+    app_glue::start_once();
 
     let anything = running.any() || cfg.awake.enabled;
     if !anything && !tray {
@@ -476,6 +626,7 @@ fn run(path: &std::path::Path, tray: bool) -> Result<()> {
         if tray {
             // NSStatusItem needs the shared NSApplication (created above).
             tray::install()?;
+            open_setup_if_needed(&cfg, open_settings.as_deref());
         }
         // The FancyZones overlay and the tray are AppKit UI: run the app loop here.
         fancyzones::platform::run_main_loop();
@@ -485,13 +636,14 @@ fn run(path: &std::path::Path, tray: bool) -> Result<()> {
     {
         if tray {
             tray::install()?;
+            open_setup_if_needed(&cfg, open_settings.as_deref());
         }
         win_message_loop();
     }
 
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = tray;
+        let _ = (tray, open_settings);
         let (_tx, rx) = std::sync::mpsc::channel::<()>();
         let _ = rx.recv();
     }
@@ -499,6 +651,17 @@ fn run(path: &std::path::Path, tray: bool) -> Result<()> {
     {
         shutdown();
         Ok(())
+    }
+}
+
+/// Open the settings window at startup: on `page` after a restart, else the
+/// setup on first launch or when a needed permission is missing.
+#[cfg(any(target_os = "macos", windows))]
+fn open_setup_if_needed(cfg: &AppConfig, page: Option<&str>) {
+    let page = page.or_else(|| app_glue::startup_page(cfg));
+    if let Some(p) = page {
+        log::info!("opening settings on {p:?}");
+        children::open(&children::SETTINGS, &["settings", "--page", p]);
     }
 }
 

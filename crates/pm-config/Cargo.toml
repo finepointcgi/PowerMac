@@ -25,3 +25,5 @@ audio-control = { path = "../audio-control" }
 dock-previews = { path = "../dock-previews" }
 text-expander = { path = "../text-expander" }
 menubar-manager = { path = "../menubar-manager" }
+workspaces = { path = "../workspaces" }
+pm-update = { path = "../pm-update" }
