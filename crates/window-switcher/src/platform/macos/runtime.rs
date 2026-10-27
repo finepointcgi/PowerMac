@@ -95,6 +95,17 @@ fn screens() -> Vec<RectF> {
     display_bounds().into_iter().map(|r| RectF::new(r.origin.x, r.origin.y, r.size.width, r.size.height)).collect()
 }
 
+/// The list `mode` would show right now, enumerated afresh (for
+/// `powermac switcher-windows`; needs Accessibility).
+pub(crate) fn list_now(cfg: &Config, mode: Mode) -> Vec<WindowInfo> {
+    let mut el = windows::Elements::default();
+    let all = windows::enumerate(&mut el, cfg.show_other_spaces, std::process::id() as i32);
+    let front = apps::frontmost_pid().map(|p| p as i64);
+    let scr = screens();
+    let cur = cursor_location().and_then(|c| scr.iter().position(|s| s.contains(c.x, c.y))).or((!scr.is_empty()).then_some(0));
+    model::filter(all, cfg, mode, &FilterContext { active_pid: front, screens: scr, current_screen: cur })
+}
+
 /// Build the list for `mode` from the cached windows (tap thread: no AX).
 fn snapshot(shared: &Shared, cfg: &Config, mode: Mode, cursor: (f64, f64)) -> Snapshot {
     let mut all = shared.windows.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -481,9 +492,21 @@ fn sync_cmd_tab(shared: &Shared) {
         let c = eng.config();
         (c.replaces_system_switcher(), c.replaces_cmd_backtick())
     };
-    let wanted = Guard::wanted(tab, backtick, tap_healthy(shared));
+    let healthy = tap_healthy(shared);
+    let wanted = Guard::wanted(tab, backtick, healthy);
     let mut g = shared.guard.lock().unwrap_or_else(|e| e.into_inner());
-    g.sync(wanted, &mut cmdtab::SysBackend);
+    if g.sync(wanted, &mut cmdtab::SysBackend) && (tab || backtick) && !healthy {
+        // Say why Cmd+Tab shows the app switcher again.
+        if cmdtab::secure_input_on() {
+            let who = cmdtab::secure_input_owner().unwrap_or_else(|| "an app".into());
+            log::warn!(
+                "window-switcher: {who} turned on secure input (a password field has focus), which hides the keyboard \
+                 from PowerMac; Cmd+Tab is the macOS app switcher until it's off"
+            );
+        } else {
+            log::warn!("window-switcher: the keyboard hook isn't working; Cmd+Tab is the macOS app switcher until it is");
+        }
+    }
 }
 
 // ------------------------------------------------------------- runtime

@@ -70,6 +70,27 @@ pub fn secure_input_on() -> bool {
     f.is_some_and(|f| unsafe { f() != 0 })
 }
 
+extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
+}
+
+/// The app that has Secure Event Input on (its executable name), if any.
+pub fn secure_input_owner() -> Option<String> {
+    let pid = unsafe {
+        let d = CGSessionCopyCurrentDictionary();
+        if d.is_null() {
+            return None;
+        }
+        let pid = dict_i64(d, "kCGSSessionSecureInputPID");
+        CFRelease(d);
+        pid
+    }?;
+    let exe = exe_of(u32::try_from(pid).ok().filter(|&p| p > 0)?)?;
+    // `/Applications/Brave Browser.app/Contents/MacOS/Brave Browser` → app bundle name.
+    let app = exe.split('/').find(|c| c.ends_with(".app")).map(|c| c.trim_end_matches(".app")).unwrap_or_else(|| exe.rsplit('/').next().unwrap_or(&exe));
+    Some(format!("{app} (pid {pid})"))
+}
+
 fn marker_dir() -> PathBuf {
     std::env::temp_dir()
 }
