@@ -24,6 +24,7 @@ members = [
     "crates/display-scaling",
     "crates/menubar-manager",
     "crates/audio-control",
+    "crates/battery-limit",
     "crates/pm-audio-driver",
     "crates/dock-previews",
     "crates/text-expander",

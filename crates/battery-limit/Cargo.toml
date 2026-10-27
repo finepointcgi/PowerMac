@@ -1,0 +1,23 @@
+[package]
+name = "battery-limit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# macOS: IOKit (AppleSmartBattery registry, AppleSMC user client, system
+# power notifications) and CoreFoundation are bound by hand in
+# src/platform/macos_ffi.rs. libc for getpeereid / signals / chown.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power"] }
+
+[[bin]]
+name = "powermac-battery-helper"
+path = "src/bin/powermac-battery-helper.rs"

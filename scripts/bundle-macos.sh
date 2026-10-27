@@ -11,7 +11,10 @@
 set -e
 cd "$(dirname "$0")/.."
 TARGET="${CARGO_TARGET_DIR:-target}"
-BINS="powermac"
+# powermac-battery-helper: the battery charge-limit helper. It is only copied
+# into Contents/MacOS here; it is installed as a root LaunchDaemon solely when
+# the user enables the charge limit (one admin prompt), never by this script.
+BINS="powermac powermac-battery-helper"
 # Helper libraries, shipped in Contents/Frameworks (Notch Shelf Now Playing
 # loads libpm_nowplaying into /usr/bin/perl).
 LIBS="libpm_nowplaying.dylib"
@@ -20,6 +23,7 @@ OUT="$TARGET/release"
 if [ "$UNIVERSAL" = "1" ]; then
   for T in aarch64-apple-darwin x86_64-apple-darwin; do
     cargo build --release --target "$T" -p powermac -p pm-nowplaying
+    cargo build --release --target "$T" -p battery-limit --bin powermac-battery-helper
   done
   mkdir -p "$OUT"
   for B in $BINS; do
@@ -33,6 +37,7 @@ if [ "$UNIVERSAL" = "1" ]; then
   SUFFIX=.universal
 else
   cargo build --release -p powermac -p pm-nowplaying
+  cargo build --release -p battery-limit --bin powermac-battery-helper
   SUFFIX=
 fi
 
@@ -78,6 +83,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
   for L in $LIBS; do
     codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/Frameworks/$L"
   done
+  codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --options runtime --timestamp --entitlements "$ENT" -s "$SIGN_IDENTITY" "$APP"
   codesign --verify --strict --verbose=2 "$APP"
   echo "built $APP (signed with $SIGN_IDENTITY)"
@@ -89,9 +95,11 @@ fi
 # every rebuild).
 IDENTITY="PowerMac Local Signing"
 if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+  codesign --force -s "$IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --deep -s "$IDENTITY" "$APP"
 else
   echo "note: ad-hoc signing; run scripts/create-signing-cert.sh once to keep permissions across rebuilds"
+  codesign --force -s - "$APP/Contents/MacOS/powermac-battery-helper"
   codesign --force --deep -s - "$APP"
 fi
 echo "built $APP — move it to /Applications and open it"
