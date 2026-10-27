@@ -6,12 +6,6 @@ All notable changes to PowerMac are listed here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-
-- **FancyZones**: dragging a window could show no zones, mostly on a second monitor. macOS can report a dragged window's old position to Accessibility until the mouse is released, so FancyZones took the drag for a drag inside the window and gave up. It now follows the window server's position during the drag.
-- **FancyZones**: with layouts per Space on, a layout picked for a monitor in Settings could be overridden by the layout saved earlier for the current Space. Picking one in Settings now applies it on every Space.
-- **FancyZones**: each step of a window drag is logged at debug level (`RUST_LOG=fancyzones=debug`).
-
 ### Added
 
 - **Drag Shelf** (`crates/drag-shelf`, macOS): shake the pointer while dragging files, links, text, images or file promises and a floating shelf opens under it. Items show as a fanned stack of Quick Look thumbnails with a count; drag the stack to take everything or expand it to a grid to pick one. Copy to… / Move to… a folder, Open, Show in Finder, Copy, Share (AirDrop), Remove, Clear, Close; several shelves at once, on every Space and over full-screen apps; emptied shelves close by themselves; shelves with items come back after a restart. Also tray → **New drag shelf** and an optional shortcut. Settings → **Drag Shelf** (Windows & Desktop) with low / medium / high / custom shake sensitivity; `dragShelf` section in `config.json` (older configs load with the defaults). Not supported on Windows yet (reported in the status and on the page).
@@ -28,6 +22,9 @@ All notable changes to PowerMac are listed here. The format follows
 - **Window Switcher**: setting its shortcut to Cmd+Tab now switches between every window, not apps. Before, macOS kept Cmd+Tab unless **Replace Cmd+Tab** was also on. Setting the front app's windows shortcut to Cmd+` takes that over the same way, and the settings page says when a shortcut replaces the system one.
 - **Window Switcher**: PowerMac's own Settings window is listed like any other window.
 - **Window Switcher**: when a password field turns on secure input (which hides the keyboard from PowerMac, so Cmd+Tab goes back to the macOS app switcher), the log now names the app that turned it on.
+- **FancyZones**: dragging a window could show no zones, mostly on a second monitor. macOS can report a dragged window's old position to Accessibility until the mouse is released, so FancyZones took the drag for a drag inside the window and gave up. It now follows the window server's position during the drag.
+- **FancyZones**: with layouts per Space on, a layout picked for a monitor in Settings could be overridden by the layout saved earlier for the current Space. Picking one in Settings now applies it on every Space.
+- **FancyZones**: each step of a window drag is logged at debug level (`RUST_LOG=fancyzones=debug`).
 
 ### Added
 
