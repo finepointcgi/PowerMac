@@ -12,6 +12,8 @@ extern "C" {
     fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
     fn dispatch_get_global_queue(id: isize, flags: usize) -> *const c_void;
+    fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
+    static kCFRunLoopDefaultMode: *const c_void;
 }
 
 type GetInfoFn = unsafe extern "C" fn(queue: *const c_void, block: &Block<dyn Fn(*const c_void)>);
@@ -38,6 +40,11 @@ pub fn run() -> String {
                 (Some(c), Some(f)) => unsafe { std::mem::transmute::<*mut c_void, SendCmdFn>(f)(c, std::ptr::null()) != 0 },
                 _ => false,
             };
+            // The command goes out asynchronously; exiting right away can
+            // drop it (browsers never saw it). Give it time to be delivered.
+            if ok {
+                unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0) };
+            }
             format!("sent {}\n", ok as u8)
         }
         _ => get().unwrap_or_else(|| "none\n".to_string()),
