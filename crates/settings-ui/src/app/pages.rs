@@ -1086,16 +1086,38 @@ impl SettingsApp {
                     |ui| hotkey_edit(ui, rec, Id::unique("ws-trigger"), &mut d.switch_trigger, RecMode::Combo),
                 );
             }
-            if let Err(e) = parse_hk(&d.switch_trigger) {
-                error_label(ui, &e);
-                ui.add_space(8.0);
+            // A shortcut that *is* the system's takes it over (see
+            // `Config::replaces_system_switcher`); say so.
+            let is_system = |text: &str, sys: window_switcher::Hotkey| {
+                parse_hk(text).is_ok_and(|(win, ctrl, alt, _, code)| {
+                    window_switcher::Hotkey::new(win, ctrl, alt, false, code).same_combo(&sys)
+                })
+            };
+            match parse_hk(&d.switch_trigger) {
+                Err(e) => {
+                    error_label(ui, &e);
+                    ui.add_space(8.0);
+                }
+                Ok(_) if !w.replace_cmd_tab && is_system(&d.switch_trigger, window_switcher::Hotkey::system_switcher()) => {
+                    hint(ui, &format!(
+                        "{system} now switches between every window, not apps. The {} switcher is off while PowerMac runs.",
+                        if mac { "macOS" } else { "Windows" }
+                    ));
+                }
+                Ok(_) => {}
             }
             row(ui, "Switch between the front app's windows", None, |ui| {
                 hotkey_edit(ui, rec, Id::unique("ws-app-trigger"), &mut d.switch_app_trigger, RecMode::Combo)
             });
-            if let Err(e) = parse_hk(&d.switch_app_trigger) {
-                error_label(ui, &e);
-                ui.add_space(8.0);
+            match parse_hk(&d.switch_app_trigger) {
+                Err(e) => {
+                    error_label(ui, &e);
+                    ui.add_space(8.0);
+                }
+                Ok(_) if mac && is_system(&d.switch_app_trigger, window_switcher::Hotkey::system_app_switcher()) => {
+                    hint(ui, "Replaces macOS's Cmd+` (“Move focus to next window”) while PowerMac runs.");
+                }
+                Ok(_) => {}
             }
             if mac && w.replace_cmd_tab {
                 toggle_row(

@@ -645,7 +645,7 @@ fn apply_window_switcher(running: &mut Running, cfg: &window_switcher::Config) {
             Ok(h) => {
                 let p = window_switcher::permissions();
                 log::info!("window switcher: running ({}{})", cfg.trigger,
-                    if cfg.replace_cmd_tab { ", replaces the system switcher" } else { "" });
+                    if cfg.replaces_system_switcher() { ", replaces the system switcher" } else { "" });
                 if !p.accessibility {
                     log::warn!("window switcher: needs Accessibility permission for its shortcut; \
                                 it starts working as soon as it's granted");
