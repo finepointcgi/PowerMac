@@ -6,6 +6,12 @@ All notable changes to PowerMac are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-27
+
+### Fixed
+
+- **Window Switcher**: setting its shortcut to Cmd+Tab now switches between every window, not apps. Before, macOS kept Cmd+Tab unless **Replace Cmd+Tab** was also on. Setting the front app's windows shortcut to Cmd+` takes that over the same way, and the settings page says when a shortcut replaces the system one.
+
 ## [1.1.0] - 2026-10-27
 
 ### Added
