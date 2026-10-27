@@ -12,11 +12,16 @@
 //!   sessions (`ISimpleAudioVolume`).
 //! * **Virtual devices** ([`driver`]) – install, remove and configure the
 //!   PowerMac Audio HAL driver (`crates/pm-audio-driver`, macOS).
+//! * **Per-app routing and the mixer** ([`mixer`]) – send an app to other
+//!   devices (`Config::app_routes`), and a sources → outputs matrix with
+//!   gain/mute/solo, EQ, limiter and meters (`Config::mixer`). macOS 14.4+
+//!   for app sources; Windows routes apps natively, without the mixer.
 //!
 //! macOS backend: `src/macos` (CoreAudio, hand-bound). Windows backend:
 //! `src/windows` (MMDevice API, `IPolicyConfig`, audio sessions).
 
 pub mod driver;
+pub mod mixer;
 pub mod rules;
 mod types;
 
@@ -30,6 +35,8 @@ mod win;
 #[doc(hidden)]
 pub use macos::testing as macos_testing;
 
+pub use mixer::config::*;
+pub use mixer::state::*;
 pub use rules::{Action, RulesEngine, Snapshot};
 pub use types::*;
 
@@ -69,6 +76,25 @@ pub(crate) trait Backend: Send + Sync + 'static {
     /// Human-readable state of the per-app machinery (taps, sessions).
     fn app_diagnostics(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// The mixer engine (taps + aggregate device) works here.
+    fn mixer_supported(&self) -> bool {
+        false
+    }
+    /// Devices with stream layouts and apps with their audio processes.
+    fn mix_inventory(&self) -> Result<mixer::Inventory> {
+        Err(anyhow!("the mixer is not available on this platform"))
+    }
+    /// Create (but don't start) the platform device for a topology.
+    fn mix_open(&self, _topo: &mixer::Topology) -> Result<Box<dyn mixer::MixDevice>> {
+        Err(anyhow!("the mixer is not available on this platform"))
+    }
+    /// Platforms that route apps through the OS instead of the mixer
+    /// (Windows) apply the routes here and return their states; `None` =
+    /// routes go through the mixer.
+    fn apply_native_routes(&self, _routes: &BTreeMap<String, AppRoute>, _enabled: bool) -> Option<Vec<RouteStatus>> {
+        None
     }
 }
 
@@ -162,7 +188,11 @@ struct Shared {
     reported: Mutex<[Option<String>; 3]>,
     reported_devices: Mutex<Option<HashSet<String>>>,
     /// Serialises per-app reconciles from the engine and `Handle` calls.
+    /// Lock order: `apps_lock` → `mixer` → backend internals.
     apps_lock: Mutex<()>,
+    mixer: Mutex<mixer::MixerController>,
+    /// Wakes the engine thread (`Msg::Changed`).
+    wake: Mutex<Option<Sender<Msg>>>,
 }
 
 fn kind_slot(kind: DeviceKind) -> usize {
@@ -254,15 +284,43 @@ impl Shared {
         self.reconcile_apps();
     }
 
+    /// Mixer / routes first (they decide which apps they take over), then
+    /// per-app volume for everything else.
     fn reconcile_apps(&self) {
-        let enabled = {
-            let c = self.cfg.lock().unwrap();
-            c.enabled && c.per_app_volume
-        } && self.backend.per_app_supported();
+        let cfg = self.cfg.lock().unwrap().clone();
+        let enabled = cfg.enabled && cfg.per_app_volume && self.backend.per_app_supported();
         let levels = self.levels.lock().unwrap().clone();
         let _g = self.apps_lock.lock().unwrap();
-        if let Err(e) = self.backend.apply_app_levels(&levels, enabled) {
+        let exclusive = {
+            let mut m = self.mixer.lock().unwrap();
+            let before = m.state();
+            m.reconcile(self.backend.as_ref(), &cfg, &levels);
+            let after = m.state();
+            for e in after.errors.iter().filter(|e| !before.errors.contains(e)) {
+                self.emit(Event::Error { message: e.clone() });
+            }
+            m.exclusive_apps().clone()
+        };
+        let mut own = levels;
+        own.retain(|k, _| !exclusive.contains(k));
+        if let Err(e) = self.backend.apply_app_levels(&own, enabled) {
             log::warn!("audio-control: per-app volume: {e:#}");
+        }
+    }
+
+    fn wake(&self) {
+        if let Some(tx) = self.wake.lock().unwrap().as_ref() {
+            let _ = tx.send(Msg::Changed);
+        }
+    }
+
+    /// Push mixer/route parameter changes without a rebuild when possible.
+    fn mixer_changed(&self) {
+        let cfg = self.cfg.lock().unwrap().clone();
+        let levels = self.levels.lock().unwrap().clone();
+        let handled = self.mixer.lock().unwrap().update_values(&cfg, &levels);
+        if !handled {
+            self.wake();
         }
     }
 }
@@ -273,7 +331,10 @@ pub struct AudioControl;
 impl AudioControl {
     /// Start watching devices and applying the rules on a background thread.
     pub fn start(cfg: Config) -> Result<Handle> {
-        let backend = platform_backend()?;
+        Self::start_with_backend(cfg, platform_backend()?)
+    }
+
+    pub(crate) fn start_with_backend(cfg: Config, backend: Arc<dyn Backend>) -> Result<Handle> {
         let shared = Arc::new(Shared {
             backend: backend.clone(),
             rules: Mutex::new(RulesEngine::new(cfg.clone())),
@@ -284,8 +345,11 @@ impl AudioControl {
             reported: Mutex::new([None, None, None]),
             reported_devices: Mutex::new(None),
             apps_lock: Mutex::new(()),
+            mixer: Mutex::new(mixer::MixerController::default()),
+            wake: Mutex::new(None),
         });
         let (tx, rx) = mpsc::channel::<Msg>();
+        *shared.wake.lock().unwrap() = Some(tx.clone());
         let notify_tx = Mutex::new(tx.clone());
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             if let Ok(t) = notify_tx.lock() {
@@ -330,7 +394,11 @@ fn engine_loop(shared: Arc<Shared>, rx: Receiver<Msg>, watch: Box<dyn Send>) {
         shared.process();
     }
     drop(watch);
+    *shared.wake.lock().unwrap() = None;
     let _g = shared.apps_lock.lock().unwrap();
+    shared.mixer.lock().unwrap().stop();
+    // Windows: forget the per-app endpoints we set.
+    let _ = shared.backend.apply_native_routes(&BTreeMap::new(), false);
     if let Err(e) = shared.backend.apply_app_levels(&BTreeMap::new(), false) {
         log::warn!("audio-control: removing per-app taps: {e:#}");
     }
@@ -363,6 +431,8 @@ impl Handle {
         }
     }
 
+    /// The current config, including per-app levels, routes and the mixer
+    /// changed through this handle.
     pub fn config(&self) -> Config {
         let mut c = self.shared.cfg.lock().unwrap().clone();
         c.app_volumes = self.app_levels();
@@ -452,6 +522,11 @@ impl Handle {
             l
         };
         self.shared.emit(Event::AppLevelChanged { bundle_id: bundle_id.to_string(), volume: level.volume, muted: level.muted });
+        // Apps the mixer has taken over get their level there.
+        self.shared.mixer_changed();
+        if self.shared.mixer.lock().unwrap().exclusive_apps().contains(bundle_id) {
+            return Ok(());
+        }
         let enabled = {
             let c = self.shared.cfg.lock().unwrap();
             c.enabled && c.per_app_volume
@@ -462,8 +537,10 @@ impl Handle {
         if !self.shared.backend.per_app_supported() {
             return Err(anyhow!("per-app volume needs macOS 14.4 or later (level saved)"));
         }
-        let levels = self.shared.levels.lock().unwrap().clone();
+        let mut levels = self.shared.levels.lock().unwrap().clone();
         let _g = self.shared.apps_lock.lock().unwrap();
+        let exclusive = self.shared.mixer.lock().unwrap().exclusive_apps().clone();
+        levels.retain(|k, _| !exclusive.contains(k));
         self.shared.backend.apply_app_levels(&levels, true)
     }
 
@@ -477,10 +554,76 @@ impl Handle {
         self.change_level(bundle_id, |l| l.muted = mute)
     }
 
-    /// One line per active per-app tap / session override (for logs and the
-    /// probe example).
+    /// One line per active per-app tap / session override, plus the mixer
+    /// (for logs and the probe example).
     pub fn per_app_diagnostics(&self) -> Vec<String> {
-        self.shared.backend.app_diagnostics()
+        let mut v = self.shared.backend.app_diagnostics();
+        v.extend(self.shared.mixer.lock().unwrap().diagnostics());
+        v
+    }
+
+    // ---- routing and mixer ------------------------------------------------
+
+    /// The per-app routes (persist into `Config::app_routes`).
+    pub fn routes(&self) -> BTreeMap<String, AppRoute> {
+        self.shared.cfg.lock().unwrap().app_routes.clone()
+    }
+
+    /// Add, replace (`Some`) or remove (`None`) the route of one app. Takes
+    /// effect at once (or when the app / device appears) and emits
+    /// [`Event::RoutesChanged`]; see [`mixer_state`](Self::mixer_state) for
+    /// whether it is running.
+    pub fn set_route(&self, bundle_id: &str, route: Option<AppRoute>) -> Result<()> {
+        if bundle_id.trim().is_empty() {
+            return Err(anyhow!("a route needs an app"));
+        }
+        {
+            let mut c = self.shared.cfg.lock().unwrap();
+            match route {
+                Some(r) => {
+                    c.app_routes.insert(bundle_id.to_string(), r);
+                }
+                None => {
+                    c.app_routes.remove(bundle_id);
+                }
+            }
+        }
+        self.shared.emit(Event::RoutesChanged);
+        self.shared.wake();
+        Ok(())
+    }
+
+    /// The mixer config (persist into `Config::mixer`).
+    pub fn mixer(&self) -> Mixer {
+        self.shared.cfg.lock().unwrap().mixer.clone()
+    }
+
+    /// Replace the mixer config. Gain, mute, solo, send, EQ and limiter
+    /// changes apply immediately without interrupting audio; adding or
+    /// removing sources/outputs rebuilds the mixer device (a short gap).
+    /// Emits [`Event::MixerChanged`].
+    pub fn set_mixer(&self, m: Mixer) -> Result<()> {
+        if m.sources.iter().any(|s| s.id.starts_with(mixer::plan::ROUTE_SOURCE_PREFIX))
+            || m.outputs.iter().any(|o| o.id.starts_with(mixer::plan::ROUTE_OUTPUT_PREFIX))
+        {
+            return Err(anyhow!("ids starting with \"route:\" / \"route-out:\" are reserved"));
+        }
+        self.shared.cfg.lock().unwrap().mixer = m;
+        self.shared.emit(Event::MixerChanged);
+        self.shared.mixer_changed();
+        Ok(())
+    }
+
+    /// Strip, route and engine status for the UI.
+    pub fn mixer_state(&self) -> MixerState {
+        self.shared.mixer.lock().unwrap().state()
+    }
+
+    /// Current meters of every running strip (poll at ~20 Hz,
+    /// [`METER_INTERVAL`]). Route strips have ids `route:<bundle id>` and
+    /// `route-out:<device uid>`. Empty while the mixer isn't running.
+    pub fn meters(&self) -> Meters {
+        self.shared.mixer.lock().unwrap().meters()
     }
 
     /// New receiver for [`Event`]s.

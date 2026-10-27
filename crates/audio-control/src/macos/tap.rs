@@ -38,8 +38,9 @@ use std::ffi::{c_void, CStr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
+pub(crate) const CA_TAP_UNMUTED: isize = 0;
 const CA_TAP_MUTED: isize = 1;
-const CA_TAP_MUTED_WHEN_TAPPED: isize = 2;
+pub(crate) const CA_TAP_MUTED_WHEN_TAPPED: isize = 2;
 
 type CreateTapFn = unsafe extern "C" fn(*mut c_void, *mut AudioObjectID) -> OSStatus;
 type DestroyTapFn = unsafe extern "C" fn(AudioObjectID) -> OSStatus;
@@ -303,7 +304,7 @@ fn resolve_app(pid: i32, coreaudio_bundle_id: &str) -> (String, String) {
     (id, exe)
 }
 
-fn create_tap(objs: &[AudioObjectID], mute_behavior: isize) -> Result<AudioObjectID> {
+pub(crate) fn create_tap(objs: &[AudioObjectID], mute_behavior: isize) -> Result<AudioObjectID> {
     let (create, _) = tap_fns().ok_or_else(|| anyhow!("process taps need macOS 14.4"))?;
     let cls = AnyClass::get(c"CATapDescription").ok_or_else(|| anyhow!("CATapDescription is unavailable"))?;
     autoreleasepool(|_| unsafe {
@@ -327,7 +328,7 @@ fn create_tap(objs: &[AudioObjectID], mute_behavior: isize) -> Result<AudioObjec
     })
 }
 
-fn destroy_tap_object(tap_id: AudioObjectID) {
+pub(crate) fn destroy_tap_object(tap_id: AudioObjectID) {
     if let Some((_, destroy)) = tap_fns() {
         let st = unsafe { destroy(tap_id) };
         if st != 0 {
@@ -336,7 +337,7 @@ fn destroy_tap_object(tap_id: AudioObjectID) {
     }
 }
 
-fn cfs(s: &str) -> CFType {
+pub(crate) fn cfs(s: &str) -> CFType {
     CFString::new(s).as_CFType()
 }
 
@@ -362,7 +363,7 @@ fn create_aggregate(output_uid: &str, tap_uid: &str) -> Result<AudioObjectID> {
     Ok(id)
 }
 
-fn is_float32(dev: AudioObjectID, scope: u32) -> bool {
+pub(crate) fn is_float32(dev: AudioObjectID, scope: u32) -> bool {
     let streams = props::get_ids(dev, AudioObjectPropertyAddress::new(kAudioDevicePropertyStreams, scope, kAudioObjectPropertyElementMain))
         .unwrap_or_default();
     !streams.is_empty()

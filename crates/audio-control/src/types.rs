@@ -231,6 +231,11 @@ pub struct Config {
     pub per_app_volume: bool,
     /// Per-app levels keyed by bundle id (macOS) / exe name (Windows).
     pub app_volumes: BTreeMap<String, AppLevel>,
+    /// Per-app output routing keyed by bundle id (macOS) / exe name
+    /// (Windows). Empty by default.
+    pub app_routes: BTreeMap<String, crate::mixer::AppRoute>,
+    /// The mixer matrix (off by default).
+    pub mixer: crate::mixer::Mixer,
 }
 
 impl Default for Config {
@@ -242,6 +247,8 @@ impl Default for Config {
             keep_builtin_mic_with_bluetooth: false,
             per_app_volume: false,
             app_volumes: BTreeMap::new(),
+            app_routes: BTreeMap::new(),
+            mixer: crate::mixer::Mixer::default(),
         }
     }
 }
@@ -296,6 +303,12 @@ pub enum Event {
         volume: f32,
         muted: bool,
     },
+    /// The routes changed through the handle (persist `Handle::routes()`
+    /// into `Config::app_routes`).
+    RoutesChanged,
+    /// The mixer changed through the handle (persist `Handle::mixer()` into
+    /// `Config::mixer`).
+    MixerChanged,
     /// Something went wrong in the background (e.g. a tap failed).
     Error { message: String },
 }

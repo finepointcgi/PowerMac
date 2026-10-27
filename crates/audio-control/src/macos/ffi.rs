@@ -49,6 +49,11 @@ pub const kAudioProcessPropertyBundleID: u32 = fourcc(b"pbid");
 pub const kAudioProcessPropertyIsRunning: u32 = fourcc(b"pir?");
 pub const kAudioProcessPropertyIsRunningOutput: u32 = fourcc(b"piro");
 
+pub const kAudioAggregateDevicePropertyActiveSubDeviceList: u32 = fourcc(b"agrp");
+/// AudioObjectIDs of the active sub-taps of an aggregate (macOS 14.2+).
+pub const kAudioAggregateDevicePropertySubTapList: u32 = fourcc(b"atap");
+pub const kAudioDevicePropertyIOProcStreamUsage: u32 = fourcc(b"suse");
+
 pub const kAudioTapPropertyUID: u32 = fourcc(b"tuid");
 pub const kAudioTapPropertyFormat: u32 = fourcc(b"tfmt");
 

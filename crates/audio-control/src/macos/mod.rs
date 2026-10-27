@@ -2,6 +2,7 @@
 //! (macOS 14.4+) per-app volume through process taps.
 
 pub(crate) mod ffi;
+pub(crate) mod mixer;
 pub(crate) mod props;
 pub(crate) mod tap;
 pub(crate) mod tcc;
@@ -360,6 +361,18 @@ impl Backend for MacBackend {
 
     fn request_capture_permission(&self) -> Result<bool> {
         tcc::request()
+    }
+
+    fn mixer_supported(&self) -> bool {
+        true
+    }
+
+    fn mix_inventory(&self) -> Result<crate::mixer::Inventory> {
+        Ok(mixer::inventory(&mut self.taps.lock().unwrap()))
+    }
+
+    fn mix_open(&self, topo: &crate::mixer::Topology) -> Result<Box<dyn crate::mixer::MixDevice>> {
+        Ok(Box::new(mixer::MacMixDevice::open(topo)?))
     }
 }
 

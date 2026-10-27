@@ -133,3 +133,61 @@ pub fn default_uid(kind: crate::DeviceKind) -> Option<String> {
 pub fn os_version() -> (u32, u32) {
     super::tap::os_version()
 }
+
+/// Read-only mixer inventory (devices with stream layouts, apps with audio
+/// processes). Creates nothing.
+pub fn mixer_inventory() -> crate::mixer::Inventory {
+    super::mixer::inventory(&mut super::tap::TapManager::default())
+}
+
+/// Result of [`silent_mixer_run`].
+#[derive(Debug)]
+pub struct SilentRun {
+    pub realized: crate::mixer::Realized,
+    pub layout: crate::mixer::graph::Layout,
+    pub callbacks: u64,
+    pub max_frames: u32,
+    pub layout_mismatches: u64,
+    pub diagnostics: Vec<String>,
+}
+
+/// Run the real mixer device path (private aggregate + IOProc + graph) on
+/// one **output-only** device for `dur`, writing silence (no sources, no
+/// taps, no inputs: no permission is needed and nothing is heard). Device
+/// settings are not touched; the aggregate is destroyed before returning.
+pub fn silent_mixer_run(output_uid: &str, dur: Duration) -> Result<SilentRun> {
+    use crate::mixer::graph::Graph;
+    use crate::mixer::params::{ParamValues, Params, StripValues};
+    use crate::mixer::plan::{resolve_layout, SubDevice, TopoOutput, Topology};
+    use crate::mixer::MixDevice;
+    let id = id_for_uid(output_uid).ok_or_else(|| anyhow!("no device {output_uid}"))?;
+    if super::mixer::stream_channels(id, kAudioObjectPropertyScopeInput).iter().sum::<u32>() > 0 {
+        return Err(anyhow!("{output_uid} has inputs; the silent run only uses output-only devices"));
+    }
+    let rate = super::props::get::<f64>(id, AudioObjectPropertyAddress::global(kAudioDevicePropertyNominalSampleRate))?;
+    let topo = Topology {
+        clock: output_uid.to_string(),
+        sample_rate: rate,
+        subdevices: vec![SubDevice { uid: output_uid.to_string(), input: false, output: true }],
+        taps: Vec::new(),
+        sources: Vec::new(),
+        outputs: vec![TopoOutput { key: "probe".into(), uid: output_uid.to_string(), first_channel: 0 }],
+    };
+    let mut dev = super::mixer::MacMixDevice::open(&topo)?;
+    let realized = dev.realized().clone();
+    let layout = resolve_layout(&topo, &realized)?;
+    let params = std::sync::Arc::new(Params::new(0, 1));
+    params.store(&ParamValues { sources: vec![], outputs: vec![StripValues::default()], sends: vec![] }, None);
+    dev.start(Box::new(Graph::new(params.clone(), layout.clone(), realized.sample_rate)))?;
+    std::thread::sleep(dur);
+    let diagnostics = dev.diagnostics();
+    drop(dev);
+    Ok(SilentRun {
+        realized,
+        layout,
+        callbacks: params.stats.callbacks.load(Ordering::Relaxed),
+        max_frames: params.stats.max_frames.load(Ordering::Relaxed),
+        layout_mismatches: params.stats.layout_mismatches.load(Ordering::Relaxed),
+        diagnostics,
+    })
+}
