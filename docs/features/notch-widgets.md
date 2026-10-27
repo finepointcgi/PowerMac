@@ -64,6 +64,16 @@ Calendar, Reminders and Camera are asked for the first time the widget is shown 
 
 Data-driven widgets refresh on a schedule (their *Refresh every* setting, with back-off after errors). Refreshing pauses while the notch has been closed for a while, unless the widget feeds a live activity.
 
+## Now Playing widget
+
+Shows what any app is playing — Music, Spotify, podcasts and web players in Brave, Chrome, Safari and other browsers — with artwork, a progress bar and play/pause, previous and next buttons.
+
+Since macOS 15.4 only Apple's own programs may read or control the system's Now Playing information. PowerMac therefore ships a small helper library (`Contents/Frameworks/libpm_nowplaying.dylib`) that it runs inside the built-in `/usr/bin/perl`; the helper reads the current item and sends the button presses, waiting until macOS has delivered each command. When the helper can't be used, the widget falls back to:
+
+1. MediaRemote read through `osascript` (no artwork);
+2. AppleScript for Music and Spotify, with *Read Music and Spotify directly* (macOS asks once per app for Automation access);
+3. the media keys, which control whatever macOS considers the current player.
+
 ## Script widget
 
 The command runs with the chosen interpreter (`zsh` / `bash` login shells by default, `sh`, Python 3, Node.js, Ruby, Perl, AppleScript or a custom path called as `<path> -c <command>`), in the working folder, stopped after the time limit. Only commands you enter in the settings are ever run. The environment has `POWERMAC=1` and `POWERMAC_WIDGET_ID`.

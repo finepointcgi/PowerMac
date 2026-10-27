@@ -6,6 +6,8 @@ All notable changes to PowerMac are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-27
+
 ### Fixed
 
 - **Notch Shelf**: the Now Playing play/pause, next and previous buttons work with browsers (Brave, Chrome, Safari…) again. The helper that sends them exited before macOS delivered the command; it now waits for it.

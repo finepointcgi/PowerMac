@@ -221,7 +221,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "audio-control"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -246,7 +246,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "awake"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "battery-limit"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -548,7 +548,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "clipboard-history"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "eframe",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "color-picker"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "display-control"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "display-scaling"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "display-control",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "dock-previews"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -993,7 +993,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "drag-shelf"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "fancyzones"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "file-tools"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "gestures"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -2266,7 +2266,7 @@ dependencies = [
 
 [[package]]
 name = "keyboard-manager"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2477,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "menubar-manager"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "mouse-tuning"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "keyboard-manager",
@@ -2525,7 +2525,7 @@ dependencies = [
 
 [[package]]
 name = "mouse-utils"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "mwb"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "aes",
  "anyhow",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "net-monitor"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2691,7 +2691,7 @@ checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "notch-shelf"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3280,7 +3280,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "pm-audio-driver"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "core-foundation",
  "core-foundation-sys",
@@ -3290,7 +3290,7 @@ dependencies = [
 
 [[package]]
 name = "pm-config"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "audio-control",
@@ -3322,7 +3322,7 @@ dependencies = [
 
 [[package]]
 name = "pm-hook"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "log",
  "windows-sys 0.59.0",
@@ -3330,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "pm-input"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3340,7 +3340,7 @@ dependencies = [
 
 [[package]]
 name = "pm-nowplaying"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "pm-shelf-core"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3362,14 +3362,14 @@ dependencies = [
 
 [[package]]
 name = "pm-ui"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "eframe",
 ]
 
 [[package]]
 name = "pm-update"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "log",
  "serde",
@@ -3444,7 +3444,7 @@ dependencies = [
 
 [[package]]
 name = "powermac"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3847,7 +3847,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scroll-reverser"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "settings-ui"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "audio-control",
@@ -4217,7 +4217,7 @@ dependencies = [
 
 [[package]]
 name = "text-expander"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4237,7 +4237,7 @@ dependencies = [
 
 [[package]]
 name = "text-extractor"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5021,7 +5021,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "window-switcher"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -5361,7 +5361,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "workspaces"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "eframe",
