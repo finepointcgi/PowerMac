@@ -1,0 +1,15 @@
+[package]
+name = "pm-nowplaying"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Loaded into /usr/bin/perl by notch-shelf (see src/lib.rs); shipped in
+# PowerMac.app/Contents/Frameworks.
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"

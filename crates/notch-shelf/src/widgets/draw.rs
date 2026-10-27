@@ -359,6 +359,7 @@ fn now_playing(d: &mut CardDraw, c: &Card, w: f64, h: f64, ctx: &Ctx) {
         }
         None => match ctx.data.now_playing.as_ref().map(|n| n.source) {
             Some(MediaSource::MediaKeys) | None if !use_applescript => ("Media Controls".to_string(), "Controls any player".to_string()),
+            Some(MediaSource::System) => ("Not Playing".to_string(), "Play something in any app".to_string()),
             _ => ("Not Playing".to_string(), "Music or Spotify".to_string()),
         },
     };

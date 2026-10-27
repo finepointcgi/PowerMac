@@ -2,16 +2,18 @@
 //! 1. MediaRemote (private framework; since macOS 15.4 it only answers
 //!    entitled processes, so it usually returns nothing for third-party
 //!    apps — used whenever it does return data);
-//! 2. the same framework read from JavaScript for Automation: `osascript`
-//!    is an Apple process, so MediaRemote still answers it (any player —
-//!    browsers too — and no Automation prompt; no artwork: the info it
-//!    hands out leaves the image data out);
-//! 3. AppleScript for Music and Spotify (opt-in, only when the app is
+//! 2. the `pm-nowplaying` helper library (shipped in the app's Frameworks)
+//!    loaded into `/usr/bin/perl`: an Apple process, so MediaRemote answers
+//!    it — any player, browsers too, with artwork, and it takes commands;
+//! 3. MediaRemote read from JavaScript for Automation (`osascript`, also an
+//!    Apple process) when the helper is missing: no artwork;
+//! 4. AppleScript for Music and Spotify (opt-in, only when the app is
 //!    already running; macOS asks once per app for Automation access);
-//! 4. no metadata: the controls post media keys.
+//! 5. no metadata: the controls post media keys.
 
 use std::ffi::{c_char, c_void};
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::{Command as Proc, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -122,6 +124,72 @@ fn query_media_remote_inner() -> Option<NowPlaying> {
     rx.recv_timeout(Duration::from_millis(1200)).ok().flatten()
 }
 
+/// Loads the helper (argv[0]) and calls its entry point as an XSUB.
+const HELPER_LOADER: &str = r#"use DynaLoader; my $l = DynaLoader::dl_load_file($ARGV[0], 0) or die DynaLoader::dl_error(); my $s = DynaLoader::dl_find_symbol($l, "pm_np_main") or die DynaLoader::dl_error(); DynaLoader::dl_install_xsub("main::pm_np", $s); main::pm_np();"#;
+const HELPER_NAME: &str = "libpm_nowplaying.dylib";
+const PERL: &str = "/usr/bin/perl";
+
+/// The helper library: `Contents/Frameworks` of the app bundle, or next to
+/// the executable (cargo builds).
+fn helper_path() -> Option<&'static PathBuf> {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        let found = [dir.join("../Frameworks").join(HELPER_NAME), dir.join(HELPER_NAME)].into_iter().find_map(|p| p.canonicalize().ok().filter(|p| p.is_file()));
+        match &found {
+            Some(p) if std::path::Path::new(PERL).is_file() => log::info!("notch-shelf: now playing helper {}", p.display()),
+            _ => log::info!("notch-shelf: no now playing helper (or no {PERL})"),
+        }
+        found.filter(|_| std::path::Path::new(PERL).is_file())
+    })
+    .as_ref()
+}
+
+fn run_helper(env: &[(&str, &str)]) -> Option<String> {
+    let mut cmd = Proc::new(PERL);
+    cmd.arg("-e").arg(HELPER_LOADER).arg(helper_path()?);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    run_with_timeout(cmd, Duration::from_secs(4))
+}
+
+/// What the helper reported.
+pub enum HelperAnswer {
+    /// Nothing is playing.
+    Nothing,
+    /// The current item; `art_hash` identifies its artwork, and `artwork`
+    /// is only sent when that differs from the hash passed in.
+    Item { np: NowPlaying, art_hash: String, artwork: Option<Vec<u8>> },
+}
+
+/// Ask the helper; `None` when it isn't installed or failed. `known_art`
+/// is the hash of the artwork already held.
+pub fn query_helper(now: f64, known_art: &str) -> Option<HelperAnswer> {
+    parse_helper_output(&run_helper(&[("PM_NP_MODE", "get"), ("PM_NP_ART", known_art)])?, now)
+}
+
+fn parse_helper_output(out: &str, now: f64) -> Option<HelperAnswer> {
+    let line = out.trim_end_matches(['\n', '\r']);
+    if line == "none" {
+        return Some(HelperAnswer::Nothing);
+    }
+    let f: Vec<&str> = line.strip_prefix("np\t")?.split('\t').collect();
+    if f.len() < 10 {
+        return None;
+    }
+    let Some(np) = parse_np_fields(&f[..8], now) else { return Some(HelperAnswer::Nothing) };
+    let artwork = Some(f[9].trim()).filter(|b| !b.is_empty()).and_then(crate::widgets::xbar::base64_decode);
+    Some(HelperAnswer::Item { np, art_hash: f[8].trim().to_string(), artwork })
+}
+
+/// Send a MediaRemote command through the helper; false if it couldn't.
+fn helper_send(cmd: Command) -> bool {
+    run_helper(&[("PM_NP_MODE", "send"), ("PM_NP_CMD", &cmd.mr_command().to_string())]).is_some_and(|o| o.trim() == "sent 1")
+}
+
 /// JXA: the current item as one tab-separated line — rate, title, artist,
 /// album, duration, elapsed, sample time (unix), player name. Empty when
 /// nothing is playing.
@@ -153,6 +221,12 @@ pub fn query_jxa(now: f64) -> Option<NowPlaying> {
 
 fn parse_jxa_output(out: &str, now: f64) -> Option<NowPlaying> {
     let f: Vec<&str> = out.trim_end_matches(['\n', '\r']).split('\t').collect();
+    parse_np_fields(&f, now)
+}
+
+/// rate, title, artist, album, duration, elapsed, sampled-at, player (the
+/// JXA script's and the helper's shared fields).
+fn parse_np_fields(f: &[&str], now: f64) -> Option<NowPlaying> {
     if f.len() < 8 {
         return None;
     }
@@ -179,7 +253,14 @@ pub fn osascript(script: &str, timeout: Duration) -> Option<String> {
 }
 
 fn run_osascript(args: &[&str], timeout: Duration) -> Option<String> {
-    let mut child = Proc::new("/usr/bin/osascript").args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut cmd = Proc::new("/usr/bin/osascript");
+    cmd.args(args);
+    run_with_timeout(cmd, timeout)
+}
+
+/// Run `cmd`, killing it after `timeout`; stdout on success.
+fn run_with_timeout(mut cmd: Proc, timeout: Duration) -> Option<String> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -243,8 +324,13 @@ pub fn send(cmd: Command, source: MediaSource) {
             }
         }
         MediaSource::System => {
-            // Data read through osascript: MediaRemote ignores our commands.
-            let ok = MR_ANSWERS.load(Ordering::Relaxed) && media_remote().and_then(|mr| mr.send).is_some_and(|f| unsafe { f(cmd.mr_command(), std::ptr::null()) } != 0);
+            // MediaRemote ignores our own commands unless it answers us;
+            // the helper's are taken.
+            let ok = if MR_ANSWERS.load(Ordering::Relaxed) {
+                media_remote().and_then(|mr| mr.send).is_some_and(|f| unsafe { f(cmd.mr_command(), std::ptr::null()) } != 0)
+            } else {
+                helper_send(cmd)
+            };
             if !ok {
                 super::ffi::dispatch_main(move || rt::post_media_key(cmd.nx_key()));
             }
@@ -269,6 +355,19 @@ mod tests {
         // Read-only; prints whatever is playing.
         assert!(osascript_js(JXA_SCRIPT, Duration::from_secs(5)).is_some());
         let _ = query_jxa(0.0);
+    }
+
+    #[test]
+    fn parses_helper_output() {
+        let HelperAnswer::Item { np, art_hash, artwork } = parse_helper_output("np\t1\tParanormal\tPurrple Cat\tEndless Forest\t178.2\t12\t1793060594.7\tBrave Browser\t51d2\taGVsbG8=\n", 5.0).unwrap() else { panic!() };
+        assert!(np.playing && np.source == MediaSource::System);
+        assert_eq!((np.title.as_str(), np.app.as_str(), np.duration, np.sampled_at), ("Paranormal", "Brave Browser", Some(178.2), 1793060594.7));
+        assert_eq!((art_hash.as_str(), artwork.as_deref()), ("51d2", Some(&b"hello"[..])));
+        let HelperAnswer::Item { artwork, .. } = parse_helper_output("np\t0\tT\t\t\t\t\t\t\t51d2\t\n", 5.0).unwrap() else { panic!() };
+        assert!(artwork.is_none());
+        assert!(matches!(parse_helper_output("none\n", 5.0), Some(HelperAnswer::Nothing)));
+        assert!(parse_helper_output("error\n", 5.0).is_none());
+        assert!(parse_helper_output("", 5.0).is_none());
     }
 
     #[test]

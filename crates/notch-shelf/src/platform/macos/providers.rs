@@ -110,6 +110,7 @@ fn media_loop(s: Arc<Shared>) {
     let mut last_poll = 0.0;
     let mut art_for: Option<NowPlaying> = None;
     let mut art: Option<Arc<Vec<u8>>> = None;
+    let mut helper_art = HelperArt::default();
     while let Some(cfg) = config(&s) {
         let cmds = std::mem::take(&mut s.reqs().media);
         if demo(&s) {
@@ -137,7 +138,7 @@ fn media_loop(s: Arc<Shared>) {
         let now = unix_now();
         if sent || now - last_poll >= every {
             last_poll = now;
-            let np = autoreleasepool(|_| sample_media(&cfg, now, &mut art_for, &mut art));
+            let np = autoreleasepool(|_| sample_media(&cfg, now, &mut art_for, &mut art, &mut helper_art));
             if s.data().now_playing != Some(np.clone()) {
                 s.set_data(false, |d| d.now_playing = Some(np));
             }
@@ -146,9 +147,29 @@ fn media_loop(s: Arc<Shared>) {
     }
 }
 
-fn sample_media(cfg: &Config, now: f64, art_for: &mut Option<NowPlaying>, art: &mut Option<Arc<Vec<u8>>>) -> NowPlaying {
+/// Artwork last sent by the Now Playing helper, by its hash.
+#[derive(Default)]
+struct HelperArt {
+    hash: String,
+    bytes: Option<Arc<Vec<u8>>>,
+}
+
+fn sample_media(cfg: &Config, now: f64, art_for: &mut Option<NowPlaying>, art: &mut Option<Arc<Vec<u8>>>, helper_art: &mut HelperArt) -> NowPlaying {
     if let Some(np) = media::query_media_remote() {
         return np;
+    }
+    match media::query_helper(now, &helper_art.hash) {
+        Some(media::HelperAnswer::Item { mut np, art_hash, artwork }) => {
+            // New artwork (or none); keep the old hash if the bytes didn't
+            // decode so they're sent again.
+            if art_hash != helper_art.hash && (artwork.is_some() || art_hash.is_empty()) {
+                *helper_art = HelperArt { hash: art_hash, bytes: artwork.map(Arc::new) };
+            }
+            np.artwork = helper_art.bytes.clone();
+            return np;
+        }
+        Some(media::HelperAnswer::Nothing) => return NowPlaying { source: MediaSource::System, sampled_at: now, ..Default::default() },
+        None => {}
     }
     if let Some(np) = media::query_jxa(now) {
         return np;

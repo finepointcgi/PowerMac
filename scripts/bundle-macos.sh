@@ -12,28 +12,38 @@ set -e
 cd "$(dirname "$0")/.."
 TARGET="${CARGO_TARGET_DIR:-target}"
 BINS="powermac"
+# Helper libraries, shipped in Contents/Frameworks (Notch Shelf Now Playing
+# loads libpm_nowplaying into /usr/bin/perl).
+LIBS="libpm_nowplaying.dylib"
 OUT="$TARGET/release"
 
 if [ "$UNIVERSAL" = "1" ]; then
   for T in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo build --release --target "$T" -p powermac
+    cargo build --release --target "$T" -p powermac -p pm-nowplaying
   done
   mkdir -p "$OUT"
   for B in $BINS; do
     lipo -create -output "$OUT/$B.universal" \
       "$TARGET/aarch64-apple-darwin/release/$B" "$TARGET/x86_64-apple-darwin/release/$B"
   done
+  for L in $LIBS; do
+    lipo -create -output "$OUT/$L.universal" \
+      "$TARGET/aarch64-apple-darwin/release/$L" "$TARGET/x86_64-apple-darwin/release/$L"
+  done
   SUFFIX=.universal
 else
-  cargo build --release -p powermac
+  cargo build --release -p powermac -p pm-nowplaying
   SUFFIX=
 fi
 
 APP="$OUT/PowerMac.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
 for B in $BINS; do
   cp "$OUT/$B$SUFFIX" "$APP/Contents/MacOS/$B"
+done
+for L in $LIBS; do
+  cp "$OUT/$L$SUFFIX" "$APP/Contents/Frameworks/$L"
 done
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -65,6 +75,9 @@ PLIST
 if [ -n "$SIGN_IDENTITY" ]; then
   # Distribution: Developer ID, hardened runtime, secure timestamp.
   ENT=scripts/PowerMac.entitlements
+  for L in $LIBS; do
+    codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/Frameworks/$L"
+  done
   codesign --force --options runtime --timestamp --entitlements "$ENT" -s "$SIGN_IDENTITY" "$APP"
   codesign --verify --strict --verbose=2 "$APP"
   echo "built $APP (signed with $SIGN_IDENTITY)"
