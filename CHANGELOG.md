@@ -6,7 +6,15 @@ All notable changes to PowerMac are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-27
+
 ### Added
+
+- **Shared input hook** (`pm-hook`): every module now subscribes to one keyboard/mouse hook per platform instead of installing its own, in a fixed priority order. About 4–5× less CPU spent in input handling and roughly half the input latency; the hook re-enables itself if macOS disables it.
+- **Mouse Without Borders pairing with Windows**: the Mac now answers Windows LLMNR name queries, so PowerToys' **Connect** with the Mac's name (e.g. `MacBook-Pro`) resolves. Fallback: add `MACBOOK-PRO <mac-ip>` under PowerToys → Mouse Without Borders → Advanced → IP address mapping. Connecting with a bare IP doesn't work in PowerToys (it does a reverse lookup first). A machine that connects in is remembered and dialled back. `powermac mwb doctor` checks VPN routes, the firewall, the key and recent attempts, and prints the PowerShell steps for the PC.
+- **PowerMac Audio** virtual device (Core Audio HAL driver, installed only from Settings with one admin prompt), per-app routing and a mixer with EQ, limiter and meters.
+- **Network monitor**: `powermac net list|watch|audit|rules …` plus the Network page; rules are modelled and audited, not enforced (needs Apple's Network Extension entitlement).
+
 
 - **Sound → App routing**: send an app to other output devices or PowerMac virtual devices (only there, or as well as its normal output, with extra gain), with a live status per route. Saved in `audio.appRoutes`.
 - **Mixer** page (Displays & Power): app, microphone and loopback sources and device outputs as channel strips with faders, mute/solo and live 20 Hz meters (`audio-watch.json` / `audio-meters.json`, only while the page is open), a send matrix, per-strip parametric EQ with a draggable response curve and a look-ahead limiter, strip states with sample-rate guidance (**Open Audio MIDI Setup**) and the System Audio Recording / Microphone rows. Saved in `audio.mixer`; live edits go through `AudioRequest::SetMixer`.
