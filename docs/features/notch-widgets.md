@@ -55,7 +55,7 @@ Cards are all the same height. A **small** card is one unit wide (136 pt), **med
 | Web / JSON | S M L | values picked from a JSON API with a template | network |
 | Shortcuts | S M L | buttons that run Apple Shortcuts, optionally with their text output | the shortcuts may ask for their own permissions |
 | Launcher | S M L | a grid of apps, files, folders, links and commands | — |
-| Bluetooth Batteries | S M L | AirPods (left / right / case), Magic Mouse / Keyboard / Trackpad and other devices | — |
+| Bluetooth Batteries | S M L | every connected device: AirPods (left / right / case), Magic Mouse / Keyboard / Trackpad and others with their battery; devices that don't report one (many headphones) show "Connected" | — |
 | Sound | M L | output device switcher, volume, mute (PowerMac's audio control) | — |
 | Reminders | M L | incomplete reminders (`lists`, `show`); tick one to complete it | Reminders access |
 | World Clocks | S M L | times elsewhere (`clocks: [{zone, label}]`, `style` digital / analog, `hours`, `seconds`) | — |

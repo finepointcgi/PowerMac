@@ -25,7 +25,7 @@ Crate: `crates/notch-shelf` · Settings page: **Notch Shelf** · Config: `notchS
 
 ## Home view widgets
 
-The open notch has a Home view next to the shelf: pages of widget cards — Now Playing, Calendar, Weather, Battery, System Stats, Timer, Quick Controls, Note, Mirror, Script, xbar plugins, Web / JSON, Shortcuts, Launcher, Bluetooth batteries, Sound, Reminders and World Clocks. Each card is an instance with its own size, page and settings, and kinds can be added several times.
+The open notch has a Home view next to the shelf: pages of widget cards — Now Playing, Calendar, Weather, Battery, System Stats, Timer, Quick Controls, Note, Mirror, Script, xbar plugins, Web / JSON, Shortcuts, Launcher, Bluetooth devices, Sound, Reminders and World Clocks. Each card is an instance with its own size, page and settings, and kinds can be added several times.
 
 They're edited on the **Notch Widgets** settings page (tray → **Notch widgets…**): a pages manager, a gallery of every kind, a settings form per widget with a **Test** run for Script / Web / xbar, and layout export / import. See [Notch widgets](notch-widgets.md) for every kind, the script output formats, xbar plugins and the Web template syntax.
 

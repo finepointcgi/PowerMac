@@ -20,12 +20,22 @@ Crate: `crates/window-switcher` · Settings page: **Window Switcher** · Config:
 |---|---|
 | **Option+Tab** | all windows |
 | **Option+\`** | windows of the front app (Alt+\` on Windows) |
-| **Cmd+Tab** / Cmd+Shift+Tab | with **Replace Cmd+Tab** on: all windows (Option+Tab keeps working as a second shortcut) |
-| Cmd+\` | with Replace Cmd+Tab and `replaceCmdBacktick` on: windows of the front app |
+| **Cmd+Tab** / Cmd+Shift+Tab | all windows, with **Replace Cmd+Tab** on or when Cmd+Tab is the switcher's shortcut (Option+Tab keeps working as a second shortcut) |
+| Cmd+\` | windows of the front app, with Replace Cmd+Tab and `replaceCmdBacktick` on or when Cmd+\` is the front-app shortcut |
 
 ### Replacing Cmd+Tab
 
-Turn on **Replace Cmd+Tab** at the top of the Window Switcher settings page. Hold Cmd and press Tab to move on, release Cmd to switch; Esc cancels, and Cmd+Q / W / M / H act on the *selected* window (like AltTab). The macOS app switcher is turned off only while PowerMac's keyboard hook works: it comes back when you turn the option off, quit PowerMac, the hook is disabled or fails, or Secure Input (a password field) is active. If PowerMac crashes, the next start (of any PowerMac) turns it back on — a marker file in `$TMPDIR` records what was turned off. If the AltTab app is running with the same shortcut, the settings page warns about it.
+Turn on **Replace Cmd+Tab** at the top of the Window Switcher settings page, or set the switcher's shortcut to Cmd+Tab; both take over the macOS app switcher (the page says so under the shortcut). Setting the front-app shortcut to Cmd+\` takes over macOS's "Move focus to next window" the same way. Hold Cmd and press Tab to move on, release Cmd to switch; Esc cancels, and Cmd+Q / W / M / H act on the *selected* window (like AltTab). The macOS app switcher is turned off only while PowerMac's keyboard hook works: it comes back when you turn the option off, quit PowerMac, the hook is disabled or fails, or Secure Input (a password field) is active. If PowerMac crashes, the next start (of any PowerMac) turns it back on — a marker file in `$TMPDIR` records what was turned off. If the AltTab app is running with the same shortcut, the settings page warns about it.
+
+If Cmd+Tab suddenly shows the macOS app switcher (apps instead of windows), PowerMac has handed it back. The log (`~/Library/Logs/PowerMac/powermac.log`) says why: usually an app turned on Secure Input because a password field has focus, and the log names that app. Cmd+Tab switches windows again once the field loses focus.
+
+### Which windows are listed
+
+Every standard window and dialog of every app, PowerMac's own Settings window included, one entry per window. Minimized windows, windows of hidden apps and windows on other Spaces are listed unless turned off below. Windows an app has closed but keeps in the background (Calendar does this) are not, just as on Windows. To see the list the switcher would show right now:
+
+```bash
+powermac switcher-windows          # add --app for the front app's windows only
+```
 
 ### Preview of the selected window
 
@@ -50,8 +60,8 @@ A tap-and-release quicker than `showDelayMs` (90 ms) switches to the previous wi
 | `enabled` | true | master switch |
 | `trigger` | Option+Tab | all-windows shortcut (unset on Windows) |
 | `appWindowsTrigger` | Option+\` | front-app windows shortcut |
-| `replaceCmdTab` | false | also take over Cmd+Tab / Alt+Tab |
-| `replaceCmdBacktick` | false | macOS, with `replaceCmdTab`: Cmd+\` opens the front app's windows |
+| `replaceCmdTab` | false | also take over Cmd+Tab / Alt+Tab (automatic when `trigger` is Cmd+Tab) |
+| `replaceCmdBacktick` | false | macOS, with `replaceCmdTab`: Cmd+\` opens the front app's windows (automatic when `appWindowsTrigger` is Cmd+\`) |
 | `previewSelectedWindow` | true | show the selected window on screen while the switcher is open (macOS) |
 | `dimBackground` | true | dim the rest of the screen behind the preview |
 | `dimOpacity` | 0.25 | how dark the dimming is (0–0.85) |

@@ -19,6 +19,7 @@ The `powermac` executable runs the app and every helper window. All subcommands 
 | `powermac update check [--pre]` | Ask GitHub Releases for a newer version (one request; nothing is downloaded); see [Updates](updates.md). |
 | `powermac mwb doctor` | Everything that decides whether a Windows PC can pair with this Mac, plus the PowerShell to run on the PC ([Pairing with Windows](../features/mouse-without-borders-pairing.md)). |
 | `powermac editor [--monitor <id>]` | Open the FancyZones layout editor. |
+| `powermac switcher-windows [--app]` | List the windows the [Window Switcher](../features/window-switcher.md) would show right now, in its order; `--app` lists only the front app's. Needs Accessibility. |
 | `powermac init [--force]` | Write a default `config.json` with a new Mouse Without Borders key and print the key. |
 | `powermac gen-key` | Print a new Mouse Without Borders security key. |
 | `powermac doctor [--prompt]` | Show the config location, permissions and screens; `--prompt` asks for missing permissions. |

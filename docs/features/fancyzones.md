@@ -13,7 +13,7 @@ Crate: `crates/fancyzones` · Settings page: **FancyZones** · Config: `fancyzon
 
 - Templates: **Focus, Columns, Rows, Grid, Priority Grid**, each with adjustable zone count, spacing and sensitivity.
 - **Custom grid** and **canvas** layouts built in the layout editor (Ctrl+Option+\`, or tray → FancyZones → Edit layouts…, or `powermac editor`).
-- One layout per monitor, optionally one per Space (`layoutsPerVirtualDesktop`).
+- One layout per monitor, optionally one per Space (`layoutsPerVirtualDesktop`). A layout picked for a monitor in Settings applies on all of its Spaces; the editor and quick-switch keys change it for the current Space only.
 - Quick switch: bind layouts to 0–9 and press Ctrl+Option+Cmd+0–9.
 - Layout files are compatible with PowerToys FancyZones' JSON, so layouts can be imported.
 
@@ -71,8 +71,18 @@ A preview shows before you release, and dragging the window out restores its siz
 ## How it works
 
 - `layout`, `navigation`, `engine` and `config` are platform-independent: zone math matches FancyZones' `LayoutConfigurator`, hit-testing `Layout::ZonesFromPoint`, keyboard navigation `WindowKeyboardSnap`.
-- **macOS:** a `CGEventTap` thread watches drags and hotkeys; a worker thread moves windows through the Accessibility API; the zone overlay is an AppKit window updated on the main thread. Display, work-area and Space changes are polled once a second (Spaces via the private `CGSManagedDisplayGetCurrentSpace`). New windows are seen through an `AXObserver` per app.
+- **macOS:** a `CGEventTap` thread watches drags and hotkeys; a worker thread moves windows through the Accessibility API (while a window is being dragged it follows the window server's position, because macOS can report the old Accessibility position until the mouse is released); the zone overlay is an AppKit window updated on the main thread. Display, work-area and Space changes are polled once a second (Spaces via the private `CGSManagedDisplayGetCurrentSpace`). New windows are seen through an `AXObserver` per app.
 - **Windows:** one thread owns a WinEvent hook, a `WH_KEYBOARD_LL` hook and layered GDI overlay windows.
+
+## Troubleshooting
+
+If no zones appear while you Shift+drag a window, restart PowerMac with FancyZones' debug log on and drag once:
+
+```bash
+pkill -INT -f PowerMac.app/Contents/MacOS/powermac; open -n --env RUST_LOG=info,fancyzones=debug /Applications/PowerMac.app
+```
+
+`~/Library/Logs/PowerMac/powermac.log` then shows each step: which window was under the mouse, whether the drag counted as a move (`drag started`, with each monitor and its zone count), and the zone it snapped to. "no window found there" means the click wasn't on a window FancyZones can move; "can't be snapped" means an excluded app, a dialog or a panel.
 
 ## Limitations
 
