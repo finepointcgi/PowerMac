@@ -22,7 +22,8 @@ pub struct Config {
     /// Also take over Cmd+Tab and Cmd+Shift+Tab (macOS; the system app
     /// switcher is disabled while this is on and restored when the switcher
     /// stops, even after a crash) or Alt+Tab (Windows). [`Config::trigger`]
-    /// keeps working as a second shortcut.
+    /// keeps working as a second shortcut. Setting [`Config::trigger`] to
+    /// Cmd+Tab has the same effect (see [`Config::replaces_system_switcher`]).
     pub replace_cmd_tab: bool,
     /// macOS: Cmd+` opens the switcher for the front app's windows (the
     /// system's "Move focus to next window" is off while this is on). Only
@@ -87,14 +88,21 @@ pub const DEFAULT_SHOW_DELAY_MS: u32 = 90;
 pub const DEFAULT_DIM_OPACITY: f64 = 0.25;
 
 impl Config {
-    /// Whether the system switcher (Cmd+Tab) is taken over.
+    /// Whether the system switcher (Cmd+Tab) is taken over: when
+    /// [`Config::replace_cmd_tab`] is on, or when [`Config::trigger`] is
+    /// Cmd+Tab itself (the system would otherwise keep it and switch apps).
     pub fn replaces_system_switcher(&self) -> bool {
-        self.enabled && self.replace_cmd_tab
+        self.enabled && (self.replace_cmd_tab || self.trigger.same_combo(&Hotkey::system_switcher()))
     }
 
-    /// Whether Cmd+` is taken over (macOS only).
+    /// Whether Cmd+` is taken over (macOS only): with
+    /// [`Config::replace_cmd_backtick`], or when
+    /// [`Config::app_windows_trigger`] is Cmd+` itself.
     pub fn replaces_cmd_backtick(&self) -> bool {
-        cfg!(target_os = "macos") && self.replaces_system_switcher() && self.replace_cmd_backtick
+        cfg!(target_os = "macos")
+            && self.enabled
+            && (self.replaces_system_switcher() && self.replace_cmd_backtick
+                || self.app_windows_trigger.same_combo(&Hotkey::system_app_switcher()))
     }
 
     /// Dimming behind the preview (`None` = no dimming), clamped to a sane range.
@@ -185,6 +193,16 @@ impl Hotkey {
 
     pub fn is_set(&self) -> bool {
         self.code != 0
+    }
+
+    /// Same key and modifiers, ignoring Shift (it only sets the direction):
+    /// Cmd+Shift+Tab is still the system's Cmd+Tab.
+    pub fn same_combo(&self, other: &Hotkey) -> bool {
+        self.is_set()
+            && self.code == other.code
+            && self.win == other.win
+            && self.ctrl == other.ctrl
+            && self.alt == other.alt
     }
 
     /// The modifiers that must stay held while the switcher is open
@@ -309,6 +327,28 @@ mod tests {
         c.dim_opacity = 0.4;
         c.preview_selected_window = false;
         assert_eq!(c.effective_dim(), None, "dimming belongs to the preview");
+    }
+
+    #[test]
+    fn system_shortcut_as_trigger_takes_it_over() {
+        // Picking Cmd+Tab as the shortcut means "all windows on Cmd+Tab", even
+        // with the Replace switch off: the system would keep it otherwise.
+        let mut c = Config { trigger: Hotkey::system_switcher(), ..Default::default() };
+        assert!(!c.replace_cmd_tab);
+        assert!(c.replaces_system_switcher());
+        c.trigger = Hotkey { shift: true, ..Hotkey::system_switcher() };
+        assert!(c.replaces_system_switcher(), "Shift is only the direction");
+        c.trigger = Hotkey::default_trigger();
+        assert!(!c.replaces_system_switcher());
+        c.trigger = Hotkey::system_switcher();
+        c.enabled = false;
+        assert!(!c.replaces_system_switcher());
+
+        let mut c = Config { app_windows_trigger: Hotkey::system_app_switcher(), ..Default::default() };
+        assert_eq!(c.replaces_cmd_backtick(), cfg!(target_os = "macos"));
+        assert!(!c.replaces_system_switcher(), "Cmd+` alone leaves Cmd+Tab to the system");
+        c.app_windows_trigger = Hotkey::default_app_trigger();
+        assert!(!c.replaces_cmd_backtick());
     }
 
     #[test]

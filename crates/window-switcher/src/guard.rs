@@ -143,9 +143,9 @@ impl Guard {
         let mut s = BTreeSet::new();
         if healthy && want_cmd_tab {
             s.extend(HOTKEYS_CMD_TAB);
-            if want_backtick {
-                s.extend(HOTKEYS_CMD_BACKTICK);
-            }
+        }
+        if healthy && want_backtick {
+            s.extend(HOTKEYS_CMD_BACKTICK);
         }
         s
     }
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn off_only_while_wanted_and_healthy() {
         assert!(Guard::wanted(true, true, false).is_empty(), "no tap → system switcher stays");
-        assert!(Guard::wanted(false, true, true).is_empty());
+        assert_eq!(Guard::wanted(false, true, true), set(&[6, 27]), "Cmd+` on its own");
         assert_eq!(Guard::wanted(true, false, true), set(&[1, 2]));
         assert_eq!(Guard::wanted(true, true, true), set(&[1, 2, 6, 27]));
     }
