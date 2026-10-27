@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::automation::Action;
 pub use crate::hyper::{HyperKeyConfig, HyperMode, TapAction};
 use crate::keys::{key_name, parse_combo, Key, Shortcut, VK_DISABLED};
 pub use crate::windows_style::WindowsStylePreset;
@@ -24,6 +25,10 @@ pub struct Config {
     /// Caps Lock → Hyper / Control / Escape (off by default). Independent of
     /// `enabled`, like `pastePlainText`.
     pub hyper_key: HyperKeyConfig,
+    /// Hotkeys that run an automation action (shell command, text, program,
+    /// URL, shortcut, ...). Empty by default.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hotkeys: Vec<Hotkey>,
 }
 
 impl Default for Config {
@@ -35,8 +40,90 @@ impl Default for Config {
             paste_plain_text: PastePlainText::default(),
             windows_style: WindowsStylePreset::default(),
             hyper_key: HyperKeyConfig::default(),
+            hotkeys: Vec::new(),
         }
     }
+}
+
+/// What fires a [`Hotkey`]: one key (`"F13"`) or a shortcut
+/// (`"Ctrl+Alt+B"`; one or more modifiers plus one key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Key(u32),
+    Shortcut(Shortcut),
+}
+
+impl std::str::FromStr for Trigger {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        Trigger::from_keys(&parse_combo(s)?)
+    }
+}
+
+impl Trigger {
+    fn from_keys(keys: &[u32]) -> Result<Self, String> {
+        match keys {
+            [] => Err("empty key list".into()),
+            [k] if crate::keys::is_modifier(*k) => {
+                Err(format!("{} alone can't be a hotkey", key_name(*k)))
+            }
+            [k] => Ok(Trigger::Key(*k)),
+            ks => Shortcut::from_keys(ks).map(Trigger::Shortcut),
+        }
+    }
+}
+
+impl std::fmt::Display for Trigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Trigger::Key(k) => f.write_str(&key_name(*k)),
+            Trigger::Shortcut(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl Serialize for Trigger {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Trigger {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Str(String),
+            Keys(Vec<Key>),
+        }
+        match Repr::deserialize(d)? {
+            Repr::Str(s) => s.parse(),
+            Repr::Keys(ks) => Trigger::from_keys(&ks.iter().map(|k| k.0).collect::<Vec<_>>()),
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// `{"from": "Ctrl+Alt+B", "action": {"type": "shell", "command": "make"},
+/// "app": "com.apple.Terminal"}`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hotkey {
+    pub from: Trigger,
+    pub action: Action,
+    /// Only while this app is in front (shortcut hotkeys only; as for
+    /// shortcut remaps).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
 }
 
 /// `{"from": "CapsLock", "to": "Esc"}`
@@ -312,6 +399,26 @@ impl Config {
                 out.push(format!("remapShortcuts[{i}]: empty app name"));
             }
         }
+        for (i, h) in self.hotkeys.iter().enumerate() {
+            for e in h.action.validate() {
+                out.push(format!("hotkeys[{i}] ({}): {e}", h.from));
+            }
+            match h.from {
+                Trigger::Key(k) => {
+                    if h.app.is_some() {
+                        out.push(format!("hotkeys[{i}]: \"app\" is ignored for a single-key hotkey ({})", key_name(k)));
+                    }
+                    if self.remap_keys.iter().any(|r| overlaps(r.from.0, k)) {
+                        out.push(format!("hotkeys[{i}]: {} is also remapped in remapKeys (the remap wins)", key_name(k)));
+                    }
+                }
+                Trigger::Shortcut(s) => {
+                    if self.remap_shortcuts.iter().any(|r| r.from == s && r.app == h.app) {
+                        out.push(format!("hotkeys[{i}]: {s} is also in remapShortcuts (the remap wins)"));
+                    }
+                }
+            }
+        }
         if self.hyper_key.is_on() {
             let caps = |k: u32| k == pm_input::vk::VK_CAPITAL;
             if self.remap_keys.iter().any(|r| caps(r.from.0)) {
@@ -418,6 +525,39 @@ mod tests {
         assert!(c.validate().is_empty(), "{:?}", c.validate());
         // round trip
         assert_eq!(Config::from_json(&c.to_json()).unwrap(), c);
+    }
+
+    #[test]
+    fn hotkeys_round_trip() {
+        let json = r#"{
+          "hotkeys": [
+            {"from": "Ctrl+Alt+B", "action": {"type": "shell", "command": "make", "workingDir": "~/src",
+              "wait": true, "timeoutMs": 10000, "notify": "always", "env": {"A": "b"}, "interpreter": "bash"}},
+            {"from": ["Ctrl", "Alt", "N"], "app": "com.apple.Terminal",
+              "action": {"type": "shell", "scriptPath": "/definitely/missing.sh"}},
+            {"from": "F15", "action": {"type": "text", "text": "hi"}, "enabled": false},
+            {"from": "F16", "action": {"type": "openUri", "uri": "https://example.com"}}
+          ]
+        }"#;
+        let c = Config::from_json(json).unwrap();
+        assert_eq!(c.hotkeys.len(), 4);
+        assert!(matches!(c.hotkeys[0].from, Trigger::Shortcut(s) if s.key == VK_B));
+        assert_eq!(c.hotkeys[2].from, Trigger::Key(VK_F15));
+        assert!(!c.hotkeys[2].enabled);
+        let crate::automation::Action::Shell(s) = &c.hotkeys[0].action else { panic!() };
+        assert!(s.wait && s.log_output && s.command == "make");
+        assert_eq!(Config::from_json(&c.to_json()).unwrap(), c);
+        let v: serde_json::Value = serde_json::from_str(&c.to_json()).unwrap();
+        assert_eq!(v["hotkeys"][0]["from"], c.hotkeys[0].from.to_string());
+        assert_eq!(v["hotkeys"][2]["from"], "F15");
+        assert_eq!(v["hotkeys"][0]["action"]["type"], "shell");
+        assert!(v["hotkeys"][0].get("enabled").is_none());
+        let w = c.validate();
+        assert!(w.iter().any(|w| w.contains("hotkeys[1]") && w.contains("script not found")), "{w:?}");
+        // Default config has none and doesn't write the key.
+        assert!(!Config::default().to_json().contains("hotkeys"));
+        assert!(Config::from_json(r#"{"hotkeys":[{"from":"Ctrl","action":{"type":"disabled"}}]}"#).is_err());
+        assert!(Config::from_json(r#"{"hotkeys":[{"from":"F13"}]}"#).is_err());
     }
 
     #[test]

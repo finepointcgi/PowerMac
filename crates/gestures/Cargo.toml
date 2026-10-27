@@ -1,0 +1,22 @@
+[package]
+name = "gestures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The shared automation actions, executor and app scoping.
+keyboard-manager = { path = "../keyboard-manager" }
+pm-hook = { path = "../pm-hook" }
+
+# macOS: MultitouchSupport is dlopen'ed at runtime; CoreFoundation is
+# linked directly.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+env_logger = "0.11"

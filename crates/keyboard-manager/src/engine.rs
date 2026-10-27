@@ -68,6 +68,8 @@ pub enum Action {
     OpenUri(String),
     /// Paste the clipboard as plain text (asynchronously).
     PastePlainText,
+    /// Run a hotkey's automation action (asynchronously).
+    Automation(crate::automation::Action),
 }
 
 impl Action {
@@ -131,6 +133,8 @@ struct ShortcutEntry {
     /// Only while a Finder cut is pending.
     needs_cut: bool,
     effect: Effect,
+    /// A hotkey: `to` is `Disabled` and this runs on each press.
+    run: Option<Arc<crate::automation::Action>>,
 }
 
 impl ShortcutEntry {
@@ -144,6 +148,7 @@ impl ShortcutEntry {
             not_in_text: false,
             needs_cut: false,
             effect: Effect::None,
+            run: None,
         }
     }
 }
@@ -168,6 +173,8 @@ impl fmt::Debug for Probe {
 #[derive(Debug, Clone, Default)]
 struct Compiled {
     keys: HashMap<u32, Target>,
+    /// Single-key hotkeys (their `keys` entry is `Disabled`).
+    key_actions: HashMap<u32, Arc<crate::automation::Action>>,
     shortcuts: Vec<ShortcutEntry>,
     hyper: HyperKeyConfig,
 }
@@ -238,6 +245,8 @@ struct Active {
     src_mods: Vec<u32>,
     /// Target key currently held at the OS level (shortcut/key targets).
     target_down: Option<u32>,
+    /// A hotkey's action (fires on each non-repeat press).
+    run: Option<Arc<crate::automation::Action>>,
     /// End the remap when the action key is released (preset entries whose
     /// target keeps the source modifiers, e.g. Home -> Cmd+Left or
     /// Shift+Home -> Cmd+Shift+Left), so injected modifiers don't linger.
@@ -328,6 +337,31 @@ fn compile(cfg: &Config, opts: &EngineOptions) -> Compiled {
             ));
         }
     }
+    if cfg.enabled {
+        for h in cfg.hotkeys.iter().filter(|h| h.enabled) {
+            let run = Some(Arc::new(h.action.clone()));
+            match h.from {
+                crate::config::Trigger::Key(k) => {
+                    for src in expand_source(k) {
+                        if src == 0 || src > 0xFF || c.keys.contains_key(&src) {
+                            continue; // remapKeys win
+                        }
+                        c.keys.insert(src, Target::Disabled);
+                        c.key_actions.insert(src, run.clone().expect("set above"));
+                    }
+                }
+                crate::config::Trigger::Shortcut(from) => {
+                    let mut e = ShortcutEntry::user(
+                        from,
+                        Target::Disabled,
+                        h.app.as_deref().map(normalize_app).filter(|a| !a.is_empty()),
+                    );
+                    e.run = run;
+                    c.shortcuts.push(e);
+                }
+            }
+        }
+    }
     let p = &cfg.paste_plain_text;
     if p.enabled {
         c.shortcuts
@@ -356,6 +390,7 @@ fn compile(cfg: &Config, opts: &EngineOptions) -> Compiled {
                 not_in_text: e.not_in_text,
                 needs_cut: e.needs_cut,
                 effect: e.effect,
+                run: None,
             });
         }
     }
@@ -544,6 +579,8 @@ impl Engine {
                         out.push(Action::OpenUri(u.clone()));
                     } else if let Some(Target::PastePlainText) = self.compiled.keys.get(&vk) {
                         out.push(Action::PastePlainText);
+                    } else if let Some(a) = self.compiled.key_actions.get(&vk) {
+                        out.push(Action::Automation((**a).clone()));
                     }
                 }
             }
@@ -881,6 +918,7 @@ impl Engine {
             action: vk,
             src_mods,
             target_down: None,
+            run: e.run.clone(),
             end_on_release: e.preset
                 && match &e.to {
                     Target::Shortcut(t) => ModFamily::ALL
@@ -928,6 +966,9 @@ impl Engine {
                 out.push(Action::OpenUri(u.clone()));
             }
         }
+        if let Some(r) = &a.run {
+            out.push(Action::Automation((**r).clone()));
+        }
         self.active = Some(a);
     }
 
@@ -974,6 +1015,9 @@ impl Engine {
                     Target::Run(r) if !repeat => out.push(Action::Run(r.clone())),
                     Target::OpenUri(u) if !repeat => out.push(Action::OpenUri(u.clone())),
                     _ => {}
+                }
+                if let Some(r) = a.run.as_ref().filter(|_| !repeat) {
+                    out.push(Action::Automation((**r).clone()));
                 }
             } else {
                 if let Some(t) = a.target_down.take() {

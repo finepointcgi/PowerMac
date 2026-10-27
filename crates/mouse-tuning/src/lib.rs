@@ -222,7 +222,11 @@ pub struct ButtonMapping {
 }
 
 /// What a remapped button does. JSON: `{"type": "missionControl"}`,
-/// `{"type": "keystroke", "keys": "Cmd+Shift+T"}`.
+/// `{"type": "keystroke", "keys": "Cmd+Shift+T"}`, or any shared automation
+/// action ([`keyboard_manager::automation::Action`]):
+/// `{"type": "shell", "command": "open -a Notes"}`, `{"type": "text", "text":
+/// "..."}`, `{"type": "run", "path": "..."}`, `{"type": "openUri", "uri":
+/// "..."}`, `{"type": "pastePlainText"}`, `{"type": "shortcut", "keys": "..."}`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ButtonAction {
@@ -253,7 +257,13 @@ pub enum ButtonAction {
     Cut,
     /// Cmd+Z / Ctrl+Z.
     Undo,
+    /// A shared automation action (shell command, text, program, URL, ...).
+    /// Its JSON is the action's own (`{"type": "shell", ...}`).
+    #[serde(untagged)]
+    Action(Action),
 }
+
+pub use keyboard_manager::automation::Action;
 
 impl ButtonAction {
     /// All variants, for a settings drop-down (`Keystroke` with empty keys).
@@ -275,6 +285,38 @@ impl ButtonAction {
         ]
     }
 
+    /// [`all`](Self::all) plus the shared automation actions (one empty
+    /// instance per kind, `Disabled` left out as it duplicates
+    /// [`ButtonAction::Disabled`]), for a settings page that can edit them.
+    pub fn all_with_automation() -> Vec<ButtonAction> {
+        let mut v = Self::all();
+        v.extend(
+            Action::all()
+                .into_iter()
+                .filter(|a| *a != Action::Disabled)
+                .map(ButtonAction::Action),
+        );
+        v
+    }
+
+    /// Normalize: a shared action that has a native equivalent becomes it
+    /// (`{"type":"disabled"}` → [`ButtonAction::Disabled`]).
+    pub fn normalized(self) -> ButtonAction {
+        match self {
+            ButtonAction::Action(Action::Disabled) => ButtonAction::Disabled,
+            other => other,
+        }
+    }
+
+    /// Configuration problems (empty = fine).
+    pub fn validate(&self) -> Vec<String> {
+        match self {
+            ButtonAction::Keystroke { keys } => keys::parse_combo(keys).err().into_iter().collect(),
+            ButtonAction::Action(a) => a.validate(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Short display name.
     pub fn label(&self) -> &'static str {
         match self {
@@ -291,6 +333,7 @@ impl ButtonAction {
             ButtonAction::Paste => "Paste",
             ButtonAction::Cut => "Cut",
             ButtonAction::Undo => "Undo",
+            ButtonAction::Action(a) => a.label(),
         }
     }
 }
@@ -320,7 +363,7 @@ impl Config {
             return ButtonAction::Default;
         }
         if let Some(m) = self.buttons.mappings.iter().find(|m| m.button == button) {
-            return m.action.clone();
+            return m.action.clone().normalized();
         }
         if cfg!(target_os = "macos") && self.buttons.side_buttons_navigation {
             match button {

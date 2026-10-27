@@ -30,6 +30,7 @@ members = [
     "crates/text-expander",
     "crates/workspaces",
     "crates/net-monitor",
+    "crates/gestures",
     "crates/pm-update",
     "crates/powermac",
 ]

@@ -16,6 +16,8 @@ pub(crate) enum Step {
     /// `open` arguments as the fallback.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Dock { notification: &'static str, fallback_open: &'static [&'static str] },
+    /// A shared automation action (`keyboard_manager::automation`).
+    Automation(crate::Action),
 }
 
 fn combo(mods: &[u32], key: u32) -> Step {
@@ -64,6 +66,8 @@ pub(crate) fn plan(action: &ButtonAction) -> Option<Step> {
         ButtonAction::Paste => combo(&[primary], b'V' as u32),
         ButtonAction::Cut => combo(&[primary], b'X' as u32),
         ButtonAction::Undo => combo(&[primary], b'Z' as u32),
+        ButtonAction::Action(crate::Action::Disabled) => return None,
+        ButtonAction::Action(a) => Step::Automation(a.clone()),
     })
 }
 
@@ -116,6 +120,14 @@ fn run(step: &Step, backend: &mut Option<std::sync::Arc<dyn pm_input::InputBacke
             }
             let b = backend.as_ref().expect("backend set above");
             press(b.as_ref(), c)
+        }
+        Step::Automation(a) => {
+            let o = keyboard_manager::automation::run_action_once(a);
+            if o.is_ok() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("{}", o.summary()))
+            }
         }
         Step::Dock { notification, fallback_open } => {
             #[cfg(target_os = "macos")]

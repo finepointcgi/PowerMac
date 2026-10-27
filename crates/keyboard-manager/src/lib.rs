@@ -14,6 +14,10 @@
 //! - **Hyper key** (`"hyperKey"`, off by default): Caps Lock held =
 //!   Ctrl+Option+Shift+Cmd (or Control), tapped alone = Escape / nothing /
 //!   Caps Lock; or Caps Lock = Escape. See [`hyper`].
+//! - **Hotkeys** (`"hotkeys"`): a key or shortcut that runs an automation
+//!   action ([`automation::Action`]: shell command, text, program, URL,
+//!   shortcut, paste as plain text), optionally only in one app. The same
+//!   action set is used by mouse buttons and trackpad gestures.
 //! - **Paste as plain text**: a hotkey (Cmd+Option+Shift+V on macOS,
 //!   Win+Ctrl+Alt+V on Windows, as in PowerToys) that strips the clipboard
 //!   down to plain text and pastes it, optionally putting the original rich
@@ -92,6 +96,21 @@
 //! | `{"openUri": "https://..."}` | open a URL, file or folder |
 //! | `"pastePlainText"` | paste the clipboard as plain text |
 //!
+//! **Hotkeys** (`"hotkeys"`) run an [`automation::Action`] (see that module
+//! for its JSON) on each press (not on auto-repeat), swallowing the key:
+//!
+//! ```json
+//! "hotkeys": [
+//!   { "from": "Ctrl+Alt+B", "action": { "type": "shell", "command": "make", "workingDir": "~/src" } },
+//!   { "from": "F13", "action": { "type": "openUri", "uri": "https://example.com" } },
+//!   { "from": "Cmd+Shift+L", "app": "com.apple.Terminal", "action": { "type": "text", "text": "ls -la\n" } }
+//! ]
+//! ```
+//!
+//! `from` is one key or a shortcut; `app` works for shortcuts as below;
+//! `"enabled": false` keeps an entry without using it. An entry in
+//! `remapKeys` / `remapShortcuts` for the same key wins.
+//!
 //! **App scoping**: `"app"` (alias `"targetApp"`) is compared
 //! case-insensitively with the frontmost app's bundle id, name and
 //! executable name on macOS, and the foreground process's exe name on
@@ -127,6 +146,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
+pub mod automation;
 pub mod clipboard;
 pub mod config;
 pub mod engine;
@@ -168,7 +188,8 @@ mod platform {
     }
 }
 
-pub use config::{Config, KeyRemap, PastePlainText, RunProgram, ShortcutRemap, Target};
+pub use automation::{run_action_once, test_action, Interpreter, NotifyWhen, ShellAction, ShellResult};
+pub use config::{Config, Hotkey, KeyRemap, PastePlainText, RunProgram, ShortcutRemap, Target, Trigger};
 pub use engine::{Action, Engine, EngineOptions, Outcome};
 pub use hyper::{HyperKeyConfig, HyperMode, TapAction};
 pub use keys::{Key, Shortcut};
@@ -187,6 +208,7 @@ pub(crate) enum Job {
     Paste,
     Run(RunProgram),
     Open(String),
+    Automation(automation::Action),
     /// A Caps Lock flagsChanged arrived while the Hyper key is on: a
     /// keyboard without the hidutil mapping (plugged in later).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -245,6 +267,7 @@ impl Shared {
             Action::PastePlainText => Job::Paste,
             Action::Run(r) => Job::Run(r.clone()),
             Action::OpenUri(u) => Job::Open(u.clone()),
+            Action::Automation(a) => Job::Automation(a.clone()),
             _ => return,
         };
         if let Ok(g) = self.jobs.lock() {
@@ -327,6 +350,20 @@ impl KeyboardManager {
                         }
                         Job::Run(r) => launch::run_program(&r),
                         Job::Open(u) => launch::open_uri(&u),
+                        Job::Automation(a) => {
+                            // Shell commands run on their own thread so one
+                            // that is waited for never holds up a paste or
+                            // another hotkey.
+                            let r = std::thread::Builder::new()
+                                .name("km-hotkey-action".into())
+                                .spawn(move || {
+                                    let o = automation::run_action_once(&a);
+                                    if !o.is_ok() {
+                                        log::warn!("keyboard-manager: hotkey {}: {}", a.label(), o.summary());
+                                    }
+                                });
+                            r.map(|_| ()).map_err(anyhow::Error::from)
+                        }
                         Job::ReapplyHid => {
                             #[cfg(target_os = "macos")]
                             if let Ok(mut g) = s2.hid.lock() {

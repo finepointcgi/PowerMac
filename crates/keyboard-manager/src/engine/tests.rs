@@ -37,6 +37,7 @@ fn cfg(keys: &[(u32, Target)], shortcuts: &[(&str, Target, Option<&str>)]) -> Co
         },
         windows_style: Default::default(),
         hyper_key: Default::default(),
+        hotkeys: Vec::new(),
     }
 }
 
@@ -1797,4 +1798,46 @@ mod hyper_key {
         assert_eq!(h.up(VK_CAPITAL), rep(vec![d(VK_ESCAPE), u(VK_ESCAPE)]));
         h.assert_clean();
     }
+}
+
+#[test]
+fn hotkeys_fire_their_action_once_per_press() {
+    use crate::automation::{Action as A, ShellAction};
+    use crate::config::{Hotkey, Trigger};
+    let sh = A::Shell(ShellAction { command: "echo hi".into(), ..Default::default() });
+    let txt = A::Text { text: "term".into() };
+    let mut c = cfg(&[(VK_F11, Target::Key(VK_F12))], &[]);
+    c.hotkeys = vec![
+        Hotkey { from: Trigger::Key(VK_F10), action: sh.clone(), app: None, enabled: true },
+        Hotkey { from: "Ctrl+Alt+S".parse().unwrap(), action: sh.clone(), app: None, enabled: true },
+        Hotkey { from: "Ctrl+Alt+T".parse().unwrap(), action: txt.clone(), app: Some("Terminal".into()), enabled: true },
+        // remapKeys wins over a hotkey on the same key; disabled entries do nothing.
+        Hotkey { from: Trigger::Key(VK_F11), action: sh.clone(), app: None, enabled: true },
+        Hotkey { from: Trigger::Key(VK_F13), action: sh.clone(), app: None, enabled: false },
+    ];
+    let mut h = Harness::new(c);
+    assert_eq!(h.down(VK_F10), rep(vec![Action::Automation(sh.clone())]));
+    assert_eq!(h.down(VK_F10), rep(vec![]), "auto-repeat does not rerun");
+    assert_eq!(h.up(VK_F10), rep(vec![]));
+    assert_eq!(h.tap(VK_F10).0, rep(vec![Action::Automation(sh.clone())]));
+    assert_ne!(h.down(VK_F11), rep(vec![Action::Automation(sh.clone())]));
+    h.up(VK_F11);
+    assert_eq!(h.down(VK_F13), PASS);
+    h.up(VK_F13);
+    h.down(VK_LCONTROL);
+    h.down(VK_LMENU);
+    assert_eq!(h.down(VK_S), rep(vec![Action::Automation(sh.clone())]));
+    assert_eq!(h.down(VK_S), rep(vec![]));
+    assert_eq!(h.up(VK_S), rep(vec![]));
+    assert_eq!(h.down(VK_S), rep(vec![Action::Automation(sh)]));
+    h.up(VK_S);
+    // App-scoped: not in this (empty) foreground app.
+    assert_eq!(h.down(VK_T), PASS);
+    h.up(VK_T);
+    h.app = vec!["com.apple.Terminal".into(), "Terminal".into()];
+    assert_eq!(h.down(VK_T), rep(vec![Action::Automation(txt)]));
+    h.up(VK_T);
+    h.up(VK_LMENU);
+    h.up(VK_LCONTROL);
+    h.assert_clean();
 }

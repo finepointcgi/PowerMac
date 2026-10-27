@@ -292,3 +292,57 @@ fn list_devices_does_not_panic() {
 fn dock_notification_symbol_resolves() {
     assert!(crate::macos::dock_available());
 }
+
+#[test]
+fn shared_automation_actions_on_buttons() {
+    use crate::actions::{plan, Step};
+    use keyboard_manager::automation::{Interpreter, ShellAction};
+    let c: Config = serde_json::from_str(
+        r#"{"buttons":{"mappings":[
+            {"button":2,"action":{"type":"shell","command":"open -a Notes","interpreter":"sh","notify":"onFailure"}},
+            {"button":3,"action":{"type":"text","text":"hello"}},
+            {"button":4,"action":{"type":"keystroke","keys":"Cmd+W"}},
+            {"button":5,"action":{"type":"shortcut","keys":"Cmd+Shift+T"}},
+            {"button":6,"action":{"type":"disabled"}},
+            {"button":7,"action":{"type":"openUri","uri":"https://example.com"}},
+            {"button":8,"action":{"type":"run","path":"/System/Applications/Notes.app"}},
+            {"button":9,"action":{"type":"pastePlainText"}}]}}"#,
+    )
+    .unwrap();
+    let m = &c.buttons.mappings;
+    let ButtonAction::Action(Action::Shell(s)) = &m[0].action else { panic!("{:?}", m[0].action) };
+    assert_eq!(s.command, "open -a Notes");
+    assert_eq!(s.interpreter, Interpreter::Sh);
+    assert_eq!(m[1].action, ButtonAction::Action(Action::Text { text: "hello".into() }));
+    // The native variant wins for its own tag.
+    assert_eq!(m[2].action, ButtonAction::Keystroke { keys: "Cmd+W".into() });
+    assert_eq!(m[3].action, ButtonAction::Action(Action::Shortcut { keys: "Cmd+Shift+T".into() }));
+    assert_eq!(m[4].action, ButtonAction::Disabled);
+    assert!(matches!(m[5].action, ButtonAction::Action(Action::OpenUri { .. })));
+    assert!(matches!(m[6].action, ButtonAction::Action(Action::Run(_))));
+    assert_eq!(m[7].action, ButtonAction::Action(Action::PastePlainText));
+    // Round trip keeps the flat JSON shape.
+    let v = serde_json::to_value(&c).unwrap();
+    assert_eq!(v["buttons"]["mappings"][0]["action"]["type"], "shell");
+    assert_eq!(v["buttons"]["mappings"][0]["action"]["command"], "open -a Notes");
+    let back: Config = serde_json::from_value(v).unwrap();
+    assert_eq!(back, c);
+    for a in ButtonAction::all_with_automation() {
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(serde_json::from_str::<ButtonAction>(&s).unwrap(), a, "{s}");
+        assert!(!a.label().is_empty());
+    }
+    assert_eq!(ButtonAction::all_with_automation().len(), ButtonAction::all().len() + 6);
+    // Unknown types are still errors.
+    assert!(serde_json::from_str::<ButtonAction>(r#"{"type":"nope"}"#).is_err());
+    // Planning: shared actions become an automation step; "disabled" none.
+    let sh = ButtonAction::Action(Action::Shell(ShellAction { command: "true".into(), ..Default::default() }));
+    assert!(matches!(plan(&sh), Some(Step::Automation(Action::Shell(_)))));
+    assert_eq!(plan(&ButtonAction::Action(Action::Disabled)), None);
+    let mut c = Config::default();
+    c.buttons.mappings.push(ButtonMapping { button: button::MIDDLE, action: ButtonAction::Action(Action::Disabled) });
+    assert_eq!(c.button_action(button::MIDDLE), ButtonAction::Disabled);
+    assert!(sh.validate().is_empty());
+    assert_eq!(ButtonAction::Action(Action::Shell(ShellAction::default())).validate().len(), 1);
+    assert_eq!(ButtonAction::Keystroke { keys: "Cmd+Nope".into() }.validate().len(), 1);
+}
