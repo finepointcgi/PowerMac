@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+pm-hook = { path = "../pm-hook" }
 anyhow.workspace = true
 log.workspace = true
 thiserror.workspace = true

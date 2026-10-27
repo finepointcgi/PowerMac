@@ -1,10 +1,13 @@
-//! macOS backend: an active `CGEventTap` on its own CFRunLoop thread.
+//! macOS backend: a subscriber of the shared event tap (`pm-hook`) at
+//! [`pm_hook::priority::KEYBOARD_MANAGER`], ahead of every module that
+//! matches shortcuts.
 //!
 //! - Key down/up and flagsChanged events go through the [`Engine`]. A 1:1
 //!   remap (CapsLock -> Esc, Option -> Command) rewrites the event in place
-//!   (keycode + flags); anything else swallows the event and posts the
-//!   replacements right after our tap with `CGEventTapPostEvent`, so ordering
-//!   with later hardware events is preserved.
+//!   (keycode + flags); anything else swallows the event and replaces it
+//!   (`Verdict::Replace`): the replacements reach the lower-priority
+//!   subscribers and are then posted right after the tap, so ordering with
+//!   later hardware events is preserved.
 //! - While remaps make the OS-visible modifiers differ from the physical
 //!   ones, the modifier flags of every passing keyboard and mouse-button
 //!   event are rewritten to match (apps read modifiers from event flags).
@@ -21,12 +24,10 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::ffi::{c_char, c_ulong, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
-use std::thread::JoinHandle;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use pm_input::vk::{self, mac};
 
 use crate::engine::{Action, Engine, Outcome};
@@ -41,37 +42,17 @@ type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
 type CFArrayRef = *const c_void;
 type CFDictionaryRef = *const c_void;
-type CFMachPortRef = *mut c_void;
-type CFRunLoopRef = *mut c_void;
-type CFRunLoopSourceRef = *mut c_void;
 type CGEventRef = *mut c_void;
 type CGEventSourceRef = *mut c_void;
-type CGEventTapProxy = *mut c_void;
-
-type CGEventTapCallBack =
-    unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    static kCFRunLoopCommonModes: CFStringRef;
-    static kCFRunLoopDefaultMode: CFStringRef;
     static kCFBooleanTrue: CFTypeRef;
     static kCFBooleanFalse: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
     static kCFTypeDictionaryValueCallBacks: u8;
 
     fn CFRelease(cf: CFTypeRef);
-    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source: u8) -> i32;
-    fn CFRunLoopStop(rl: CFRunLoopRef);
-    fn CFMachPortCreateRunLoopSource(
-        alloc: *const c_void,
-        port: CFMachPortRef,
-        order: isize,
-    ) -> CFRunLoopSourceRef;
-    fn CFMachPortInvalidate(port: CFMachPortRef);
     fn CFDictionaryCreate(
         alloc: *const c_void,
         keys: *const *const c_void,
@@ -91,16 +72,6 @@ extern "C" {
     static kCGWindowLayer: CFStringRef;
     static kCGWindowOwnerPID: CFStringRef;
 
-    fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: CGEventTapCallBack,
-        user_info: *mut c_void,
-    ) -> CFMachPortRef;
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
-    fn CGEventTapPostEvent(proxy: CGEventTapProxy, event: CGEventRef);
     fn CGEventPost(tap: u32, event: CGEventRef);
     fn CGEventGetFlags(event: CGEventRef) -> u64;
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
@@ -150,26 +121,15 @@ extern "C" {
 }
 
 const kCGHIDEventTap: u32 = 0;
-const kCGSessionEventTap: u32 = 1;
-const kCGHeadInsertEventTap: u32 = 0;
-const kCGEventTapOptionDefault: u32 = 0;
 const kCGEventSourceStatePrivate: i32 = -1;
 
 const kCGEventLeftMouseDown: u32 = 1;
-const kCGEventLeftMouseUp: u32 = 2;
 const kCGEventRightMouseDown: u32 = 3;
-const kCGEventRightMouseUp: u32 = 4;
-const kCGEventLeftMouseDragged: u32 = 6;
-const kCGEventRightMouseDragged: u32 = 7;
 const kCGEventKeyDown: u32 = 10;
 const kCGEventKeyUp: u32 = 11;
 const kCGEventFlagsChanged: u32 = 12;
 const kCGEventScrollWheel: u32 = 22;
 const kCGEventOtherMouseDown: u32 = 25;
-const kCGEventOtherMouseUp: u32 = 26;
-const kCGEventOtherMouseDragged: u32 = 27;
-const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
 const kCGKeyboardEventKeycode: u32 = 9;
 const kCGEventSourceUnixProcessID: u32 = 41;
@@ -197,10 +157,6 @@ const kCGWindowListExcludeDesktopElements: u32 = 1 << 4;
 const kCFNumberSInt64Type: isize = 4;
 const kIOHIDParamConnectType: u32 = 1;
 const kIOHIDCapsLockState: i32 = 1;
-
-fn mask(ty: u32) -> u64 {
-    1u64 << ty
-}
 
 #[derive(Clone, Copy)]
 struct SendPtr(*mut c_void);
@@ -338,23 +294,35 @@ fn source() -> CGEventSourceRef {
     .0
 }
 
-/// Post right after our tap when called from the tap callback (`proxy`), or
-/// at the HID level otherwise.
-unsafe fn post(proxy: CGEventTapProxy, ev: CGEventRef) {
+/// Where posted events go: from the tap handler they become the
+/// replacement of the current event (posted right after the tap, after the
+/// lower-priority subscribers saw them); otherwise they are posted at the
+/// HID level.
+pub(crate) enum Sink<'a> {
+    Hid,
+    Tap(&'a mut Vec<pm_hook::Emit>),
+}
+
+unsafe fn post(sink: &mut Sink<'_>, ev: CGEventRef) {
     if ev.is_null() {
         return;
     }
     // A private source's user data isn't always copied into the event.
     CGEventSetIntegerValueField(ev, kCGEventSourceUserData, INJECTED_TAG as i64);
-    if proxy.is_null() {
-        CGEventPost(kCGHIDEventTap, ev);
-    } else {
-        CGEventTapPostEvent(proxy, ev);
+    match sink {
+        Sink::Hid => {
+            CGEventPost(kCGHIDEventTap, ev);
+            CFRelease(ev as CFTypeRef);
+        }
+        Sink::Tap(out) => {
+            if let Some(e) = pm_hook::Synthetic::from_cg(ev) {
+                out.push(pm_hook::Emit::Event(e));
+            }
+        }
     }
-    CFRelease(ev as CFTypeRef);
 }
 
-unsafe fn post_key(proxy: CGEventTapProxy, keycode: u16, down: bool, modifier: bool, flags: u64) {
+unsafe fn post_key(sink: &mut Sink<'_>, keycode: u16, down: bool, modifier: bool, flags: u64) {
     let ev = CGEventCreateKeyboardEvent(source(), keycode, down);
     if ev.is_null() {
         return;
@@ -368,15 +336,15 @@ unsafe fn post_key(proxy: CGEventTapProxy, keycode: u16, down: bool, modifier: b
             flags | key_extra_flags(keycode) | kCGEventFlagMaskNonCoalesced,
         );
     }
-    post(proxy, ev);
+    post(sink, ev);
 }
 
 /// Type `text` with unicode keyboard events (no modifiers). `\n` presses
 /// Return and `\t` Tab, so it works in terminals and forms too.
-unsafe fn post_text(proxy: CGEventTapProxy, text: &str) {
+unsafe fn post_text(sink: &mut Sink<'_>, text: &str) {
     const CHUNK: usize = 20; // CGEventKeyboardSetUnicodeString limit
     let mut buf: Vec<u16> = Vec::new();
-    let flush = |buf: &mut Vec<u16>| {
+    let flush = |sink: &mut Sink<'_>, buf: &mut Vec<u16>| {
         if buf.is_empty() {
             return;
         }
@@ -385,7 +353,7 @@ unsafe fn post_text(proxy: CGEventTapProxy, text: &str) {
             if !ev.is_null() {
                 CGEventKeyboardSetUnicodeString(ev, buf.len() as c_ulong, buf.as_ptr());
                 CGEventSetFlags(ev, kCGEventFlagMaskNonCoalesced);
-                post(proxy, ev);
+                post(sink, ev);
             }
         }
         buf.clear();
@@ -404,19 +372,19 @@ unsafe fn post_text(proxy: CGEventTapProxy, text: &str) {
             _ => None,
         };
         if let Some(k) = special {
-            flush(&mut buf);
-            post_key(proxy, k, true, false, 0);
-            post_key(proxy, k, false, false, 0);
+            flush(sink, &mut buf);
+            post_key(sink, k, true, false, 0);
+            post_key(sink, k, false, false, 0);
             continue;
         }
         let mut units = [0u16; 2];
         let units = c.encode_utf16(&mut units);
         if buf.len() + units.len() > CHUNK {
-            flush(&mut buf);
+            flush(sink, &mut buf);
         }
         buf.extend_from_slice(units);
     }
-    flush(&mut buf);
+    flush(sink, &mut buf);
 }
 
 /// Perform engine actions. `flags_in` / `physical` describe the physical
@@ -425,7 +393,7 @@ unsafe fn post_text(proxy: CGEventTapProxy, text: &str) {
 #[allow(clippy::too_many_arguments)]
 unsafe fn perform(
     shared: Option<&Shared>,
-    proxy: CGEventTapProxy,
+    sink: &mut Sink<'_>,
     acts: &[Action],
     flags_in: u64,
     keep: u64,
@@ -448,9 +416,9 @@ unsafe fn perform(
                 }
                 let Some(kc) = mac_keycode(*k) else { continue }; // e.g. VK_DUMMY
                 let mods = adjust_flags(flags_in, physical, &os) & (GENERIC_MODS | DEVICE_MODS);
-                post_key(proxy, kc, *down, is_modifier(*k), mods | keep);
+                post_key(sink, kc, *down, is_modifier(*k), mods | keep);
             }
-            Action::Text(t) => post_text(proxy, t),
+            Action::Text(t) => post_text(sink, t),
             other => {
                 if let Some(s) = shared {
                     s.submit(other);
@@ -475,7 +443,7 @@ pub fn inject(acts: &[Action]) -> Result<()> {
         .collect();
     // Flags come purely from the keys still down (the HID system state would
     // include modifiers we posted ourselves).
-    unsafe { perform(None, std::ptr::null_mut(), acts, 0, 0, &BTreeSet::new(), os) };
+    unsafe { perform(None, &mut Sink::Hid, acts, 0, 0, &BTreeSet::new(), os) };
     Ok(())
 }
 
@@ -486,7 +454,7 @@ pub fn send_paste() -> Result<()> {
     }
     let cmd = kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK;
     unsafe {
-        let p = std::ptr::null_mut();
+        let p = &mut Sink::Hid;
         post_key(p, mac::COMMAND, true, true, cmd);
         post_key(p, mac::ANSI_V, true, false, cmd);
         post_key(p, mac::ANSI_V, false, false, cmd);
@@ -703,12 +671,11 @@ pub fn has_permission(prompt: bool) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Event tap
+// Event tap (a pm-hook subscriber)
 // ---------------------------------------------------------------------------
 
 struct TapCtx {
     shared: Arc<Shared>,
-    tap: Cell<CFMachPortRef>,
     /// Set after we switched caps lock back off; the resulting flagsChanged
     /// (if any) is swallowed.
     caps_echo: Cell<Option<Instant>>,
@@ -716,135 +683,51 @@ struct TapCtx {
     hid_reapply: Cell<Option<Instant>>,
 }
 
+/// The subscription; dropping it unsubscribes.
 pub struct Hook {
-    stop: Arc<AtomicBool>,
-    run_loop: SendPtr,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for Hook {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        unsafe { CFRunLoopStop(self.run_loop.0) };
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
+    _guard: pm_hook::Guard,
 }
 
 pub fn start(shared: Arc<Shared>) -> Result<Hook> {
-    let events = mask(kCGEventKeyDown)
-        | mask(kCGEventKeyUp)
-        | mask(kCGEventFlagsChanged)
-        | mask(kCGEventLeftMouseDown)
-        | mask(kCGEventLeftMouseUp)
-        | mask(kCGEventRightMouseDown)
-        | mask(kCGEventRightMouseUp)
-        | mask(kCGEventOtherMouseDown)
-        | mask(kCGEventOtherMouseUp)
-        | mask(kCGEventLeftMouseDragged)
-        | mask(kCGEventRightMouseDragged)
-        | mask(kCGEventOtherMouseDragged)
-        | mask(kCGEventScrollWheel);
+    use pm_hook::{EventMask, Subscription, Verdict};
+    let mask = EventMask::KEYS | EventMask::MOUSE_BUTTONS | EventMask::DRAGS | EventMask::SCROLL;
     let _ = source();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<SendPtr, String>>();
-    let thread = std::thread::Builder::new().name("km-eventtap".into()).spawn(move || unsafe {
-        let ctx = Box::into_raw(Box::new(TapCtx {
-            shared,
-            tap: Cell::new(std::ptr::null_mut()),
-            caps_echo: Cell::new(None),
-            hid_reapply: Cell::new(None),
-        }));
-        let mut tap = std::ptr::null_mut();
-        for loc in [kCGHIDEventTap, kCGSessionEventTap] {
-            tap = CGEventTapCreate(loc, kCGHeadInsertEventTap, kCGEventTapOptionDefault, events, tap_callback, ctx as *mut c_void);
-            if !tap.is_null() {
-                break;
+    let ctx = TapCtx { shared, caps_echo: Cell::new(None), hid_reapply: Cell::new(None) };
+    let guard = pm_hook::subscribe(
+        Subscription::new("keyboard-manager", pm_hook::priority::KEYBOARD_MANAGER, mask, move |ev| {
+            let (ty, event) = (ev.cg_type(), ev.cg_event());
+            let mut emits = Vec::new();
+            let keep = catch_unwind(AssertUnwindSafe(|| unsafe { handle(&ctx, &mut Sink::Tap(&mut emits), ty, event) }))
+                .unwrap_or_else(|_| {
+                    log::error!("keyboard-manager: event handler panicked");
+                    true
+                });
+            match (keep, emits.is_empty()) {
+                (true, true) => Verdict::Pass, // possibly edited in place
+                (false, true) => Verdict::Swallow,
+                (keep, false) => {
+                    if keep {
+                        emits.push(pm_hook::Emit::Original);
+                    }
+                    Verdict::Replace(emits)
+                }
             }
-        }
-        if tap.is_null() {
-            drop(Box::from_raw(ctx));
-            let _ = tx.send(Err("could not create the keyboard event tap: this process (or the terminal \
-                running it) is not trusted for Accessibility. Grant it in System Settings > Privacy & \
-                Security > Accessibility and restart it"
-                .into()));
-            return;
-        }
-        (*ctx).tap.set(tap);
-        let src = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-        let rl = CFRunLoopGetCurrent();
-        CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-        CGEventTapEnable(tap, true);
-        let _ = tx.send(Ok(SendPtr(rl)));
-        while !stop2.load(Ordering::SeqCst) {
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0);
-        }
-        CGEventTapEnable(tap, false);
-        CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-        CFMachPortInvalidate(tap);
-        CFRelease(src as CFTypeRef);
-        CFRelease(tap as CFTypeRef);
-        drop(Box::from_raw(ctx));
-    })?;
-
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(rl)) => Ok(Hook {
-            stop,
-            run_loop: rl,
-            thread: Some(thread),
-        }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(anyhow!(e))
-        }
-        Err(_) => {
-            stop.store(true, Ordering::SeqCst);
-            Err(anyhow!("event tap thread did not start"))
-        }
-    }
-}
-
-unsafe extern "C" fn tap_callback(
-    proxy: CGEventTapProxy,
-    ty: u32,
-    event: CGEventRef,
-    user: *mut c_void,
-) -> CGEventRef {
-    let ctx = &*(user as *const TapCtx);
-    if ty == kCGEventTapDisabledByTimeout || ty == kCGEventTapDisabledByUserInput {
-        log::warn!("keyboard-manager: event tap disabled ({ty:#x}); re-enabling");
-        let tap = ctx.tap.get();
-        if !tap.is_null() {
-            CGEventTapEnable(tap, true);
-        }
-        return event;
-    }
-    if event.is_null() {
-        return event;
-    }
-    let tag = CGEventGetIntegerValueField(event, kCGEventSourceUserData);
-    if tag == INJECTED_TAG as i64 || tag == MWB_TAG as i64 || tag == crate::TEXT_EXPANDER_TAG as i64
-    {
-        return event;
-    }
-    let keep = objc2::rc::autoreleasepool(|_| {
-        catch_unwind(AssertUnwindSafe(|| handle(ctx, proxy, ty, event))).unwrap_or_else(|_| {
-            log::error!("keyboard-manager: event handler panicked");
-            true
         })
-    });
-    if keep {
-        event
-    } else {
-        std::ptr::null_mut()
+        .ignore_tags(&[INJECTED_TAG, MWB_TAG, crate::TEXT_EXPANDER_TAG]),
+    );
+    if !pm_hook::status().is_active() {
+        drop(guard);
+        bail!(
+            "could not create the keyboard event tap: this process (or the terminal \
+             running it) is not trusted for Accessibility. Grant it in System Settings > Privacy & \
+             Security > Accessibility and restart it"
+        );
     }
+    Ok(Hook { _guard: guard })
 }
 
 /// Returns whether to keep (deliver) the event.
-unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRef) -> bool {
+unsafe fn handle(ctx: &TapCtx, sink: &mut Sink<'_>, ty: u32, event: CGEventRef) -> bool {
     let Ok(mut eng) = ctx.shared.engine.lock() else {
         return true;
     };
@@ -852,7 +735,7 @@ unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRe
         kCGEventKeyDown | kCGEventKeyUp => {
             let keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) as u16;
             match vk::mac_to_vk(keycode) {
-                Some((k, _)) => key_event(ctx, &mut eng, proxy, event, k, ty == kCGEventKeyDown),
+                Some((k, _)) => key_event(ctx, &mut eng, sink, event, k, ty == kCGEventKeyDown),
                 None => {
                     fix_flags(&eng, event);
                     true
@@ -863,7 +746,7 @@ unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRe
             let keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) as u16;
             let flags = CGEventGetFlags(event);
             if keycode == mac::CAPS_LOCK {
-                return caps_event(ctx, &mut eng, proxy, event);
+                return caps_event(ctx, &mut eng, sink, event);
             }
             let Some((k, _)) = vk::mac_to_vk(keycode).filter(|(k, _)| device_bit(*k).is_some())
             else {
@@ -880,7 +763,7 @@ unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRe
             // Prefer the device bit; fall back to the generic bit for sources
             // that don't set device bits.
             let down = flags & dev != 0 || (flags & generic != 0 && flags & family == 0);
-            key_event(ctx, &mut eng, proxy, event, k, down)
+            key_event(ctx, &mut eng, sink, event, k, down)
         }
         kCGEventLeftMouseDown
         | kCGEventRightMouseDown
@@ -895,7 +778,7 @@ unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRe
             let physical = eng.physical_keys().clone();
             perform(
                 Some(&ctx.shared),
-                proxy,
+                sink,
                 &acts,
                 flags_in,
                 flags_in & kCGEventFlagMaskAlphaShift,
@@ -923,7 +806,7 @@ unsafe fn fix_flags(eng: &Engine, event: CGEventRef) {
 unsafe fn key_event(
     ctx: &TapCtx,
     eng: &mut Engine,
-    proxy: CGEventTapProxy,
+    sink: &mut Sink<'_>,
     event: CGEventRef,
     k: u32,
     down: bool,
@@ -950,7 +833,7 @@ unsafe fn key_event(
             let physical = eng.physical_keys().clone();
             perform(
                 Some(&ctx.shared),
-                proxy,
+                sink,
                 &acts,
                 flags_in,
                 keep_bits,
@@ -990,7 +873,7 @@ unsafe fn key_event(
             }
             perform(
                 Some(&ctx.shared),
-                proxy,
+                sink,
                 &acts,
                 flags_in,
                 keep_bits,
@@ -1005,7 +888,7 @@ unsafe fn key_event(
 unsafe fn caps_event(
     ctx: &TapCtx,
     eng: &mut Engine,
-    proxy: CGEventTapProxy,
+    sink: &mut Sink<'_>,
     event: CGEventRef,
 ) -> bool {
     let flags_in = CGEventGetFlags(event);
@@ -1050,7 +933,7 @@ unsafe fn caps_event(
     let base = flags_in & !kCGEventFlagMaskAlphaShift;
     perform(
         Some(&ctx.shared),
-        proxy,
+        sink,
         &acts,
         base,
         0,

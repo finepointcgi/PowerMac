@@ -27,9 +27,10 @@ flowchart LR
 - **One crate per feature.** Each module is a library crate with a `Config` (serde, camelCase, every field optional), a `start(config) -> Handle`, live `update`, and `stop` that restores whatever it changed.
 - **Pure core, thin backends.** Geometry, state machines, parsers and policies are platform-independent and unit-tested (about 550 tests). OS code lives under `platform/macos` and `platform/windows` and is as small as possible.
 - **Windows semantics as the lingua franca.** Keys are Windows virtual-key codes everywhere, so configs and the Mouse Without Borders wire format are the same on both platforms.
-- **The main thread belongs to AppKit.** On macOS every overlay and panel is created on the main thread through the main dispatch queue; the tray app runs `NSApplication` there. Event taps and workers run on their own threads.
+- **The main thread belongs to AppKit.** On macOS every overlay and panel is created on the main thread through the main dispatch queue; the tray app runs `NSApplication` there. The global input hook and workers run on their own threads.
+- **One input hook.** Modules don't install event taps or LL hooks; they subscribe to `pm-hook`'s single tap with a priority, and it calls them in a fixed order (remaps first, then Mouse Without Borders, then local shortcuts). See [Global input hook](input-hook.md).
 - **Files, not sockets, between processes.** The settings window and helper windows are separate processes of the same executable and only exchange JSON files with the app (see [Process model and IPC](ipc.md)). The clipboard picker is the exception: it uses loopback TCP for speed.
-- **Tagged synthetic input.** Every module that injects events tags them, and every tap skips tagged events, so modules never react to each other.
+- **Tagged synthetic input.** Every module that injects events tags them (`pm_hook::tags`), and every subscriber skips the tags it must skip, so modules never react to each other.
 
 ## The app crate
 

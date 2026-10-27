@@ -41,7 +41,7 @@ pub fn decode_text(data: &[u8]) -> anyhow::Result<ClipboardTexts> {
     let mut dec = flate2::read::DeflateDecoder::new(data);
     let mut raw = Vec::new();
     dec.read_to_end(&mut raw)?;
-    let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     let st = String::from_utf16_lossy(&units);
     let mut out = ClipboardTexts::default();
     let mut count = 0;

@@ -1,16 +1,18 @@
-//! macOS backend: an active session-level `CGEventTap` on its own run loop.
+//! macOS backend: a subscriber of the shared event tap (`pm-hook`) at
+//! [`pm_hook::priority::TEXT_EXPANDER`] — after Keyboard Manager, so it sees
+//! the remapped keys, as the session-level tap it used to have did. Its
+//! backspaces and text replace the completing key (`Verdict::Replace`): the
+//! lower-priority subscribers see them, then they are posted after the tap.
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_ulong, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
-use std::thread::JoinHandle;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use pm_keys::*;
 
 use crate::engine::{Decision, Insert, Key, Plan};
@@ -44,46 +46,16 @@ mod pm_keys {
 }
 
 type CFTypeRef = *const c_void;
-type CFStringRef = *const c_void;
-type CFMachPortRef = *mut c_void;
-type CFRunLoopRef = *mut c_void;
-type CFRunLoopSourceRef = *mut c_void;
 type CGEventRef = *mut c_void;
 type CGEventSourceRef = *mut c_void;
-type CGEventTapProxy = *mut c_void;
-type CGEventTapCallBack =
-    unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    static kCFRunLoopCommonModes: CFStringRef;
-    static kCFRunLoopDefaultMode: CFStringRef;
     fn CFRelease(cf: CFTypeRef);
-    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source: u8) -> i32;
-    fn CFRunLoopStop(rl: CFRunLoopRef);
-    fn CFMachPortCreateRunLoopSource(
-        alloc: *const c_void,
-        port: CFMachPortRef,
-        order: isize,
-    ) -> CFRunLoopSourceRef;
-    fn CFMachPortInvalidate(port: CFMachPortRef);
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: CGEventTapCallBack,
-        user_info: *mut c_void,
-    ) -> CFMachPortRef;
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
-    fn CGEventTapPostEvent(proxy: CGEventTapProxy, event: CGEventRef);
     fn CGEventPost(tap: u32, event: CGEventRef);
     fn CGEventGetFlags(event: CGEventRef) -> u64;
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
@@ -110,17 +82,9 @@ extern "C" {
 }
 
 const kCGHIDEventTap: u32 = 0;
-const kCGSessionEventTap: u32 = 1;
-const kCGHeadInsertEventTap: u32 = 0;
-const kCGEventTapOptionDefault: u32 = 0;
 const kCGEventSourceStatePrivate: i32 = -1;
 
-const kCGEventLeftMouseDown: u32 = 1;
-const kCGEventRightMouseDown: u32 = 3;
 const kCGEventKeyDown: u32 = 10;
-const kCGEventOtherMouseDown: u32 = 25;
-const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
 const kCGKeyboardEventKeycode: u32 = 9;
 const kCGEventTargetUnixProcessID: u32 = 40;
@@ -134,10 +98,6 @@ const kCGEventFlagMaskNumericPad: u64 = 0x0020_0000;
 const kCGEventFlagMaskSecondaryFn: u64 = 0x0080_0000;
 const kCGEventFlagMaskNonCoalesced: u64 = 0x0000_0100;
 const NX_DEVICELCMDKEYMASK: u64 = 0x0000_0008;
-
-fn mask(ty: u32) -> u64 {
-    1u64 << ty
-}
 
 #[derive(Clone, Copy)]
 struct SendPtr(*mut c_void);
@@ -161,21 +121,32 @@ fn source() -> CGEventSourceRef {
     .0
 }
 
-/// Post after our tap (from the callback) or at the HID level (`proxy` null).
-unsafe fn post(proxy: CGEventTapProxy, ev: CGEventRef) {
+/// Where posted events go: from the tap handler they replace the current
+/// event; otherwise they are posted at the HID level.
+enum Sink<'a> {
+    Hid,
+    Tap(&'a mut Vec<pm_hook::Emit>),
+}
+
+unsafe fn post(sink: &mut Sink<'_>, ev: CGEventRef) {
     if ev.is_null() {
         return;
     }
     CGEventSetIntegerValueField(ev, kCGEventSourceUserData, INJECTED_TAG as i64);
-    if proxy.is_null() {
-        CGEventPost(kCGHIDEventTap, ev);
-    } else {
-        CGEventTapPostEvent(proxy, ev);
+    match sink {
+        Sink::Hid => {
+            CGEventPost(kCGHIDEventTap, ev);
+            CFRelease(ev as CFTypeRef);
+        }
+        Sink::Tap(out) => {
+            if let Some(e) = pm_hook::Synthetic::from_cg(ev) {
+                out.push(pm_hook::Emit::Event(e));
+            }
+        }
     }
-    CFRelease(ev as CFTypeRef);
 }
 
-unsafe fn post_key(proxy: CGEventTapProxy, keycode: u16, flags: u64) {
+unsafe fn post_key(sink: &mut Sink<'_>, keycode: u16, flags: u64) {
     let extra = match keycode {
         LEFT_ARROW | RIGHT_ARROW | UP_ARROW | DOWN_ARROW => {
             kCGEventFlagMaskNumericPad | kCGEventFlagMaskSecondaryFn
@@ -186,27 +157,27 @@ unsafe fn post_key(proxy: CGEventTapProxy, keycode: u16, flags: u64) {
         let ev = CGEventCreateKeyboardEvent(source(), keycode, down);
         if !ev.is_null() {
             CGEventSetFlags(ev, flags | extra | kCGEventFlagMaskNonCoalesced);
-            post(proxy, ev);
+            post(sink, ev);
         }
     }
 }
 
-fn repeat_key(proxy: CGEventTapProxy, keycode: u16, n: usize) {
+fn repeat_key(sink: &mut Sink<'_>, keycode: u16, n: usize) {
     for _ in 0..n {
-        unsafe { post_key(proxy, keycode, 0) };
+        unsafe { post_key(sink, keycode, 0) };
     }
 }
 
 /// Type `text` with one unicode key event per character (some apps only
 /// read the first character of longer strings); `\n` presses Return, `\t`
 /// Tab.
-fn post_text(proxy: CGEventTapProxy, text: &str) {
+fn post_text(sink: &mut Sink<'_>, text: &str) {
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\r' if chars.peek() == Some(&'\n') => continue,
-            '\r' | '\n' => repeat_key(proxy, RETURN, 1),
-            '\t' => repeat_key(proxy, TAB, 1),
+            '\r' | '\n' => repeat_key(sink, RETURN, 1),
+            '\t' => repeat_key(sink, TAB, 1),
             c => {
                 let mut units = [0u16; 2];
                 let units = c.encode_utf16(&mut units);
@@ -220,7 +191,7 @@ fn post_text(proxy: CGEventTapProxy, text: &str) {
                                 units.as_ptr(),
                             );
                             CGEventSetFlags(ev, kCGEventFlagMaskNonCoalesced);
-                            post(proxy, ev);
+                            post(sink, ev);
                         }
                     }
                 }
@@ -230,13 +201,13 @@ fn post_text(proxy: CGEventTapProxy, text: &str) {
 }
 
 /// Perform a plan from the tap callback (a paste goes to the worker).
-fn perform(shared: &Shared, proxy: CGEventTapProxy, plan: Plan) {
-    repeat_key(proxy, RIGHT_ARROW, plan.right);
-    repeat_key(proxy, DELETE, plan.backspaces);
+fn perform(shared: &Shared, sink: &mut Sink<'_>, plan: Plan) {
+    repeat_key(sink, RIGHT_ARROW, plan.right);
+    repeat_key(sink, DELETE, plan.backspaces);
     match plan.insert {
         Insert::Type(t) => {
-            post_text(proxy, &t);
-            repeat_key(proxy, LEFT_ARROW, plan.left);
+            post_text(sink, &t);
+            repeat_key(sink, LEFT_ARROW, plan.left);
         }
         Insert::Paste(text) => shared.submit(Job::Paste {
             text,
@@ -251,7 +222,7 @@ pub fn paste_and_move(left: usize) -> Result<()> {
         bail!("not permitted to post events (Accessibility)");
     }
     let cmd = kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK;
-    let p = std::ptr::null_mut();
+    let p = &mut Sink::Hid;
     unsafe {
         post_flags(COMMAND, true, cmd);
         post_key(p, ANSI_V, cmd);
@@ -270,7 +241,7 @@ unsafe fn post_flags(keycode: u16, down: bool, flags: u64) {
     if !ev.is_null() {
         CGEventSetType(ev, 12); // kCGEventFlagsChanged
         CGEventSetFlags(ev, flags | kCGEventFlagMaskNonCoalesced);
-        post(std::ptr::null_mut(), ev);
+        post(&mut Sink::Hid, ev);
     }
 }
 
@@ -302,132 +273,53 @@ fn app_ids(pid: i32) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Tap
+// Tap (a pm-hook subscriber)
 // ---------------------------------------------------------------------------
 
 struct TapCtx {
     shared: Arc<Shared>,
-    tap: Cell<CFMachPortRef>,
     /// Target pid of the last key event and its app identifiers.
     pid: Cell<i64>,
     app: RefCell<Option<Vec<String>>>,
 }
 
+/// The subscription; dropping it unsubscribes.
 pub struct Hook {
-    stop: Arc<AtomicBool>,
-    run_loop: SendPtr,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for Hook {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        unsafe { CFRunLoopStop(self.run_loop.0) };
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
+    _guard: pm_hook::Guard,
 }
 
 pub fn start(shared: Arc<Shared>) -> Result<Hook> {
-    let events = mask(kCGEventKeyDown)
-        | mask(kCGEventLeftMouseDown)
-        | mask(kCGEventRightMouseDown)
-        | mask(kCGEventOtherMouseDown);
+    use pm_hook::{EventMask, EventType, Subscription, Verdict};
+    let mask = EventMask::of(&[EventType::KeyDown, EventType::LeftMouseDown, EventType::RightMouseDown, EventType::OtherMouseDown]);
     let _ = source();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<SendPtr, String>>();
-    let thread = std::thread::Builder::new()
-        .name("te-eventtap".into())
-        .spawn(move || unsafe {
-            let ctx = Box::into_raw(Box::new(TapCtx {
-                shared,
-                tap: Cell::new(std::ptr::null_mut()),
-                pid: Cell::new(-1),
-                app: RefCell::new(None),
-            }));
-            let tap = CGEventTapCreate(
-                kCGSessionEventTap,
-                kCGHeadInsertEventTap,
-                kCGEventTapOptionDefault,
-                events,
-                tap_callback,
-                ctx as *mut c_void,
-            );
-            if tap.is_null() {
-                drop(Box::from_raw(ctx));
-                let _ = tx.send(Err(
-                    "could not create the text expander's event tap: grant \
-                    Accessibility in System Settings > Privacy & Security"
-                        .into(),
-                ));
-                return;
+    let ctx = TapCtx { shared, pid: Cell::new(-1), app: RefCell::new(None) };
+    let guard = pm_hook::subscribe(
+        Subscription::new("text-expander", pm_hook::priority::TEXT_EXPANDER, mask, move |ev| {
+            let (ty, event) = (ev.cg_type(), ev.cg_event());
+            let mut emits = Vec::new();
+            let keep = catch_unwind(AssertUnwindSafe(|| unsafe { handle(&ctx, &mut Sink::Tap(&mut emits), ty, event) }))
+                .unwrap_or_else(|_| {
+                    log::error!("text-expander: event handler panicked");
+                    true
+                });
+            match (keep, emits.is_empty()) {
+                (true, true) => Verdict::Pass,
+                (false, true) => Verdict::Swallow,
+                (keep, false) => {
+                    if keep {
+                        emits.push(pm_hook::Emit::Original);
+                    }
+                    Verdict::Replace(emits)
+                }
             }
-            (*ctx).tap.set(tap);
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-            let rl = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(tap, true);
-            let _ = tx.send(Ok(SendPtr(rl)));
-            while !stop2.load(Ordering::SeqCst) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0);
-            }
-            CGEventTapEnable(tap, false);
-            CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-            CFMachPortInvalidate(tap);
-            CFRelease(src as CFTypeRef);
-            CFRelease(tap as CFTypeRef);
-            drop(Box::from_raw(ctx));
-        })?;
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(rl)) => Ok(Hook {
-            stop,
-            run_loop: rl,
-            thread: Some(thread),
-        }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(anyhow!(e))
-        }
-        Err(_) => {
-            stop.store(true, Ordering::SeqCst);
-            Err(anyhow!("event tap thread did not start"))
-        }
-    }
-}
-
-unsafe extern "C" fn tap_callback(
-    proxy: CGEventTapProxy,
-    ty: u32,
-    event: CGEventRef,
-    user: *mut c_void,
-) -> CGEventRef {
-    let ctx = &*(user as *const TapCtx);
-    if ty == kCGEventTapDisabledByTimeout || ty == kCGEventTapDisabledByUserInput {
-        log::warn!("text-expander: event tap disabled ({ty:#x}); re-enabling");
-        let tap = ctx.tap.get();
-        if !tap.is_null() {
-            CGEventTapEnable(tap, true);
-        }
-        return event;
-    }
-    if event.is_null()
-        || CGEventGetIntegerValueField(event, kCGEventSourceUserData) == INJECTED_TAG as i64
-    {
-        return event;
-    }
-    let keep = objc2::rc::autoreleasepool(|_| {
-        catch_unwind(AssertUnwindSafe(|| handle(ctx, proxy, ty, event))).unwrap_or_else(|_| {
-            log::error!("text-expander: event handler panicked");
-            true
         })
-    });
-    if keep {
-        event
-    } else {
-        std::ptr::null_mut()
+        .ignore_tags(&[INJECTED_TAG]),
+    );
+    if !pm_hook::status().is_active() {
+        drop(guard);
+        bail!("could not create the text expander's event tap: grant Accessibility in System Settings > Privacy & Security");
     }
+    Ok(Hook { _guard: guard })
 }
 
 /// Classify a key-down for the engine.
@@ -459,7 +351,7 @@ unsafe fn classify(event: CGEventRef) -> Key {
 }
 
 /// Returns whether to deliver the event.
-unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRef) -> bool {
+unsafe fn handle(ctx: &TapCtx, sink: &mut Sink<'_>, ty: u32, event: CGEventRef) -> bool {
     let Ok(mut ex) = ctx.shared.expander.lock() else {
         return true;
     };
@@ -495,7 +387,7 @@ unsafe fn handle(ctx: &TapCtx, proxy: CGEventTapProxy, ty: u32, event: CGEventRe
         Decision::Swallow(plan) => {
             drop(ex);
             log::debug!("text-expander: {plan:?}");
-            perform(&ctx.shared, proxy, plan);
+            perform(&ctx.shared, sink, plan);
             false
         }
     }

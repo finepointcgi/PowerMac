@@ -1,7 +1,11 @@
 //! Windows backend (compile-checked; not yet run on Windows).
 //!
-//! One dedicated thread owns everything: `WH_KEYBOARD_LL` + `WH_MOUSE_LL`
-//! hooks, an `EVENT_SYSTEM_FOREGROUND` WinEvent hook for most-recently-used
+//! Keyboard and mouse input come from the shared `WH_KEYBOARD_LL` +
+//! `WH_MOUSE_LL` hooks (`pm-hook`, [`pm_hook::priority::WINDOW_SWITCHER`]),
+//! forwarded synchronously to the switcher thread with
+//! [`pm_hook::win::Forwarder`] (mouse events only while the overlay is
+//! shown). That thread owns everything else: an `EVENT_SYSTEM_FOREGROUND`
+//! WinEvent hook for most-recently-used
 //! order, and the overlay — a topmost, non-activating tool window painted
 //! with GDI (dark rounded panel, accent selection, icons and titles) with
 //! live DWM thumbnails (`DwmRegisterThumbnail`) on top. Other threads talk
@@ -503,68 +507,77 @@ fn mod_bit(vk: u32) -> Option<fn(&mut Mods) -> &mut bool> {
     })
 }
 
-unsafe extern "system" fn kb_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let k = &*(lp as *const KBDLLHOOKSTRUCT);
-        if k.dwExtraInfo != pm_input::INJECTED_TAG {
-            let down = wp as u32 == WM_KEYDOWN || wp as u32 == WM_SYSKEYDOWN;
-            let mut swallow = false;
-            with_ctx(|ctx| {
-                if let Some(bit) = mod_bit(k.vkCode) {
-                    *bit(&mut ctx.mods) = down;
-                    if !down && ctx.engine.is_active() {
-                        let fx = ctx.engine.modifiers_changed(ctx.mods);
-                        perform(ctx, fx);
-                    }
-                    return;
-                }
-                if down {
-                    let cfg = ctx.engine.config().clone();
-                    let (mru, scale) = (ctx.mru.clone(), ctx.scale);
-                    let o = ctx.engine.key_down(k.vkCode, ctx.mods, Instant::now(), &mut |m| snapshot(&mru, &cfg, m, scale));
-                    swallow = o.swallow;
-                    perform(ctx, o.effects);
-                } else {
-                    swallow = ctx.engine.key_up(k.vkCode).swallow;
-                }
-            });
-            if swallow {
-                return 1;
-            }
-        }
+/// The old keyboard hook body (runs on the switcher thread): true = swallow.
+fn kb_event(wp: u32, k: &KBDLLHOOKSTRUCT) -> bool {
+    if k.dwExtraInfo == pm_input::INJECTED_TAG {
+        return false;
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wp, lp)
+    let down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
+    let mut swallow = false;
+    with_ctx(|ctx| {
+        if let Some(bit) = mod_bit(k.vkCode) {
+            *bit(&mut ctx.mods) = down;
+            if !down && ctx.engine.is_active() {
+                let fx = ctx.engine.modifiers_changed(ctx.mods);
+                perform(ctx, fx);
+            }
+            return;
+        }
+        if down {
+            let cfg = ctx.engine.config().clone();
+            let (mru, scale) = (ctx.mru.clone(), ctx.scale);
+            let o = ctx.engine.key_down(k.vkCode, ctx.mods, Instant::now(), &mut |m| snapshot(&mru, &cfg, m, scale));
+            swallow = o.swallow;
+            perform(ctx, o.effects);
+        } else {
+            swallow = ctx.engine.key_up(k.vkCode).swallow;
+        }
+    });
+    swallow
 }
 
-unsafe extern "system" fn mouse_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let m = &*(lp as *const MSLLHOOKSTRUCT);
-        let mut swallow = false;
-        with_ctx(|ctx| {
-            if !ctx.shown {
-                return;
-            }
-            let (x, y) = (m.pt.x as f64 / ctx.scale, m.pt.y as f64 / ctx.scale);
-            match wp as u32 {
-                WM_MOUSEMOVE => {
-                    let fx = ctx.engine.hover(x, y);
-                    perform(ctx, fx);
-                }
-                WM_LBUTTONDOWN => {
-                    let o = ctx.engine.click(x, y);
-                    swallow = o.swallow;
-                    ctx.swallow_mouse_up = o.swallow;
-                    perform(ctx, o.effects);
-                }
-                WM_LBUTTONUP => swallow = std::mem::take(&mut ctx.swallow_mouse_up),
-                _ => {}
-            }
-        });
-        if swallow {
-            return 1;
+/// The old mouse hook body (runs on the switcher thread): true = swallow.
+fn mouse_event(wp: u32, m: &MSLLHOOKSTRUCT) -> bool {
+    let mut swallow = false;
+    with_ctx(|ctx| {
+        if !ctx.shown {
+            return;
         }
-    }
-    CallNextHookEx(std::ptr::null_mut(), code, wp, lp)
+        let (x, y) = (m.pt.x as f64 / ctx.scale, m.pt.y as f64 / ctx.scale);
+        match wp {
+            WM_MOUSEMOVE => {
+                let fx = ctx.engine.hover(x, y);
+                perform(ctx, fx);
+            }
+            WM_LBUTTONDOWN => {
+                let o = ctx.engine.click(x, y);
+                swallow = o.swallow;
+                ctx.swallow_mouse_up = o.swallow;
+                perform(ctx, o.effects);
+            }
+            WM_LBUTTONUP => swallow = std::mem::take(&mut ctx.swallow_mouse_up),
+            _ => {}
+        }
+    });
+    swallow
+}
+
+/// Subscribe to the shared hooks, forwarding to the switcher thread.
+fn subscribe(target: pm_hook::win::ForwardTarget) -> pm_hook::Guard {
+    use pm_hook::{EventMask, EventType, Subscription, Verdict};
+    let mask = EventMask::KEYS | EventMask::of(&[EventType::MouseMoved, EventType::LeftMouseDown, EventType::LeftMouseUp]);
+    pm_hook::subscribe(Subscription::new("window-switcher", pm_hook::priority::WINDOW_SWITCHER, mask, move |ev| {
+        // The mouse only matters while the overlay is up; a swallowed
+        // click's mouse-up arrives while it's still flagged shown.
+        if ev.mouse().is_some() && !SHOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            return Verdict::Pass;
+        }
+        if target.call(ev) {
+            Verdict::Swallow
+        } else {
+            Verdict::Pass
+        }
+    }))
 }
 
 unsafe extern "system" fn fg_hook(_h: HWINEVENTHOOK, _ev: u32, hwnd: HWND, id_object: i32, _c: i32, _t: u32, _ms: u32) {
@@ -575,7 +588,7 @@ unsafe extern "system" fn fg_hook(_h: HWINEVENTHOOK, _ev: u32, hwnd: HWND, id_ob
 
 // ------------------------------------------------------------ thread
 
-fn run(cfg: Config, rx: Receiver<Cmd>, ready: Sender<Result<u32>>) {
+fn run(cfg: Config, rx: Receiver<Cmd>, ready: Sender<Result<(u32, pm_hook::win::ForwardTarget)>>) {
     unsafe {
         let hinst = GetModuleHandleW(std::ptr::null());
         let class = wide("PowerMacWindowSwitcher");
@@ -630,15 +643,17 @@ fn run(cfg: Config, rx: Receiver<Cmd>, ready: Sender<Result<u32>>) {
                 font,
             })
         });
-        let kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_hook), hinst, 0);
-        let ms = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), hinst, 0);
-        let fg = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, std::ptr::null_mut(), Some(fg_hook), 0, 0, WINEVENT_OUTOFCONTEXT);
-        if kb.is_null() {
-            let _ = ready.send(Err(anyhow!("SetWindowsHookExW(WH_KEYBOARD_LL) failed")));
+        let fwd = pm_hook::win::Forwarder::new(|f| match f {
+            pm_hook::win::Forwarded::Key { msg, info } => kb_event(*msg, info),
+            pm_hook::win::Forwarded::Mouse { msg, info } => mouse_event(*msg, info),
+        });
+        let Some(fwd) = fwd else {
+            let _ = ready.send(Err(anyhow!("could not create the input forwarding window")));
             DestroyWindow(overlay);
             return;
-        }
-        let _ = ready.send(Ok(GetCurrentThreadId()));
+        };
+        let fg = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, std::ptr::null_mut(), Some(fg_hook), 0, 0, WINEVENT_OUTOFCONTEXT);
+        let _ = ready.send(Ok((GetCurrentThreadId(), fwd.target())));
 
         let mut msg: MSG = std::mem::zeroed();
         'outer: while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -667,10 +682,7 @@ fn run(cfg: Config, rx: Receiver<Cmd>, ready: Sender<Result<u32>>) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        UnhookWindowsHookEx(kb);
-        if !ms.is_null() {
-            UnhookWindowsHookEx(ms);
-        }
+        drop(fwd);
         if !fg.is_null() {
             UnhookWinEvent(fg);
         }
@@ -688,6 +700,7 @@ pub(crate) struct Runtime {
     tx: Sender<Cmd>,
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
+    hook: Option<pm_hook::Guard>,
     config: Arc<Mutex<Config>>,
 }
 
@@ -697,8 +710,15 @@ impl Runtime {
         let (rtx, rrx) = mpsc::channel();
         let c = cfg.clone();
         let thread = std::thread::Builder::new().name("window-switcher".into()).spawn(move || run(c, rx, rtx))?;
-        let thread_id = rrx.recv().map_err(|_| anyhow!("window switcher thread died"))??;
-        Ok(Self { tx, thread_id, thread: Some(thread), config: Arc::new(Mutex::new(cfg)) })
+        let (thread_id, target) = rrx.recv().map_err(|_| anyhow!("window switcher thread died"))??;
+        let hook = subscribe(target);
+        let mut rt = Self { tx, thread_id, thread: Some(thread), hook: Some(hook), config: Arc::new(Mutex::new(cfg)) };
+        let st = pm_hook::status();
+        if !st.is_active() {
+            rt.stop();
+            return Err(anyhow!("SetWindowsHookExW(WH_KEYBOARD_LL) failed ({:?})", st.state));
+        }
+        Ok(rt)
     }
 
     fn post(&self, c: Cmd) {
@@ -730,7 +750,7 @@ impl Runtime {
     pub(crate) fn debug_break_input(&self, _broken: bool) {}
 
     pub(crate) fn is_input_active(&self) -> bool {
-        self.thread.is_some()
+        self.thread.is_some() && self.hook.is_some() && pm_hook::status().is_active()
     }
 
     pub(crate) fn windows(&self) -> Vec<WindowInfo> {
@@ -738,6 +758,9 @@ impl Runtime {
     }
 
     pub(crate) fn stop(&mut self) {
+        // Unsubscribe first (waits for a forwarded call in progress, which
+        // the still-running switcher thread answers).
+        self.hook.take();
         if let Some(t) = self.thread.take() {
             self.post(Cmd::Stop);
             let _ = t.join();

@@ -23,6 +23,7 @@ fn cfg(name: &str, port: u16, other: &str, other_port: u16, key: &str) -> Config
         swap_cmd_ctrl: false,
         reconnect_secs: 1,
         auto_discover: false,
+        answer_name_queries: false,
         ..Default::default()
     };
     c.peers.insert(other.into(), format!("127.0.0.1:{other_port}"));
@@ -105,9 +106,8 @@ fn edge_switch_forwards_input_absolute() {
     let ev = b.events().unwrap();
     a.send_clipboard_text("shared text").unwrap();
     let got = loop {
-        match ev.recv_timeout(Duration::from_secs(5)).unwrap() {
-            mwb::EngineEvent::ClipboardText { text, .. } => break text,
-            _ => {}
+        if let mwb::EngineEvent::ClipboardText { text, .. } = ev.recv_timeout(Duration::from_secs(5)).unwrap() {
+            break text;
         }
     };
     assert_eq!(got, "shared text");
@@ -179,6 +179,7 @@ fn lone(name: &str, port: u16, key: &str, auto: bool) -> Config {
         swap_cmd_ctrl: false,
         reconnect_secs: 1,
         auto_discover: auto,
+        answer_name_queries: false,
         ..Default::default()
     }
 }

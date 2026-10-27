@@ -1,5 +1,6 @@
 //! macOS backend: Accessibility API for windows, NSScreen for monitors,
-//! CGEventTap for drag detection + hotkeys, AppKit overlay on the main thread.
+//! the shared event tap (`pm-hook`) for drag detection + hotkeys, AppKit
+//! overlay on the main thread.
 
 mod ax;
 mod ffi;

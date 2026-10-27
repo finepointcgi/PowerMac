@@ -155,9 +155,8 @@ mod tests {
         }
         let mut r = SecureReader::new(&out[..], "keykeykeykeykey2").unwrap();
         // Garbage decrypts: either invalid or type-0 error.
-        match r.recv(crypto::get_24bit_hash("keykeykeykeykey2")) {
-            Ok(p) => assert!(!p.valid),
-            Err(_) => {}
+        if let Ok(p) = r.recv(crypto::get_24bit_hash("keykeykeykeykey2")) {
+            assert!(!p.valid);
         }
     }
 }

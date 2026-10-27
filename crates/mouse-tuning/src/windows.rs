@@ -1,24 +1,15 @@
 //! Windows engine: pointer acceleration/speed through `SystemParametersInfo`
-//! (session only, restored on stop) and button remapping through a
-//! `WH_MOUSE_LL` hook on its own message-loop thread.
+//! (session only, restored on stop) and button remapping through the shared
+//! `WH_MOUSE_LL` hook (`pm-hook`).
 
-use std::cell::RefCell;
 use std::ffi::c_void;
-use std::mem::zeroed;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-    SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, HHOOK, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
-    PM_NOREMOVE, SPI_GETMOUSE, SPI_GETMOUSESPEED, SPI_SETMOUSE, SPI_SETMOUSESPEED, WH_MOUSE_LL, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_QUIT, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    SystemParametersInfoW, LLMHF_INJECTED, SPI_GETMOUSE, SPI_GETMOUSESPEED, SPI_SETMOUSE, SPI_SETMOUSESPEED, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use crate::actions::Executor;
@@ -118,59 +109,39 @@ struct HookCtx {
     swallowed: u32,
 }
 
-thread_local! {
-    static CTX: RefCell<Option<HookCtx>> = const { RefCell::new(None) };
-}
-
+/// The subscription; `stop` (or dropping it) unsubscribes.
 struct ButtonHook {
-    thread_id: u32,
-    thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl ButtonHook {
     fn start(table: Arc<Mutex<Vec<ButtonAction>>>, actions: mpsc::Sender<ButtonAction>) -> Result<Self> {
-        let (tx, rx) = mpsc::channel::<std::result::Result<u32, String>>();
-        let thread = std::thread::Builder::new().name("mouse-tuning-buttons".into()).spawn(move || unsafe {
-            let thread_id = GetCurrentThreadId();
-            CTX.with(|c| *c.borrow_mut() = Some(HookCtx { table, actions, swallowed: 0 }));
-            let mut msg: MSG = zeroed();
-            PeekMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0, PM_NOREMOVE);
-            let hmod = GetModuleHandleW(std::ptr::null());
-            let hook: HHOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0);
-            if hook.is_null() {
-                let _ = tx.send(Err("SetWindowsHookExW(WH_MOUSE_LL) failed".into()));
-                CTX.with(|c| *c.borrow_mut() = None);
-                return;
+        use pm_hook::{EventMask, EventType, Subscription, Verdict};
+        let mut ctx = HookCtx { table, actions, swallowed: 0 };
+        let mask = EventMask::of(&[EventType::OtherMouseDown, EventType::OtherMouseUp]);
+        let guard = pm_hook::subscribe(Subscription::new("mouse-tuning", pm_hook::priority::MOUSE_TUNING, mask, move |ev| {
+            let Some((msg, info)) = ev.mouse() else { return Verdict::Pass };
+            let injected = info.flags & LLMHF_INJECTED != 0;
+            let ours = injected && (info.dwExtraInfo == PM_INPUT_INJECTED_TAG || info.dwExtraInfo == SELF_INJECTED_TAG);
+            if !ours {
+                if let Some((btn, down)) = decode(msg, info.mouseData) {
+                    if catch_unwind(AssertUnwindSafe(|| handle(&mut ctx, btn, down))).unwrap_or(false) {
+                        return Verdict::Swallow;
+                    }
+                }
             }
-            let _ = tx.send(Ok(thread_id));
-            while GetMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0) > 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-            UnhookWindowsHookEx(hook);
-            CTX.with(|c| *c.borrow_mut() = None);
-        })?;
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(thread_id)) => Ok(Self { thread_id, thread: Some(thread) }),
-            Ok(Err(e)) => {
-                let _ = thread.join();
-                Err(anyhow!(e))
-            }
-            Err(_) => Err(anyhow!("button hook thread did not start")),
+            Verdict::Pass
+        }));
+        let st = pm_hook::status();
+        if !st.is_active() {
+            drop(guard);
+            return Err(anyhow!("SetWindowsHookExW(WH_MOUSE_LL) failed ({:?})", st.state));
         }
+        Ok(Self { guard: Some(guard) })
     }
 
     fn stop(&mut self) {
-        if let Some(t) = self.thread.take() {
-            unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
-            let _ = t.join();
-        }
-    }
-}
-
-impl Drop for ButtonHook {
-    fn drop(&mut self) {
-        self.stop();
+        self.guard.take();
     }
 }
 
@@ -190,10 +161,8 @@ fn decode(msg: u32, mouse_data: u32) -> Option<(u8, bool)> {
     }
 }
 
-fn handle(btn: u8, down: bool) -> bool {
-    CTX.with(|c| {
-        let mut c = c.borrow_mut();
-        let Some(ctx) = c.as_mut() else { return false };
+fn handle(ctx: &mut HookCtx, btn: u8, down: bool) -> bool {
+    {
         let bit = 1u32 << btn;
         if down {
             let action = ctx.table.lock().ok().and_then(|t| t.get(btn as usize).cloned()).unwrap_or_default();
@@ -210,23 +179,7 @@ fn handle(btn: u8, down: bool) -> bool {
             ctx.swallowed &= !bit;
             was
         }
-    })
-}
-
-unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let info = &*(lparam as *const MSLLHOOKSTRUCT);
-        let injected = info.flags & LLMHF_INJECTED != 0;
-        let ours = injected && (info.dwExtraInfo == PM_INPUT_INJECTED_TAG || info.dwExtraInfo == SELF_INJECTED_TAG);
-        if !ours {
-            if let Some((btn, down)) = decode(wparam as u32, info.mouseData) {
-                if catch_unwind(AssertUnwindSafe(|| handle(btn, down))).unwrap_or(false) {
-                    return 1;
-                }
-            }
-        }
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
 // ---------------------------------------------------------------------------

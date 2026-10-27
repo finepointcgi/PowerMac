@@ -76,6 +76,7 @@ nav:
           - Notch widgets (gallery, Script, xbar, Web): features/notch-widgets.md
       - Input:
           - Mouse Without Borders: features/mouse-without-borders.md
+          - Pairing with Windows: features/mouse-without-borders-pairing.md
           - Mouse tuning: features/mouse-tuning.md
           - Scrolling: features/scrolling.md
           - Mouse Utilities: features/mouse-utils.md
@@ -94,6 +95,7 @@ nav:
   - Architecture:
       - Overview: architecture/overview.md
       - Crates: architecture/crates.md
+      - Global input hook: architecture/input-hook.md
       - Process model and IPC: architecture/ipc.md
   - Development:
       - Building and testing: development/building.md

@@ -6,6 +6,9 @@
 //        a live MWB peer (MainTCPRoutine port) printing JSON lines. serve listens on
 //        <host> (an IP address to bind, e.g. 127.0.0.1), connect connects to it.
 //        script: "control" (send heartbeat/mouse/keys/clipboard/hide to the other side) or "listen".
+//   pt <baseport> <name> <id> <seconds> [--dns N=IP,..] [--listen port]
+//        a PowerToys "PC" driven like the Settings UI's Connect button (PowerToysFlow.cs).
+//   dns-probe <ip>                            -> what Dns.GetHostEntry returns for an IP string
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -41,6 +44,15 @@ internal static class Program
             case "decode-stream": DecodeStream(args[1], args[2]); return 0;
             case "decode-clip": Console.WriteLine(JsonSerializer.Serialize(new { text = ClipText.Decompress(Convert.FromHexString(args[1])) })); return 0;
             case "peer": return RunPeer(args);
+            case "pt": return PtFlow.Run(args);
+            case "dns-probe":
+                {
+                    // What the real Dns.GetHostEntry does with an IP-address string (a reverse
+                    // lookup first; HostName is a name, not the address) - loopback only.
+                    var e = Dns.GetHostEntry(args[1]);
+                    Console.WriteLine(JsonSerializer.Serialize(new { host = e.HostName, addresses = e.AddressList.Select(a => a.ToString()).ToArray() }));
+                    return 0;
+                }
             default: Console.Error.WriteLine("usage: vectors | decode-stream | decode-clip | peer"); return 2;
         }
     }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/pm-hook",
     "crates/pm-input",
     "crates/mwb",
     "crates/fancyzones",
@@ -24,6 +25,7 @@ members = [
     "crates/audio-control",
     "crates/dock-previews",
     "crates/text-expander",
+    "crates/workspaces",
     "crates/powermac",
 ]
 

@@ -6,7 +6,7 @@
 //! * software dimming with `SetDeviceGammaRamp` (Windows rejects ramps far
 //!   from identity unless `GdiIcmGammaRange` is raised, so very low levels
 //!   may fail);
-//! * a `WH_KEYBOARD_LL` hook for the volume keys and hotkeys (brightness
+//! * the shared `WH_KEYBOARD_LL` hook (`pm-hook`) for the volume keys and hotkeys (brightness
 //!   keys are handled by firmware / ACPI on Windows and never reach it).
 //!
 //! No OSD on Windows yet.
@@ -15,19 +15,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 use windows_sys::Win32::Devices::Display::*;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Storage::FileSystem::*;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY};
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::UI::ColorSystem::{GetDeviceGammaRamp, SetDeviceGammaRamp};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
@@ -499,31 +496,28 @@ fn on_key(ctx: &mut HookCtx, vk: u32, down: bool) -> bool {
     true
 }
 
-unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let k = &*(lparam as *const KBDLLHOOKSTRUCT);
-        if k.flags & LLKHF_INJECTED == 0 {
-            let down = wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN;
-            let swallow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut g = HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner());
-                g.as_mut().map(|ctx| on_key(ctx, k.vkCode, down)).unwrap_or(false)
-            }))
-            .unwrap_or(false);
-            if swallow {
-                return 1;
-            }
-        }
+/// The old `hook_proc` body: true = swallow.
+fn key_event(msg: u32, k: &KBDLLHOOKSTRUCT) -> bool {
+    if k.flags & LLKHF_INJECTED != 0 {
+        return false;
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut g = HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner());
+        g.as_mut().map(|ctx| on_key(ctx, k.vkCode, down)).unwrap_or(false)
+    }))
+    .unwrap_or(false)
 }
 
+/// The subscription to the shared keyboard hook (`pm-hook`,
+/// [`pm_hook::priority::DISPLAY_CONTROL`]).
 pub(crate) struct KeyHook {
-    thread_id: u32,
-    thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl KeyHook {
     pub(crate) fn start(inner: Arc<Inner>) -> Result<Self> {
+        use pm_hook::{EventMask, Subscription, Verdict};
         {
             let mut g = HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner());
             if g.is_some() {
@@ -531,34 +525,22 @@ impl KeyHook {
             }
             *g = Some(HookCtx { inner, router: KeyRouter::default(), held: Vec::new(), hotkey_downs: Vec::new() });
         }
-        let (tx, rx) = mpsc::channel::<Option<u32>>();
-        let thread = std::thread::Builder::new().name("display-control-keys".into()).spawn(move || unsafe {
-            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), GetModuleHandleW(std::ptr::null()), 0);
-            if hook.is_null() {
-                let _ = tx.send(None);
-                return;
+        let guard = pm_hook::subscribe(Subscription::new("display-control", pm_hook::priority::DISPLAY_CONTROL, EventMask::KEYS, |ev| {
+            match ev.keyboard() {
+                Some((msg, k)) if key_event(msg, k) => Verdict::Swallow,
+                _ => Verdict::Pass,
             }
-            let _ = tx.send(Some(GetCurrentThreadId()));
-            let mut msg: MSG = std::mem::zeroed();
-            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
-            UnhookWindowsHookEx(hook);
-        })?;
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Some(tid)) => Ok(Self { thread_id: tid, thread: Some(thread) }),
-            other => {
-                *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                if matches!(other, Ok(None)) {
-                    let _ = thread.join();
-                }
-                bail!("could not install the keyboard hook")
-            }
+        }));
+        if !pm_hook::status().is_active() {
+            drop(guard);
+            *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            bail!("could not install the keyboard hook");
         }
+        Ok(Self { guard: Some(guard) })
     }
 
     pub(crate) fn stop(&mut self) {
-        if let Some(t) = self.thread.take() {
-            unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
-            let _ = t.join();
+        if self.guard.take().is_some() {
             *HOOK_CTX.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
     }

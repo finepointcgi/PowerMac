@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 log.workspace = true
+pm-hook = { path = "../pm-hook" }
 
 # macOS: CoreGraphics / CoreFoundation / ApplicationServices are bound directly
 # via `extern "C"` in src/macos.rs (no extra crates needed).

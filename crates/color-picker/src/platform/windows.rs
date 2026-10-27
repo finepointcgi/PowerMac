@@ -1,6 +1,8 @@
-//! Windows: `RegisterHotKey` on a dedicated thread, and picking with
-//! low-level mouse / keyboard hooks plus a magnifier window that follows the
-//! cursor (excluded from screen capture so it never magnifies itself).
+//! Windows: `RegisterHotKey` on a dedicated thread, and picking with the
+//! shared low-level mouse / keyboard hooks (`pm-hook`, at the highest
+//! priority while a pick runs, forwarded to the picker thread) plus a
+//! magnifier window that follows the cursor (excluded from screen capture so
+//! it never magnifies itself).
 //!
 //! Left click picks, right click or Esc cancels; arrow keys nudge the cursor
 //! by one pixel (as in PowerToys).
@@ -29,12 +31,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetMessageW, PostThreadMessageW, RegisterClassW, SetCursorPos, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, HC_ACTION, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
-    MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, HWND_TOPMOST, KBDLLHOOKSTRUCT, LWA_ALPHA, MSG,
+    MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WNDCLASSW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -186,10 +186,9 @@ unsafe fn place(hwnd: HWND, p: POINT) {
     InvalidateRect(hwnd, std::ptr::null(), 0);
 }
 
-unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let info = &*(lparam as *const MSLLHOOKSTRUCT);
-        let msg = wparam as u32;
+/// The old `WH_MOUSE_LL` body (picker thread, through the forwarder): true = swallow.
+unsafe fn mouse_event(msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
+    {
         match msg {
             WM_MOUSEMOVE => {
                 if let Some(hwnd) = with_state(|s| {
@@ -203,37 +202,37 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let c = color_at(info.pt);
                 with_state(|s| s.swallow_up = true);
                 finish(Some(c));
-                return 1;
+                return true;
             }
             WM_RBUTTONDOWN => {
                 with_state(|s| s.swallow_up = true);
                 finish(None);
-                return 1;
+                return true;
             }
             WM_LBUTTONUP | WM_RBUTTONUP
                 if with_state(|s| std::mem::take(&mut s.swallow_up)).unwrap_or(false) =>
             {
-                return 1;
+                return true;
             }
             _ => {}
         }
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    false
 }
 
-unsafe extern "system" fn key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && (wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN) {
-        let info = &*(lparam as *const KBDLLHOOKSTRUCT);
+/// The old `WH_KEYBOARD_LL` body (picker thread): true = swallow.
+unsafe fn key_event(msg: u32, info: &KBDLLHOOKSTRUCT) -> bool {
+    if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
         let vk = info.vkCode as u16;
         if vk == VK_ESCAPE {
             finish(None);
-            return 1;
+            return true;
         }
         if vk == VK_RETURN {
             let mut p: POINT = std::mem::zeroed();
             GetCursorPos(&mut p);
             finish(Some(color_at(p)));
-            return 1;
+            return true;
         }
         let (dx, dy) = match vk {
             VK_LEFT => (-1, 0),
@@ -246,10 +245,10 @@ unsafe extern "system" fn key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             let mut p: POINT = std::mem::zeroed();
             GetCursorPos(&mut p);
             SetCursorPos(p.x + dx, p.y + dy);
-            return 1;
+            return true;
         }
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    false
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -384,8 +383,24 @@ pub fn pick_blocking() -> Option<Rgb> {
                 swallow_up: false,
             })
         });
-        let mouse: HHOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), hinst, 0);
-        let keys: HHOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), hinst, 0);
+        // Input from the shared hooks (`pm-hook`) at the highest priority
+        // (the pick is modal), handled here on the picker thread.
+        let fwd = pm_hook::win::Forwarder::new(|f| match f {
+            pm_hook::win::Forwarded::Mouse { msg, info } => mouse_event(*msg, info),
+            pm_hook::win::Forwarded::Key { msg, info } => key_event(*msg, info),
+        });
+        let hook = fwd.as_ref().map(|f| {
+            use pm_hook::{EventMask, Subscription, Verdict};
+            let target = f.target();
+            let mask = EventMask::KEYS | EventMask::MOUSE_BUTTONS | EventMask::MOVES;
+            pm_hook::subscribe(Subscription::new("color-picker", pm_hook::priority::COLOR_PICKER, mask, move |ev| {
+                if target.call(ev) {
+                    Verdict::Swallow
+                } else {
+                    Verdict::Pass
+                }
+            }))
+        });
         place(hwnd, cursor);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let mut msg: MSG = std::mem::zeroed();
@@ -399,12 +414,8 @@ pub fn pick_blocking() -> Option<Rgb> {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if !mouse.is_null() {
-            UnhookWindowsHookEx(mouse);
-        }
-        if !keys.is_null() {
-            UnhookWindowsHookEx(keys);
-        }
+        drop(hook);
+        drop(fwd);
         DestroyWindow(hwnd);
         STATE
             .with(|s| s.borrow_mut().take())

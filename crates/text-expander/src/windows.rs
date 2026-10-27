@@ -1,30 +1,24 @@
-//! Windows backend: `WH_KEYBOARD_LL` + `WH_MOUSE_LL` hooks on their own
-//! message-loop thread, `ToUnicodeEx` for the typed text and `SendInput`
+//! Windows backend: a subscriber of the shared `WH_KEYBOARD_LL` +
+//! `WH_MOUSE_LL` hooks (`pm-hook`), `ToUnicodeEx` for the typed text and `SendInput`
 //! (`KEYEVENTF_UNICODE`) for the replacement.
 
 #![allow(clippy::upper_case_acronyms)]
 
-use std::cell::RefCell;
-use std::mem::{size_of, zeroed};
+use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{mpsc, Arc};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, GetKeyboardLayout, SendInput, ToUnicodeEx, INPUT, INPUT_0,
     INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     VIRTUAL_KEY,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PM_NOREMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
+    GetForegroundWindow, GetWindowThreadProcessId, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
     WM_XBUTTONDOWN,
 };
 
@@ -232,67 +226,50 @@ struct Ctx {
     app: Option<Vec<String>>,
 }
 
-thread_local! {
-    static CTX: RefCell<Option<Ctx>> = const { RefCell::new(None) };
-}
+/// `Ctx` holds an `HWND` (only compared, never dereferenced).
+struct SendCtx(Ctx);
+unsafe impl Send for SendCtx {}
 
-pub struct Hook {
-    thread_id: u32,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for Hook {
-    fn drop(&mut self) {
-        unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+impl SendCtx {
+    fn get(&mut self) -> &mut Ctx {
+        &mut self.0
     }
+}
+
+/// The subscription to the shared hooks; dropping it unsubscribes.
+pub struct Hook {
+    _guard: pm_hook::Guard,
 }
 
 pub fn start(shared: Arc<Shared>) -> Result<Hook> {
-    let (tx, rx) = mpsc::channel::<std::result::Result<u32, String>>();
-    let thread = std::thread::Builder::new()
-        .name("te-hook".into())
-        .spawn(move || unsafe {
-            CTX.with(|c| {
-                *c.borrow_mut() = Some(Ctx {
-                    shared,
-                    hwnd: std::ptr::null_mut(),
-                    app: None,
-                })
-            });
-            let mut msg: MSG = zeroed();
-            PeekMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0, PM_NOREMOVE);
-            let module = GetModuleHandleW(std::ptr::null());
-            let kb: HHOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), module, 0);
-            if kb.is_null() {
-                let _ = tx.send(Err("SetWindowsHookExW(WH_KEYBOARD_LL) failed".into()));
-                return;
-            }
-            let mouse: HHOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), module, 0);
-            let _ = tx.send(Ok(GetCurrentThreadId()));
-            while GetMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0) > 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-            UnhookWindowsHookEx(kb);
-            if !mouse.is_null() {
-                UnhookWindowsHookEx(mouse);
-            }
-            CTX.with(|c| *c.borrow_mut() = None);
-        })?;
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(thread_id)) => Ok(Hook {
-            thread_id,
-            thread: Some(thread),
-        }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(anyhow!(e))
+    use pm_hook::{EventMask, EventType, Subscription, Verdict};
+    let mask = EventMask::of(&[
+        EventType::KeyDown,
+        EventType::LeftMouseDown,
+        EventType::RightMouseDown,
+        EventType::OtherMouseDown,
+    ]);
+    let mut ctx = SendCtx(Ctx { shared, hwnd: std::ptr::null_mut(), app: None });
+    let guard = pm_hook::subscribe(Subscription::new("text-expander", pm_hook::priority::TEXT_EXPANDER, mask, move |ev| {
+        let ctx = ctx.get();
+        if let Some((msg, info)) = ev.keyboard() {
+            return if keyboard_event(ctx, msg, info) { Verdict::Swallow } else { Verdict::Pass };
         }
-        Err(_) => Err(anyhow!("text expander hook thread did not start")),
+        if let Some((msg, _)) = ev.mouse() {
+            if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN) {
+                if let Ok(mut ex) = ctx.shared.expander.lock() {
+                    ex.reset();
+                }
+            }
+        }
+        Verdict::Pass
+    }));
+    let st = pm_hook::status();
+    if !st.is_active() {
+        drop(guard);
+        return Err(anyhow!("SetWindowsHookExW(WH_KEYBOARD_LL) failed ({:?})", st.state));
     }
+    Ok(Hook { _guard: guard })
 }
 
 /// Returns whether to swallow the key.
@@ -328,46 +305,15 @@ fn handle(ctx: &mut Ctx, vk: u32, scan: u32) -> bool {
     }
 }
 
-unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 {
-        let info = &*(lparam as *const KBDLLHOOKSTRUCT);
-        let ours = info.flags & LLKHF_INJECTED != 0 && info.dwExtraInfo == INJECTED_TAG;
-        let msg = wparam as u32;
-        // VK_PACKET (0xE7) is unicode text someone else injected.
-        if !ours && matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN) && info.vkCode != 0xE7 {
-            let swallow = CTX.with(|c| {
-                let mut c = c.borrow_mut();
-                let Some(ctx) = c.as_mut() else { return false };
-                catch_unwind(AssertUnwindSafe(|| handle(ctx, info.vkCode, info.scanCode)))
-                    .unwrap_or_else(|_| {
-                        log::error!("text-expander: hook handler panicked");
-                        false
-                    })
-            });
-            if swallow {
-                return 1;
-            }
-        }
-    }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
-}
-
-unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0
-        && matches!(
-            wparam as u32,
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
-        )
-    {
-        CTX.with(|c| {
-            if let Ok(c) = c.try_borrow() {
-                if let Some(ctx) = c.as_ref() {
-                    if let Ok(mut ex) = ctx.shared.expander.lock() {
-                        ex.reset();
-                    }
-                }
-            }
+/// The old `keyboard_proc` body: true = swallow.
+fn keyboard_event(ctx: &mut Ctx, msg: u32, info: &KBDLLHOOKSTRUCT) -> bool {
+    let ours = info.flags & LLKHF_INJECTED != 0 && info.dwExtraInfo == INJECTED_TAG;
+    // VK_PACKET (0xE7) is unicode text someone else injected.
+    if !ours && matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN) && info.vkCode != 0xE7 {
+        return catch_unwind(AssertUnwindSafe(|| handle(ctx, info.vkCode, info.scanCode))).unwrap_or_else(|_| {
+            log::error!("text-expander: hook handler panicked");
+            false
         });
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    false
 }

@@ -9,13 +9,11 @@ pub type CFStringRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;
 pub type CFRunLoopRef = *const c_void;
 pub type CFRunLoopSourceRef = *const c_void;
-pub type CFMachPortRef = *const c_void;
 pub type CFTypeID = usize;
 pub type AXUIElementRef = *const c_void;
 pub type AXValueRef = *const c_void;
 pub type AXError = i32;
 pub type CGEventRef = *const c_void;
-pub type CGEventTapProxy = *const c_void;
 pub type CGDirectDisplayID = u32;
 
 pub const kAXErrorSuccess: AXError = 0;
@@ -46,10 +44,6 @@ pub struct CGRect {
 }
 
 // CGEventTapLocation / placement / options
-pub const kCGSessionEventTap: u32 = 1;
-pub const kCGHeadInsertEventTap: u32 = 0;
-pub const kCGEventTapOptionDefault: u32 = 0;
-pub const kCGEventTapOptionListenOnly: u32 = 1;
 
 // CGEventType
 pub const kCGEventLeftMouseDown: u32 = 1;
@@ -63,8 +57,6 @@ pub const kCGEventKeyUp: u32 = 11;
 pub const kCGEventFlagsChanged: u32 = 12;
 pub const kCGEventScrollWheel: u32 = 22;
 pub const kCGEventOtherMouseDown: u32 = 25;
-pub const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-pub const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
 // CGEventFlags
 pub const kCGEventFlagMaskShift: u64 = 0x0002_0000;
@@ -89,8 +81,6 @@ pub type AXObserverRef = *const c_void;
 pub type AXObserverCallback =
     extern "C" fn(observer: AXObserverRef, element: AXUIElementRef, notification: CFStringRef, refcon: *mut c_void);
 
-pub type CGEventTapCallBack =
-    extern "C" fn(proxy: CGEventTapProxy, etype: u32, event: CGEventRef, user_info: *mut c_void) -> CGEventRef;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -122,8 +112,6 @@ extern "C" {
     pub fn CFRunLoopWakeUp(rl: CFRunLoopRef);
     pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     pub fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    pub fn CFMachPortCreateRunLoopSource(alloc: CFAllocatorRef, port: CFMachPortRef, order: isize) -> CFRunLoopSourceRef;
-    pub fn CFMachPortInvalidate(port: CFMachPortRef);
     pub fn CFArrayGetCount(a: CFTypeRef) -> isize;
     pub fn CFArrayGetValueAtIndex(a: CFTypeRef, i: isize) -> CFTypeRef;
     pub fn CFArrayGetTypeID() -> CFTypeID;
@@ -155,15 +143,6 @@ extern "C" {
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    pub fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: CGEventTapCallBack,
-        user_info: *mut c_void,
-    ) -> CFMachPortRef;
-    pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     pub fn CGEventGetLocation(e: CGEventRef) -> CGPoint;
     pub fn CGEventGetFlags(e: CGEventRef) -> u64;
     pub fn CGEventGetIntegerValueField(e: CGEventRef, field: u32) -> i64;

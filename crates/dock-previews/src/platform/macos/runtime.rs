@@ -1,9 +1,10 @@
 #![allow(non_upper_case_globals)]
-//! macOS runtime: an event-tap thread, a worker thread and the panel on the
-//! main thread.
+//! macOS runtime: a subscriber of the shared event tap, a worker thread and
+//! the panel on the main thread.
 //!
-//! * **Tap thread** — an active session `CGEventTap` (mouse buttons,
-//!   moves, scroll wheel, key-downs) on its own run loop. It never calls
+//! * **Tap** — a `pm-hook` subscription at
+//!   [`pm_hook::priority::DOCK_PREVIEWS`] (mouse buttons, moves, scroll
+//!   wheel, key-downs). Its handler runs on the shared tap thread and never calls
 //!   Accessibility: it decides from state the worker publishes whether an
 //!   event is aimed at the panel (swallowed and forwarded to the worker) or
 //!   is a Dock click that click-to-cycle replaces. Everything else passes.
@@ -16,8 +17,7 @@
 //!   main dispatch queue; the host app must run `NSApplication`.
 
 use std::collections::HashMap;
-use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -107,7 +107,7 @@ struct Shared {
     panel: Mutex<Option<PanelInfo>>,
     apps: Mutex<HashMap<String, AppCache>>,
     tx: Mutex<Sender<Msg>>,
-    port: AtomicPtr<c_void>,
+    /// The shared tap is active (from its status callback).
     tap_active: AtomicBool,
     stopping: AtomicBool,
     was_near: AtomicBool,
@@ -141,31 +141,6 @@ fn on_main(f: impl FnOnce(MainThreadMarker) + Send + 'static) {
 }
 
 // ------------------------------------------------------------ event tap
-
-struct TapCtx {
-    shared: Arc<Shared>,
-}
-
-extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRef, info: *mut c_void) -> CGEventRef {
-    let ctx = unsafe { &*(info as *const TapCtx) };
-    let shared = &ctx.shared;
-    if etype == kCGEventTapDisabledByTimeout || etype == kCGEventTapDisabledByUserInput {
-        let port = shared.port.load(Ordering::SeqCst);
-        if !port.is_null() {
-            unsafe { CGEventTapEnable(port, true) };
-        }
-        return event;
-    }
-    if unsafe { CGEventGetIntegerValueField(event, kCGEventSourceUserData) } as usize == pm_input::INJECTED_TAG {
-        return event;
-    }
-    let swallow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_event(shared, etype, event))).unwrap_or(false);
-    if swallow {
-        std::ptr::null()
-    } else {
-        event
-    }
-}
 
 /// Click-to-cycle decision for a left click at (x, y), from cached state.
 fn cycle_decision(shared: &Shared, x: f64, y: f64) -> Option<(String, i32, CycleAction)> {
@@ -269,58 +244,48 @@ fn handle_event(shared: &Arc<Shared>, etype: u32, event: CGEventRef) -> bool {
     }
 }
 
-fn tap_loop(shared: Arc<Shared>, runloop_out: Arc<Mutex<usize>>) {
-    let ctx = Box::into_raw(Box::new(TapCtx { shared: shared.clone() }));
-    let mask = event_mask(kCGEventMouseMoved)
-        | event_mask(kCGEventLeftMouseDragged)
-        | event_mask(kCGEventLeftMouseDown)
-        | event_mask(kCGEventLeftMouseUp)
-        | event_mask(kCGEventRightMouseDown)
-        | event_mask(kCGEventRightMouseUp)
-        | event_mask(kCGEventOtherMouseDown)
-        | event_mask(kCGEventOtherMouseUp)
-        | event_mask(kCGEventScrollWheel)
-        | event_mask(kCGEventKeyDown);
-    let mut warned = false;
-    while !shared.stopping.load(Ordering::SeqCst) {
-        let port = unsafe {
-            CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, tap_callback, ctx as *mut c_void)
-        };
-        if port.is_null() {
-            if !warned {
-                log::warn!("dock-previews: can't create the event tap (Accessibility permission missing?); retrying");
-                warned = true;
+/// Subscribe to the shared event tap; without Accessibility it retries
+/// every 2 s and the status callback flips `tap_active`.
+fn subscribe(shared: &Arc<Shared>) -> pm_hook::Guard {
+    use pm_hook::{EventMask, EventType, Subscription, Verdict};
+    let mask = EventMask::of(&[
+        EventType::MouseMoved,
+        EventType::LeftMouseDragged,
+        EventType::LeftMouseDown,
+        EventType::LeftMouseUp,
+        EventType::RightMouseDown,
+        EventType::RightMouseUp,
+        EventType::OtherMouseDown,
+        EventType::OtherMouseUp,
+        EventType::ScrollWheel,
+        EventType::KeyDown,
+    ]);
+    let (s1, s2) = (shared.clone(), shared.clone());
+    let warned = AtomicBool::new(false);
+    pm_hook::subscribe(
+        Subscription::new("dock-previews", pm_hook::priority::DOCK_PREVIEWS, mask, move |ev| {
+            let (etype, event) = (ev.cg_type(), ev.cg_event());
+            let swallow =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_event(&s1, etype, event))).unwrap_or(false);
+            if swallow {
+                Verdict::Swallow
+            } else {
+                Verdict::Pass
             }
-            for _ in 0..20 {
-                if shared.stopping.load(Ordering::SeqCst) {
-                    break;
+        })
+        .ignore_tags(&[pm_input::INJECTED_TAG])
+        .on_status(move |st| {
+            let active = st.is_active() && !s2.stopping.load(Ordering::SeqCst);
+            if active && !s2.tap_active.swap(true, Ordering::SeqCst) {
+                log::info!("dock-previews: event tap active");
+            } else if !active {
+                s2.tap_active.store(false, Ordering::SeqCst);
+                if !warned.swap(true, Ordering::SeqCst) {
+                    log::warn!("dock-previews: can't create the event tap (Accessibility permission missing?); retrying");
                 }
-                std::thread::sleep(Duration::from_millis(100));
             }
-            continue;
-        }
-        unsafe {
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), port, 0);
-            let rl = CFRunLoopGetCurrent();
-            *lock(&runloop_out) = rl as usize;
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(port, true);
-            shared.port.store(port as *mut c_void, Ordering::SeqCst);
-            shared.tap_active.store(true, Ordering::SeqCst);
-            log::info!("dock-previews: event tap active");
-            while !shared.stopping.load(Ordering::SeqCst) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, 0);
-            }
-            shared.tap_active.store(false, Ordering::SeqCst);
-            shared.port.store(std::ptr::null_mut(), Ordering::SeqCst);
-            CGEventTapEnable(port, false);
-            CFMachPortInvalidate(port);
-            CFRelease(src);
-            CFRelease(port);
-        }
-        break;
-    }
-    drop(unsafe { Box::from_raw(ctx) });
+        }),
+    )
 }
 
 // ------------------------------------------------------------- worker
@@ -769,8 +734,7 @@ impl Worker {
 
 struct Inner {
     shared: Arc<Shared>,
-    tap_runloop: Arc<Mutex<usize>>,
-    tap: Option<JoinHandle<()>>,
+    hook: Option<pm_hook::Guard>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -784,7 +748,6 @@ impl Inner {
             panel: Mutex::new(None),
             apps: Mutex::new(HashMap::new()),
             tx: Mutex::new(tx),
-            port: AtomicPtr::new(std::ptr::null_mut()),
             tap_active: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             was_near: AtomicBool::new(false),
@@ -792,16 +755,12 @@ impl Inner {
             swallow_right: AtomicBool::new(false),
             swallow_other: AtomicBool::new(false),
         });
-        let tap_runloop = Arc::new(Mutex::new(0usize));
-        let tap = {
-            let (s, rl) = (shared.clone(), tap_runloop.clone());
-            std::thread::Builder::new().name("dock-previews-tap".into()).spawn(move || tap_loop(s, rl))?
-        };
         let worker = {
             let s = shared.clone();
             std::thread::Builder::new().name("dock-previews-worker".into()).spawn(move || Worker::new(s).run(rx))?
         };
-        Ok(Inner { shared, tap_runloop, tap: Some(tap), worker: Some(worker) })
+        let hook = subscribe(&shared);
+        Ok(Inner { shared, hook: Some(hook), worker: Some(worker) })
     }
 
     fn stop(&mut self) {
@@ -809,13 +768,8 @@ impl Inner {
             return;
         }
         self.shared.send(Msg::Stop);
-        let rl = *lock(&self.tap_runloop);
-        if rl != 0 {
-            unsafe { CFRunLoopStop(rl as CFRunLoopRef) };
-        }
-        if let Some(t) = self.tap.take() {
-            let _ = t.join();
-        }
+        self.hook.take();
+        self.shared.tap_active.store(false, Ordering::SeqCst);
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }

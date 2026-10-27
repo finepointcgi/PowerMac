@@ -4,7 +4,8 @@
 |---|---|
 | `powermac` | The app binary: tray, module lifecycle, config reload, helper processes, IPC glue |
 | `pm-config` | The shared `config.json` model (`AppConfig`), status/request file types, launch at login |
-| `pm-input` | Global input capture and injection (`CGEventTap` / LL hooks + `SendInput`), VK keymaps |
+| `pm-hook` | The one global input hook (`CGEventTap` / LL hooks) every module subscribes to: priority-ordered dispatch, injection tags, health ([details](input-hook.md)) |
+| `pm-input` | Mouse Without Borders' input capture (a `pm-hook` subscriber) and injection (`CGEventPost` / `SendInput`), VK keymaps |
 | `pm-ui` | Shared egui theme and widgets (switches, cards, keycaps) |
 | `settings-ui` | The egui settings window and the FancyZones layout editor |
 | `mwb` | Mouse Without Borders protocol (packets, PBKDF2 + AES-256-CBC, handshake), discovery, engine, C# interop harness |

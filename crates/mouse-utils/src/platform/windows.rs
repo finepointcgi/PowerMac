@@ -1,7 +1,8 @@
 //! Windows backend.
 //!
-//! One dedicated thread owns everything:
-//! * `WH_MOUSE_LL` + `WH_KEYBOARD_LL` hooks (hotkeys are swallowed);
+//! Input comes from the shared `WH_MOUSE_LL` + `WH_KEYBOARD_LL` hooks
+//! (`pm-hook`, [`pm_hook::priority::MOUSE_UTILS`]; hotkeys are swallowed).
+//! One dedicated thread owns the rest:
 //! * one layered, topmost, click-through tool window per monitor
 //!   (`WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE`),
 //!   painted with `UpdateLayeredWindow` from a 32-bit top-down DIB with
@@ -87,8 +88,6 @@ struct UiState {
     class: Vec<u16>,
     overlays: Vec<Overlay>,
     timer: usize,
-    mods: ModTracker,
-    pressed: [bool; 256],
     last: Option<Scene>,
     visible: bool,
     frames: u64,
@@ -100,10 +99,6 @@ thread_local! {
 
 fn with_state<R>(f: impl FnOnce(&mut UiState) -> R) -> Option<R> {
     STATE.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f)))
-}
-
-fn shared() -> Option<Arc<Shared>> {
-    with_state(|s| s.shared.clone())
 }
 
 // ------------------------------------------------------------------ monitors
@@ -278,25 +273,20 @@ fn is_ours(flags_injected: bool, extra: usize) -> bool {
     flags_injected && extra == pm_input::INJECTED_TAG
 }
 
-unsafe extern "system" fn ll_mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let info = &*(lparam as *const MSLLHOOKSTRUCT);
-        if !is_ours(info.flags & LLMHF_INJECTED != 0, info.dwExtraInfo) {
-            if let Some(sh) = shared() {
-                let p = Point::new(info.pt.x as f64, info.pt.y as f64);
-                match wparam as u32 {
-                    WM_MOUSEMOVE => sh.with(|e, now| e.on_mouse_move(p, None, now)),
-                    WM_LBUTTONDOWN => sh.with(|e, now| e.on_button(Button::Left, true, p, now)),
-                    WM_LBUTTONUP => sh.with(|e, now| e.on_button(Button::Left, false, p, now)),
-                    WM_RBUTTONDOWN => sh.with(|e, now| e.on_button(Button::Right, true, p, now)),
-                    WM_RBUTTONUP => sh.with(|e, now| e.on_button(Button::Right, false, p, now)),
-                    WM_MBUTTONDOWN | WM_XBUTTONDOWN => sh.with(|e, now| e.dismiss_spotlight(now)),
-                    _ => {}
-                }
-            }
-        }
+fn on_mouse(sh: &Shared, msg: u32, info: &MSLLHOOKSTRUCT) {
+    if is_ours(info.flags & LLMHF_INJECTED != 0, info.dwExtraInfo) {
+        return;
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    let p = Point::new(info.pt.x as f64, info.pt.y as f64);
+    match msg {
+        WM_MOUSEMOVE => sh.with(|e, now| e.on_mouse_move(p, None, now)),
+        WM_LBUTTONDOWN => sh.with(|e, now| e.on_button(Button::Left, true, p, now)),
+        WM_LBUTTONUP => sh.with(|e, now| e.on_button(Button::Left, false, p, now)),
+        WM_RBUTTONDOWN => sh.with(|e, now| e.on_button(Button::Right, true, p, now)),
+        WM_RBUTTONUP => sh.with(|e, now| e.on_button(Button::Right, false, p, now)),
+        WM_MBUTTONDOWN | WM_XBUTTONDOWN => sh.with(|e, now| e.dismiss_spotlight(now)),
+        _ => {}
+    }
 }
 
 fn send_dummy_key() {
@@ -316,37 +306,29 @@ fn send_dummy_key() {
     }
 }
 
-unsafe extern "system" fn ll_keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
-        if !is_ours(kb.flags & LLKHF_INJECTED != 0, kb.dwExtraInfo) {
-            let msg = wparam as u32;
-            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-            let vk = kb.vkCode;
-            let info = with_state(|s| {
-                let mods = s.mods.mods();
-                s.mods.update(vk, down);
-                let idx = (vk & 0xFF) as usize;
-                let repeat = down && s.pressed[idx];
-                s.pressed[idx] = down;
-                (s.shared.clone(), mods, repeat)
-            });
-            if let Some((sh, mods, repeat)) = info {
-                let swallow = if repeat {
-                    sh.lock().engine.swallowing(vk)
-                } else {
-                    sh.with(|e, now| e.on_key(vk, down, mods, now))
-                };
-                if swallow {
-                    if down && !repeat && mods.win {
-                        send_dummy_key();
-                    }
-                    return 1;
-                }
-            }
-        }
+/// Keyboard state the hook keeps (modifiers held, keys down for repeats).
+struct KeyState {
+    mods: ModTracker,
+    pressed: [bool; 256],
+}
+
+/// Returns true to swallow.
+fn on_key(sh: &Shared, ks: &mut KeyState, msg: u32, kb: &KBDLLHOOKSTRUCT) -> bool {
+    if is_ours(kb.flags & LLKHF_INJECTED != 0, kb.dwExtraInfo) {
+        return false;
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+    let vk = kb.vkCode;
+    let mods = ks.mods.mods();
+    ks.mods.update(vk, down);
+    let idx = (vk & 0xFF) as usize;
+    let repeat = down && ks.pressed[idx];
+    ks.pressed[idx] = down;
+    let swallow = if repeat { sh.lock().engine.swallowing(vk) } else { sh.with(|e, now| e.on_key(vk, down, mods, now)) };
+    if swallow && down && !repeat && mods.win {
+        send_dummy_key();
+    }
+    swallow
 }
 
 unsafe extern "system" fn overlay_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -362,10 +344,12 @@ unsafe extern "system" fn overlay_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, 
 pub(crate) struct Runtime {
     thread_id: u32,
     thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl Runtime {
     pub(crate) fn start(shared: Arc<Shared>) -> Result<Self> {
+        let outer = shared.clone();
         let (tx, rx) = mpsc::channel::<Result<u32, String>>();
         let thread = std::thread::Builder::new().name("mouse-utils-ui".into()).spawn(move || unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -401,25 +385,12 @@ impl Runtime {
                     class,
                     overlays: vec![],
                     timer: 0,
-                    mods: ModTracker::default(),
-                    pressed: [false; 256],
                     last: None,
                     visible: false,
                     frames: 0,
                 })
             });
 
-            let h_mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(ll_mouse), hinst, 0);
-            let h_kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard), hinst, 0);
-            let mode = match (h_mouse.is_null(), h_kb.is_null()) {
-                (false, false) => InputMode::Full,
-                (false, true) => InputMode::MouseOnly,
-                (true, _) => InputMode::None,
-            };
-            if mode != InputMode::Full {
-                log::warn!("mouse-utils: low-level hooks failed (mouse: {}, keyboard: {})", !h_mouse.is_null(), !h_kb.is_null());
-            }
-            shared.set_input_mode(mode);
             let _ = tx.send(Ok(tid));
 
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -440,12 +411,6 @@ impl Runtime {
                 DispatchMessageW(&msg);
             }
 
-            if !h_mouse.is_null() {
-                UnhookWindowsHookEx(h_mouse);
-            }
-            if !h_kb.is_null() {
-                UnhookWindowsHookEx(h_kb);
-            }
             if let Some(mut st) = STATE.with(|s| s.borrow_mut().take()) {
                 st.stop_timer();
                 for o in st.overlays.drain(..) {
@@ -455,7 +420,29 @@ impl Runtime {
             }
         })?;
         match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(thread_id)) => Ok(Runtime { thread_id, thread: Some(thread) }),
+            Ok(Ok(thread_id)) => {
+                use pm_hook::{EventMask, Subscription, Verdict};
+                let sh = outer.clone();
+                let mut ks = KeyState { mods: ModTracker::default(), pressed: [false; 256] };
+                let mask = EventMask::KEYS | EventMask::MOUSE_BUTTONS | EventMask::MOVES;
+                let guard = pm_hook::subscribe(Subscription::new("mouse-utils", pm_hook::priority::MOUSE_UTILS, mask, move |ev| {
+                    if let Some((msg, info)) = ev.mouse() {
+                        on_mouse(&sh, msg, info);
+                    } else if let Some((msg, kb)) = ev.keyboard() {
+                        if on_key(&sh, &mut ks, msg, kb) {
+                            return Verdict::Swallow;
+                        }
+                    }
+                    Verdict::Pass
+                }));
+                let st = pm_hook::status();
+                let mode = if st.is_active() { InputMode::Full } else { InputMode::None };
+                if mode != InputMode::Full {
+                    log::warn!("mouse-utils: low-level hooks failed ({:?})", st.state);
+                }
+                outer.set_input_mode(mode);
+                Ok(Runtime { thread_id, thread: Some(thread), guard: Some(guard) })
+            }
             Ok(Err(e)) => {
                 let _ = thread.join();
                 bail!(e)
@@ -465,6 +452,7 @@ impl Runtime {
     }
 
     pub(crate) fn stop(&mut self) {
+        self.guard.take();
         if let Some(t) = self.thread.take() {
             unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
             let _ = t.join();

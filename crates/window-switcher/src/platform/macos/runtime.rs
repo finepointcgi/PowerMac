@@ -1,12 +1,17 @@
 #![allow(non_upper_case_globals)]
-//! macOS runtime: an event-tap thread, a worker thread and the overlay on
-//! the main thread.
+//! macOS runtime: a subscriber of the shared event tap, a worker thread and
+//! the overlay on the main thread.
 //!
-//! * **Tap thread** — an active session `CGEventTap` on its own run loop.
-//!   Key, modifier and mouse events go straight into the [`Engine`] (a
-//!   mutex held for microseconds) so the tap can decide synchronously
-//!   whether to swallow them. Opening the switcher takes the window list
-//!   from the worker's cache, so it never waits on Accessibility.
+//! * **Tap** — a `pm-hook` subscription at
+//!   [`pm_hook::priority::WINDOW_SWITCHER`] (after Keyboard Manager, Mouse
+//!   Without Borders and the text expander, like the session-level tap it
+//!   replaces). Key, modifier and mouse events go straight into the
+//!   [`Engine`] (a mutex held for microseconds) so the handler can decide
+//!   synchronously whether to swallow them. Opening the switcher takes the
+//!   window list from the worker's cache, so it never waits on
+//!   Accessibility. The tap's health (`pm-hook` status) drives the Cmd+Tab
+//!   take-over: the system switcher comes back whenever the tap is missing,
+//!   disabled or blind (Secure Input).
 //! * **Worker thread** — keeps the cached window list fresh (full
 //!   enumeration every 2 s and on demand), tracks the focused window 4×/s
 //!   for most-recently-used ordering, and performs focus changes and
@@ -15,8 +20,7 @@
 //!   through the main dispatch queue, so the host app must run
 //!   `NSApplication` (PowerMac's tray app does).
 
-use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -54,11 +58,13 @@ pub(crate) struct Shared {
     windows: Mutex<Vec<WindowInfo>>,
     tx: Mutex<Sender<Msg>>,
     shown: AtomicBool,
+    /// The shared tap is active (from its status callback).
     tap_active: AtomicBool,
-    port: AtomicPtr<c_void>,
     stopping: AtomicBool,
     /// A left-click was swallowed; swallow its mouse-up too.
     swallow_mouse_up: AtomicBool,
+    /// The "can't create the tap" warning was logged.
+    warned: AtomicBool,
     /// System Cmd+Tab take-over (see [`crate::guard`]).
     guard: Mutex<Guard>,
     /// Tests: pretend the keyboard hook stopped working.
@@ -259,36 +265,6 @@ fn request_thumbnails(items: &[WindowInfo]) {
 
 // ------------------------------------------------------------ event tap
 
-struct TapCtx {
-    shared: Arc<Shared>,
-}
-
-extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRef, info: *mut c_void) -> CGEventRef {
-    let ctx = unsafe { &*(info as *const TapCtx) };
-    let shared = &ctx.shared;
-    if etype == kCGEventTapDisabledByTimeout || etype == kCGEventTapDisabledByUserInput {
-        let port = shared.port.load(Ordering::SeqCst);
-        if !port.is_null() {
-            unsafe { CGEventTapEnable(port, true) };
-        }
-        log::warn!("window-switcher: event tap was disabled ({etype:#x}); re-enabled");
-        // If it didn't come back, give the user the system switcher.
-        sync_cmd_tab(shared);
-        return event;
-    }
-    let field = |f: u32| unsafe { CGEventGetIntegerValueField(event, f) };
-    // Mouse Without Borders' injected events are not ours to interpret.
-    if field(kCGEventSourceUserData) as usize == pm_input::INJECTED_TAG {
-        return event;
-    }
-    let swallow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_event(shared, etype, event))).unwrap_or(false);
-    if swallow {
-        std::ptr::null()
-    } else {
-        event
-    }
-}
-
 fn handle_event(shared: &Arc<Shared>, etype: u32, event: CGEventRef) -> bool {
     let field = |f: u32| unsafe { CGEventGetIntegerValueField(event, f) };
     let now = Instant::now();
@@ -344,52 +320,47 @@ fn handle_event(shared: &Arc<Shared>, etype: u32, event: CGEventRef) -> bool {
     }
 }
 
-fn tap_loop(shared: Arc<Shared>, runloop_out: Arc<Mutex<usize>>) {
-    let ctx = Box::into_raw(Box::new(TapCtx { shared: shared.clone() }));
-    let mask = event_mask(kCGEventKeyDown)
-        | event_mask(kCGEventKeyUp)
-        | event_mask(kCGEventFlagsChanged)
-        | event_mask(kCGEventMouseMoved)
-        | event_mask(kCGEventLeftMouseDown)
-        | event_mask(kCGEventLeftMouseUp);
-    let mut warned = false;
-    while !shared.stopping.load(Ordering::SeqCst) {
-        let port = unsafe {
-            CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, tap_callback, ctx as *mut c_void)
-        };
-        if port.is_null() {
-            if !warned {
+/// Subscribe to the shared event tap. Its status callback keeps
+/// `tap_active` current and re-checks the Cmd+Tab take-over on every change
+/// (tap created, disabled / re-enabled, permission lost, Secure Input).
+fn subscribe(shared: &Arc<Shared>) -> pm_hook::Guard {
+    use pm_hook::{EventMask, EventType, Subscription, Verdict};
+    let mask = EventMask::of(&[
+        EventType::KeyDown,
+        EventType::KeyUp,
+        EventType::FlagsChanged,
+        EventType::MouseMoved,
+        EventType::LeftMouseDown,
+        EventType::LeftMouseUp,
+    ]);
+    let (s1, s2) = (shared.clone(), shared.clone());
+    pm_hook::subscribe(
+        Subscription::new("window-switcher", pm_hook::priority::WINDOW_SWITCHER, mask, move |ev| {
+            let (etype, event) = (ev.cg_type(), ev.cg_event());
+            let swallow =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_event(&s1, etype, event))).unwrap_or(false);
+            if swallow {
+                Verdict::Swallow
+            } else {
+                Verdict::Pass
+            }
+        })
+        // Mouse Without Borders' injected events are not ours to interpret.
+        .ignore_tags(&[pm_input::INJECTED_TAG])
+        .on_status(move |st| {
+            let active = st.is_active() && !s2.stopping.load(Ordering::SeqCst);
+            let was = s2.tap_active.swap(active, Ordering::SeqCst);
+            if active && !was {
+                log::info!("window-switcher: event tap active");
+            } else if !active && was {
+                log::warn!("window-switcher: event tap unavailable ({:?})", st.state);
+            } else if !active && !s2.warned.swap(true, Ordering::SeqCst) {
                 log::warn!("window-switcher: can't create the event tap (Accessibility permission missing?); retrying");
-                warned = true;
             }
-            std::thread::sleep(Duration::from_secs(2));
-            continue;
-        }
-        unsafe {
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), port, 0);
-            let rl = CFRunLoopGetCurrent();
-            *runloop_out.lock().unwrap_or_else(|e| e.into_inner()) = rl as usize;
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(port, true);
-            shared.port.store(port as *mut c_void, Ordering::SeqCst);
-            shared.tap_active.store(true, Ordering::SeqCst);
-            log::info!("window-switcher: event tap active");
-            // Only now that Cmd+Tab can reach us may the system's go.
-            sync_cmd_tab(&shared);
-            while !shared.stopping.load(Ordering::SeqCst) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, 0);
-            }
-            shared.tap_active.store(false, Ordering::SeqCst);
-            shared.port.store(std::ptr::null_mut(), Ordering::SeqCst);
-            sync_cmd_tab(&shared);
-            CGEventTapEnable(port, false);
-            CFMachPortInvalidate(port);
-            CFRelease(src);
-            CFRelease(port);
-        }
-        break;
-    }
-    drop(unsafe { Box::from_raw(ctx) });
+            // Only while Cmd+Tab can reach us may the system's go.
+            sync_cmd_tab(&s2);
+        }),
+    )
 }
 
 // ------------------------------------------------------------- worker
@@ -498,16 +469,8 @@ fn tap_healthy(shared: &Shared) -> bool {
     if !shared.tap_active.load(Ordering::SeqCst) || shared.stopping.load(Ordering::SeqCst) || shared.debug_broken.load(Ordering::SeqCst) {
         return false;
     }
-    let port = shared.port.load(Ordering::SeqCst);
-    if port.is_null() {
-        return false;
-    }
-    // Disabled without us hearing about it (no "disabled" event): try once.
-    if unsafe { !CGEventTapIsEnabled(port) } {
-        unsafe { CGEventTapEnable(port, true) };
-    }
-    let enabled = unsafe { CGEventTapIsEnabled(port) };
-    enabled && !cmdtab::secure_input_on()
+    // Checks `CGEventTapIsEnabled` (re-enabling a silently disabled tap once).
+    pm_hook::is_healthy() && !cmdtab::secure_input_on()
 }
 
 /// Turn the system's Cmd+Tab off only while it's replaced *and* our tap
@@ -527,8 +490,7 @@ fn sync_cmd_tab(shared: &Shared) {
 
 pub(crate) struct Runtime {
     shared: Arc<Shared>,
-    tap_runloop: Arc<Mutex<usize>>,
-    tap: Option<JoinHandle<()>>,
+    hook: Option<pm_hook::Guard>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -541,25 +503,23 @@ impl Runtime {
             tx: Mutex::new(tx),
             shown: AtomicBool::new(false),
             tap_active: AtomicBool::new(false),
-            port: AtomicPtr::new(std::ptr::null_mut()),
             stopping: AtomicBool::new(false),
             swallow_mouse_up: AtomicBool::new(false),
+            warned: AtomicBool::new(false),
             guard: Mutex::new(Guard::new()),
             debug_broken: AtomicBool::new(false),
         });
         // A crashed earlier run may have left the system switcher off.
         cmdtab::recover();
         cmdtab::install_exit_hook();
-        let tap_runloop = Arc::new(Mutex::new(0usize));
-        let tap = {
-            let (s, rl) = (shared.clone(), tap_runloop.clone());
-            std::thread::Builder::new().name("window-switcher-tap".into()).spawn(move || tap_loop(s, rl))?
-        };
         let worker = {
             let s = shared.clone();
             std::thread::Builder::new().name("window-switcher-worker".into()).spawn(move || worker_loop(s, rx))?
         };
-        Ok(Runtime { shared, tap_runloop, tap: Some(tap), worker: Some(worker) })
+        // Without Accessibility the shared tap retries every 2 s and the
+        // status callback picks it up.
+        let hook = subscribe(&shared);
+        Ok(Runtime { shared, hook: Some(hook), worker: Some(worker) })
     }
 
     pub(crate) fn update(&mut self, cfg: Config) {
@@ -620,14 +580,10 @@ impl Runtime {
         // Give Cmd+Tab back first, whatever happens below.
         self.shared.guard.lock().unwrap_or_else(|e| e.into_inner()).release(&mut cmdtab::SysBackend);
         self.shared.send(Msg::Stop);
-        let rl = *self.tap_runloop.lock().unwrap_or_else(|e| e.into_inner());
-        if rl != 0 {
-            unsafe { CFRunLoopStop(rl as CFRunLoopRef) };
-        }
-        if let Some(t) = self.tap.take() {
-            // The tap thread may be sleeping between creation retries (≤ 2 s).
-            let _ = t.join();
-        }
+        // Unsubscribe (waits for a handler call in progress).
+        self.hook.take();
+        self.shared.tap_active.store(false, Ordering::SeqCst);
+        sync_cmd_tab(&self.shared);
         if let Some(w) = self.worker.take() {
             let _ = w.join();
         }

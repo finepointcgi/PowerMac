@@ -1,10 +1,10 @@
 #![allow(non_upper_case_globals)]
 //! Event tap thread + worker thread + window observer thread.
 //!
-//! * The **tap thread** owns a `CGEventTap` (session level, active so that
-//!   hotkeys and the layout-switching wheel can be swallowed) on its own
-//!   `CFRunLoop`. Its callback only classifies events and forwards them over
-//!   a channel.
+//! * Input comes from the shared event tap (`pm-hook`, active so that
+//!   hotkeys and the layout-switching wheel can be swallowed) at
+//!   [`pm_hook::priority::FANCYZONES`]. The handler only classifies events
+//!   and forwards them over a channel.
 //! * The **worker thread** does all Accessibility calls and engine updates,
 //!   posts overlay changes to the main queue, executes commands posted by the
 //!   [`crate::Handle`] and polls (1 s) for display / work area / Space changes.
@@ -16,13 +16,14 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
+use pm_hook::{EventMask, EventType, Subscription, Verdict};
 
 use super::ax::{has_permissions, regular_app_pids, AxElement, MacWindow, NativeWindowSystem};
 use super::ffi::*;
@@ -55,7 +56,6 @@ enum Msg {
 struct TapContext {
     tx: Sender<Msg>,
     shared: Arc<Shared>,
-    port: AtomicPtr<c_void>,
     rotation_held: Cell<bool>,
     wheel_acc: Cell<f64>,
 }
@@ -72,16 +72,10 @@ fn mods_from_flags(f: u64) -> Modifiers {
 /// Points of continuous (trackpad) scrolling that count as one wheel notch.
 const CONTINUOUS_NOTCH: f64 = 40.0;
 
-extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRef, info: *mut c_void) -> CGEventRef {
-    let ctx = unsafe { &*(info as *const TapContext) };
+/// Classify one event; returns false to swallow it.
+fn handle_event(ctx: &TapContext, etype: u32, event: CGEventRef) -> bool {
     let field = |f: u32| unsafe { CGEventGetIntegerValueField(event, f) };
     match etype {
-        kCGEventTapDisabledByTimeout | kCGEventTapDisabledByUserInput => {
-            let port = ctx.port.load(Ordering::SeqCst);
-            if !port.is_null() {
-                unsafe { CGEventTapEnable(port, true) };
-            }
-        }
         kCGEventLeftMouseDown => {
             let p = unsafe { CGEventGetLocation(event) };
             let _ = ctx.tx.send(Msg::MouseDown(Point::new(p.x as i32, p.y as i32)));
@@ -118,7 +112,7 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
                     }
                     ctx.wheel_acc.set(acc);
                 }
-                return std::ptr::null(); // don't scroll the window below
+                return false; // don't scroll the window below
             }
             ctx.wheel_acc.set(0.0);
         }
@@ -145,13 +139,13 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
                     ctx.rotation_held.set(true);
                     let _ = ctx.tx.send(Msg::RotationPreview(true));
                 }
-                return std::ptr::null();
+                return false;
             }
             if ctx.rotation_held.get() && (code == kVK_LeftArrow || code == kVK_RightArrow) {
                 if !repeat {
                     let _ = ctx.tx.send(Msg::Rotate(code == kVK_LeftArrow));
                 }
-                return std::ptr::null();
+                return false;
             }
             let dir = match code {
                 kVK_LeftArrow => Some(Direction::Left),
@@ -164,14 +158,14 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
                 let bits = ctx.shared.hotkeys.load(Ordering::Relaxed);
                 if let Some(a) = hotkey_bits::classify(bits, m, dir.is_horizontal()) {
                     let _ = ctx.tx.send(Msg::Hotkey(a, dir));
-                    return std::ptr::null(); // swallow
+                    return false; // swallow
                 }
             }
             if let Some(a) = keys.classify(m, is_key, mac_keycode_digit(code as u16)) {
                 if !repeat {
                     let _ = ctx.tx.send(Msg::Key(a));
                 }
-                return std::ptr::null();
+                return false;
             }
         }
         kCGEventKeyUp if ctx.rotation_held.get() => {
@@ -180,17 +174,16 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
             if keys.rotation.is_some_and(|h| vk_to_mac_keycode(h.code) == Some(code as u16)) {
                 ctx.rotation_held.set(false);
                 let _ = ctx.tx.send(Msg::RotationPreview(false));
-                return std::ptr::null();
+                return false;
             }
         }
         _ => {}
     }
-    event
+    true
 }
 
 pub(crate) struct Runtime {
-    tap_runloop: usize,
-    tap_thread: Option<JoinHandle<()>>,
+    hook: Option<pm_hook::Guard>,
     worker: Option<JoinHandle<()>>,
     observer: Option<JoinHandle<()>>,
     observer_stop: Arc<AtomicBool>,
@@ -209,62 +202,30 @@ impl Runtime {
         // Don't let a hung app stall the worker for the default ~6 s.
         unsafe { AXUIElementSetMessagingTimeout(super::ax::AxElement::system_wide().raw(), 1.0) };
         let (tx, rx) = mpsc::channel::<Msg>();
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<usize, String>>();
-        let ctx = Box::new(TapContext {
-            tx: tx.clone(),
-            shared: shared.clone(),
-            port: AtomicPtr::new(std::ptr::null_mut()),
-            rotation_held: Cell::new(false),
-            wheel_acc: Cell::new(0.0),
-        });
-
-        let tap_thread = std::thread::Builder::new().name("fancyzones-tap".into()).spawn(move || unsafe {
-            let ctx_ptr = Box::into_raw(ctx);
-            let mask = event_mask(kCGEventLeftMouseDown)
-                | event_mask(kCGEventLeftMouseUp)
-                | event_mask(kCGEventLeftMouseDragged)
-                | event_mask(kCGEventRightMouseDown)
-                | event_mask(kCGEventOtherMouseDown)
-                | event_mask(kCGEventScrollWheel)
-                | event_mask(kCGEventFlagsChanged)
-                | event_mask(kCGEventKeyDown)
-                | event_mask(kCGEventKeyUp);
-            let port = CGEventTapCreate(
-                kCGSessionEventTap,
-                kCGHeadInsertEventTap,
-                kCGEventTapOptionDefault,
-                mask,
-                tap_callback,
-                ctx_ptr as *mut c_void,
-            );
-            if port.is_null() {
-                drop(Box::from_raw(ctx_ptr));
-                let _ = ready_tx.send(Err("CGEventTapCreate failed (Accessibility / Input Monitoring permission missing?)".into()));
-                return;
+        let ctx = TapContext { tx: tx.clone(), shared: shared.clone(), rotation_held: Cell::new(false), wheel_acc: Cell::new(0.0) };
+        let mask = EventMask::of(&[
+            EventType::LeftMouseDown,
+            EventType::LeftMouseUp,
+            EventType::LeftMouseDragged,
+            EventType::RightMouseDown,
+            EventType::OtherMouseDown,
+            EventType::ScrollWheel,
+            EventType::FlagsChanged,
+            EventType::KeyDown,
+            EventType::KeyUp,
+        ]);
+        let hook = pm_hook::subscribe(Subscription::new("fancyzones", pm_hook::priority::FANCYZONES, mask, move |ev| {
+            if handle_event(&ctx, ev.cg_type(), ev.cg_event()) {
+                Verdict::Pass
+            } else {
+                Verdict::Swallow
             }
-            (*ctx_ptr).port.store(port as *mut c_void, Ordering::SeqCst);
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), port, 0);
-            let rl = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(port, true);
-            let _ = ready_tx.send(Ok(rl as usize));
-            CFRunLoopRun();
-            CGEventTapEnable(port, false);
-            CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-            CFMachPortInvalidate(port);
-            CFRelease(src);
-            CFRelease(port);
-            drop(Box::from_raw(ctx_ptr));
-        })?;
-
-        let rl = match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(rl)) => rl,
-            Ok(Err(e)) => {
-                let _ = tap_thread.join();
-                bail!(e)
-            }
-            Err(_) => bail!("event tap thread did not start"),
-        };
+        }));
+        let st = pm_hook::status();
+        if !st.is_active() {
+            drop(hook);
+            bail!("CGEventTapCreate failed ({:?}; Accessibility / Input Monitoring permission missing?)", st.state);
+        }
 
         {
             let wake_tx = std::sync::Mutex::new(tx.clone());
@@ -291,8 +252,7 @@ impl Runtime {
         };
 
         Ok(Runtime {
-            tap_runloop: rl,
-            tap_thread: Some(tap_thread),
+            hook: Some(hook),
             worker: Some(worker),
             observer: Some(observer),
             observer_stop,
@@ -302,16 +262,7 @@ impl Runtime {
     }
 
     pub(crate) fn stop(&mut self) {
-        if self.tap_runloop != 0 {
-            unsafe {
-                CFRunLoopStop(self.tap_runloop as CFRunLoopRef);
-                CFRunLoopWakeUp(self.tap_runloop as CFRunLoopRef);
-            }
-            self.tap_runloop = 0;
-        }
-        if let Some(t) = self.tap_thread.take() {
-            let _ = t.join();
-        }
+        self.hook.take();
         self.observer_stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.observer.take() {
             let _ = t.join();

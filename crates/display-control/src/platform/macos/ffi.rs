@@ -10,10 +10,8 @@ pub type CFDictionaryRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;
 pub type CFRunLoopRef = *const c_void;
 pub type CFRunLoopSourceRef = *const c_void;
-pub type CFMachPortRef = *const c_void;
 pub type CFTypeID = usize;
 pub type CGEventRef = *const c_void;
-pub type CGEventTapProxy = *const c_void;
 pub type CGDirectDisplayID = u32;
 pub type IoObject = u32;
 pub type KernReturn = i32;
@@ -45,14 +43,9 @@ pub const kCFNumberFloat64Type: isize = 6;
 
 pub const kIORegistryIterateRecursively: u32 = 1;
 
-pub const kCGSessionEventTap: u32 = 1;
-pub const kCGHeadInsertEventTap: u32 = 0;
-pub const kCGEventTapOptionDefault: u32 = 0;
 pub const kCGEventKeyDown: u32 = 10;
 pub const kCGEventKeyUp: u32 = 11;
 pub const kCGEventSystemDefined: u32 = 14;
-pub const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-pub const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 pub const kCGKeyboardEventAutorepeat: u32 = 8;
 pub const kCGKeyboardEventKeycode: u32 = 9;
 pub const kCGEventFlagMaskShift: u64 = 0x0002_0000;
@@ -60,7 +53,6 @@ pub const kCGEventFlagMaskControl: u64 = 0x0004_0000;
 pub const kCGEventFlagMaskAlternate: u64 = 0x0008_0000;
 pub const kCGEventFlagMaskCommand: u64 = 0x0010_0000;
 
-pub type CGEventTapCallBack = extern "C" fn(proxy: CGEventTapProxy, etype: u32, event: CGEventRef, user_info: *mut c_void) -> CGEventRef;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -94,8 +86,6 @@ extern "C" {
     pub fn CFRunLoopWakeUp(rl: CFRunLoopRef);
     pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     pub fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    pub fn CFMachPortCreateRunLoopSource(alloc: CFAllocatorRef, port: CFMachPortRef, order: isize) -> CFRunLoopSourceRef;
-    pub fn CFMachPortInvalidate(port: CFMachPortRef);
 }
 
 #[link(name = "IOKit", kind = "framework")]
@@ -132,8 +122,6 @@ extern "C" {
     pub fn CGSetDisplayTransferByTable(d: CGDirectDisplayID, size: u32, red: *const f32, green: *const f32, blue: *const f32) -> i32;
     pub fn CGDisplayRestoreColorSyncSettings();
 
-    pub fn CGEventTapCreate(tap: u32, place: u32, options: u32, events_of_interest: u64, callback: CGEventTapCallBack, user_info: *mut c_void) -> CFMachPortRef;
-    pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     pub fn CGEventGetFlags(e: CGEventRef) -> u64;
     pub fn CGEventGetIntegerValueField(e: CGEventRef, field: u32) -> i64;
     pub fn CGEventGetLocation(e: CGEventRef) -> CGPoint;

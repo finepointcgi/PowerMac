@@ -547,6 +547,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "pm-input",
  "pm-ui",
  "serde",
@@ -597,6 +598,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "pm-input",
  "pm-ui",
  "serde",
@@ -898,6 +900,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "pm-input",
  "serde",
  "serde_json",
@@ -948,6 +951,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "pm-input",
  "serde",
  "serde_json",
@@ -1242,6 +1246,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "serde",
  "serde_json",
  "windows-sys 0.59.0",
@@ -2225,6 +2230,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "pm-input",
  "serde",
  "serde_json",
@@ -2463,6 +2469,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "log",
+ "pm-hook",
  "pm-input",
  "serde",
  "serde_json",
@@ -2479,6 +2486,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "pm-input",
  "serde",
  "serde_json",
@@ -2525,6 +2533,7 @@ dependencies = [
  "gethostname 0.4.3",
  "hmac",
  "if-addrs",
+ "libc",
  "log",
  "pbkdf2",
  "pm-input",
@@ -3237,11 +3246,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-hook"
+version = "1.0.0"
+dependencies = [
+ "log",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "pm-input"
 version = "1.0.0"
 dependencies = [
  "anyhow",
  "log",
+ "pm-hook",
  "windows-sys 0.59.0",
 ]
 
@@ -3719,6 +3737,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "log",
+ "pm-hook",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -4090,6 +4109,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "serde",
  "serde_json",
  "windows-sys 0.59.0",
@@ -4890,6 +4910,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "pm-hook",
  "pm-input",
  "serde",
  "serde_json",
@@ -5217,6 +5238,24 @@ name = "winnow"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+
+[[package]]
+name = "workspaces"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "egui_kittest",
+ "image",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "pm-ui",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "writeable"

@@ -1,11 +1,10 @@
 //! macOS: `NSPasteboard` reading/writing, frontmost app, activation, the
-//! pointer position and the global hotkey (an active `CGEventTap`).
+//! pointer position and the global hotkey (the shared event tap, `pm-hook`).
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -193,18 +192,6 @@ extern "C" {
     fn CFArrayGetValueAtIndex(a: CFArrayRef, i: isize) -> *const c_void;
     fn CFDictionaryGetValue(d: *const c_void, key: *const c_void) -> *const c_void;
     fn CFNumberGetValue(n: *const c_void, ty: isize, out: *mut c_void) -> u8;
-    fn CFRunLoopGetCurrent() -> *mut c_void;
-    fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: CFStringRef);
-    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, ret: u8) -> i32;
-    fn CFRunLoopStop(rl: *mut c_void);
-    fn CFMachPortCreateRunLoopSource(
-        a: *const c_void,
-        port: *mut c_void,
-        order: isize,
-    ) -> *mut c_void;
-    fn CFMachPortInvalidate(port: *mut c_void);
-    static kCFRunLoopCommonModes: CFStringRef;
-    static kCFRunLoopDefaultMode: CFStringRef;
 }
 
 #[repr(C)]
@@ -230,15 +217,6 @@ extern "C" {
     fn CGGetDisplaysWithPoint(p: CGPoint, max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGDisplayBounds(d: u32) -> CGRect;
     fn CGMainDisplayID() -> u32;
-    fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        mask: u64,
-        cb: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut c_void) -> *mut c_void,
-        user: *mut c_void,
-    ) -> *mut c_void;
-    fn CGEventTapEnable(tap: *mut c_void, on: bool);
     fn CGEventGetIntegerValueField(e: *mut c_void, f: u32) -> i64;
     fn CGEventGetFlags(e: *mut c_void) -> u64;
 }
@@ -393,16 +371,10 @@ pub fn pointer_and_screen() -> Option<([f32; 2], [f32; 4])> {
 // Hotkey (active event tap)
 // ---------------------------------------------------------------------------
 
-const kCGSessionEventTap: u32 = 1;
-const kCGHeadInsertEventTap: u32 = 0;
-const kCGEventTapOptionDefault: u32 = 0;
 const kCGEventKeyDown: u32 = 10;
 const kCGEventKeyUp: u32 = 11;
-const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 const kCGKeyboardEventAutorepeat: u32 = 8;
 const kCGKeyboardEventKeycode: u32 = 9;
-const kCGEventSourceUserData: u32 = 42;
 
 const NX_DEVICELCTLKEYMASK: u64 = 0x01;
 const NX_DEVICELSHIFTKEYMASK: u64 = 0x02;
@@ -419,8 +391,7 @@ const kCGEventFlagMaskCommand: u64 = 0x0010_0000;
 
 struct TapCtx {
     hotkey: keyboard_manager::Shortcut,
-    fire: mpsc::Sender<()>,
-    tap: std::cell::Cell<*mut c_void>,
+    fire: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     /// Keycode whose key-up we swallow (the hotkey's).
     swallow_up: std::cell::Cell<Option<i64>>,
 }
@@ -477,60 +448,44 @@ fn held_from_flags(f: u64) -> Vec<u32> {
     v
 }
 
-unsafe extern "C" fn tap_cb(
-    _proxy: *mut c_void,
-    ty: u32,
-    e: *mut c_void,
-    user: *mut c_void,
-) -> *mut c_void {
-    let ctx = &*(user as *const TapCtx);
-    if ty == kCGEventTapDisabledByTimeout || ty == kCGEventTapDisabledByUserInput {
-        let t = ctx.tap.get();
-        if !t.is_null() {
-            CGEventTapEnable(t, true);
-        }
-        return e;
-    }
+/// Returns true to swallow the event.
+unsafe fn handle_key(ctx: &TapCtx, ty: u32, e: *mut c_void) -> bool {
     if e.is_null() || (ty != kCGEventKeyDown && ty != kCGEventKeyUp) {
-        return e;
-    }
-    // Mouse Without Borders' remote input isn't ours to act on.
-    if CGEventGetIntegerValueField(e, kCGEventSourceUserData) == keyboard_manager::MWB_TAG as i64 {
-        return e;
+        return false;
     }
     let kc = CGEventGetIntegerValueField(e, kCGKeyboardEventKeycode);
     if ty == kCGEventKeyUp {
         if ctx.swallow_up.get() == Some(kc) {
             ctx.swallow_up.set(None);
-            return std::ptr::null_mut();
+            return true;
         }
-        return e;
+        return false;
     }
     let Some((vk, _)) = pm_input::vk::mac_to_vk(kc as u16) else {
-        return e;
+        return false;
     };
     if vk != ctx.hotkey.key {
-        return e;
+        return false;
     }
     let held = held_from_flags(CGEventGetFlags(e));
     if !ctx.hotkey.mods.matches_exactly(|k| held.contains(&k)) {
-        return e;
+        return false;
     }
     ctx.swallow_up.set(Some(kc));
     if CGEventGetIntegerValueField(e, kCGKeyboardEventAutorepeat) == 0 {
-        let _ = ctx.fire.send(());
+        if let Some(tx) = ctx.fire.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let _ = tx.send(());
+        }
     }
-    std::ptr::null_mut()
+    true
 }
 
-struct SendPtr(*mut c_void);
-unsafe impl Send for SendPtr {}
-
-/// A registered global hotkey; dropping it unregisters.
+/// A registered global hotkey (a subscriber of the shared event tap,
+/// `pm-hook`, [`pm_hook::priority::CLIPBOARD_HISTORY`]); dropping it
+/// unregisters.
 pub struct Hotkey {
-    stop: Arc<AtomicBool>,
-    run_loop: SendPtr,
-    thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
+    fire: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -541,6 +496,7 @@ impl Hotkey {
         hotkey: keyboard_manager::Shortcut,
         on_fire: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Hotkey> {
+        use pm_hook::{EventMask, EventType, Subscription, Verdict};
         let (fire_tx, fire_rx) = mpsc::channel::<()>();
         let worker = std::thread::Builder::new()
             .name("cliphist-hotkey".into())
@@ -549,79 +505,40 @@ impl Hotkey {
                     on_fire();
                 }
             })?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop2 = stop.clone();
-        let (tx, rx) = mpsc::channel::<std::result::Result<SendPtr, String>>();
-        let thread = std::thread::Builder::new()
-            .name("cliphist-tap".into())
-            .spawn(move || unsafe {
-                let ctx = Box::into_raw(Box::new(TapCtx {
-                    hotkey,
-                    fire: fire_tx,
-                    tap: std::cell::Cell::new(std::ptr::null_mut()),
-                    swallow_up: std::cell::Cell::new(None),
-                }));
-                let mask = (1u64 << kCGEventKeyDown) | (1u64 << kCGEventKeyUp);
-                let tap = CGEventTapCreate(
-                    kCGSessionEventTap,
-                    kCGHeadInsertEventTap,
-                    kCGEventTapOptionDefault,
-                    mask,
-                    tap_cb,
-                    ctx as *mut c_void,
-                );
-                if tap.is_null() {
-                    drop(Box::from_raw(ctx));
-                    let _ = tx.send(Err(
-                        "could not create the hotkey event tap (Accessibility permission?)".into(),
-                    ));
-                    return;
+        let fire = Arc::new(Mutex::new(Some(fire_tx)));
+        let ctx = TapCtx { hotkey, fire: fire.clone(), swallow_up: std::cell::Cell::new(None) };
+        let mask = EventMask::of(&[EventType::KeyDown, EventType::KeyUp]);
+        let guard = pm_hook::subscribe(
+            Subscription::new("clipboard-history", pm_hook::priority::CLIPBOARD_HISTORY, mask, move |ev| {
+                if unsafe { handle_key(&ctx, ev.cg_type(), ev.cg_event()) } {
+                    Verdict::Swallow
+                } else {
+                    Verdict::Pass
                 }
-                (*ctx).tap.set(tap);
-                let src = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-                let rl = CFRunLoopGetCurrent();
-                CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-                CGEventTapEnable(tap, true);
-                let _ = tx.send(Ok(SendPtr(rl)));
-                while !stop2.load(Ordering::SeqCst) {
-                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0);
-                }
-                CGEventTapEnable(tap, false);
-                CFMachPortInvalidate(tap);
-                CFRelease(src as CFTypeRef);
-                CFRelease(tap as CFTypeRef);
-                drop(Box::from_raw(ctx)); // closes the fire channel
-            })?;
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(rl)) => Ok(Hotkey {
-                stop,
-                run_loop: rl,
-                thread: Some(thread),
-                worker: Some(worker),
-            }),
-            Ok(Err(e)) => {
-                let _ = thread.join();
-                let _ = worker.join();
-                Err(anyhow!(e))
-            }
-            Err(_) => {
-                stop.store(true, Ordering::SeqCst);
-                Err(anyhow!("hotkey thread did not start"))
-            }
+            })
+            // Mouse Without Borders' remote input isn't ours to act on.
+            .ignore_tags(&[keyboard_manager::MWB_TAG]),
+        );
+        let mut hk = Hotkey { guard: Some(guard), fire, worker: Some(worker) };
+        if !pm_hook::status().is_active() {
+            hk.shutdown();
+            return Err(anyhow!("could not create the hotkey event tap (Accessibility permission?)"));
+        }
+        Ok(hk)
+    }
+
+    fn shutdown(&mut self) {
+        self.guard.take();
+        self.fire.lock().unwrap_or_else(|e| e.into_inner()).take(); // ends the worker
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
         }
     }
 }
 
 impl Drop for Hotkey {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        unsafe { CFRunLoopStop(self.run_loop.0) };
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-        if let Some(w) = self.worker.take() {
-            let _ = w.join();
-        }
+        self.shutdown();
     }
 }
 

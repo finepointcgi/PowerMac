@@ -111,7 +111,8 @@ macOS ties these grants to the app's code signature. The bundle is ad-hoc signed
 ## Layout
 
 ```
-crates/pm-input          global input capture/injection (CGEventTap / LL hooks + SendInput), VK keymaps
+crates/pm-hook           the one global input hook (CGEventTap / LL hooks) all modules subscribe to, in priority order
+crates/pm-input          Mouse Without Borders' input capture (via pm-hook) and injection (CGEventPost / SendInput), VK keymaps
 crates/mwb               MWB protocol (packets, PBKDF2 + AES-256-CBC, handshake), engine, C# interop harness
 crates/fancyzones        zone math, edge snapping, config (imports FancyZones JSON), AX / Win32 backends, overlay
 crates/awake             IOPMAssertion / SetThreadExecutionState controller

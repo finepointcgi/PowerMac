@@ -1,7 +1,7 @@
 #![allow(dead_code)]
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -52,6 +52,7 @@ pub fn run_harness(args: &[&str]) -> Option<serde_json::Value> {
 
 pub struct Peer {
     pub child: Child,
+    pub stdin: Option<ChildStdin>,
     pub lines: Receiver<serde_json::Value>,
     pub seen: Vec<serde_json::Value>,
 }
@@ -59,8 +60,10 @@ pub struct Peer {
 impl Peer {
     pub fn spawn(args: &[&str]) -> Option<Peer> {
         let (dn, dll) = harness()?;
-        let mut child = Command::new(dn).arg(dll).args(args).stdout(Stdio::piped()).spawn().expect("spawn peer");
+        let mut child =
+            Command::new(dn).arg(dll).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("spawn peer");
         let stdout = child.stdout.take().unwrap();
+        let stdin = child.stdin.take();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -72,7 +75,23 @@ impl Peer {
                 }
             }
         });
-        Some(Peer { child, lines: rx, seen: Vec::new() })
+        Some(Peer { child, stdin, lines: rx, seen: Vec::new() })
+    }
+
+    /// Send a command line to the peer's stdin.
+    pub fn send(&mut self, line: &str) {
+        eprintln!("[c# <] {line}");
+        let w = self.stdin.as_mut().expect("stdin");
+        writeln!(w, "{line}").unwrap();
+        w.flush().unwrap();
+    }
+
+    /// Collect lines for `d` (into `seen`) without waiting for anything in particular.
+    pub fn drain_for(&mut self, d: Duration) {
+        let end = Instant::now() + d;
+        while let Ok(v) = self.lines.recv_timeout(end.saturating_duration_since(Instant::now())) {
+            self.seen.push(v);
+        }
     }
 
     /// Wait for a line matching `f` (lines seen meanwhile are kept in `seen`).

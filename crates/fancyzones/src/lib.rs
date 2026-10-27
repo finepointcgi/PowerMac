@@ -4,9 +4,10 @@
 //!   independent (zone math identical to FancyZones' `LayoutConfigurator`,
 //!   hit-testing from `Layout::ZonesFromPoint`, keyboard navigation from
 //!   `WindowKeyboardSnap`, JSON compatible with FancyZones' files).
-//! * [`platform`] contains the OS backends (Accessibility + CGEventTap +
-//!   AppKit overlay on macOS; WinEvent hooks + low-level keyboard hook +
-//!   layered GDI overlay on Windows).
+//! * [`platform`] contains the OS backends (Accessibility + the shared event
+//!   tap of `pm-hook` + AppKit overlay on macOS; WinEvent hooks + the shared
+//!   low-level hooks + layered GDI overlay on Windows). Input arrives at
+//!   [`pm_hook::priority::FANCYZONES`], after Keyboard Manager's remaps.
 //!
 //! ## Integrating into an app binary
 //!
@@ -31,8 +32,9 @@
 //! tap and moving windows; `start` returns an error if it is missing.
 //!
 //! **Windows threading:** `start` spawns one thread that owns the WinEvent
-//! hook, the `WH_KEYBOARD_LL` hook and the overlay windows and pumps their
-//! message loop. Nothing is required from the caller's thread.
+//! hook and the overlay windows and pumps their message loop; keyboard (and,
+//! during a drag, mouse) events from the shared `pm-hook` hooks are forwarded
+//! to it synchronously. Nothing is required from the caller's thread.
 //!
 //! ## Hotkeys
 //!

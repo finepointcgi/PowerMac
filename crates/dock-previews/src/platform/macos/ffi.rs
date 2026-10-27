@@ -13,12 +13,10 @@ pub type CFNumberRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;
 pub type CFRunLoopRef = *const c_void;
 pub type CFRunLoopSourceRef = *const c_void;
-pub type CFMachPortRef = *const c_void;
 pub type CFTypeID = usize;
 pub type AXUIElementRef = *const c_void;
 pub type AXError = i32;
 pub type CGEventRef = *const c_void;
-pub type CGEventTapProxy = *const c_void;
 pub type CGImageRef = *const c_void;
 pub type CGColorRef = *const c_void;
 pub type CGContextRef = *const c_void;
@@ -60,9 +58,6 @@ impl CGRect {
 
 
 // Event taps
-pub const kCGSessionEventTap: u32 = 1;
-pub const kCGHeadInsertEventTap: u32 = 0;
-pub const kCGEventTapOptionDefault: u32 = 0;
 
 pub const kCGEventLeftMouseDown: u32 = 1;
 pub const kCGEventLeftMouseUp: u32 = 2;
@@ -80,8 +75,6 @@ pub const kCGScrollWheelEventIsContinuous: u32 = 88;
 pub const kCGEventKeyDown: u32 = 10;
 pub const kCGEventKeyUp: u32 = 11;
 pub const kCGEventFlagsChanged: u32 = 12;
-pub const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-pub const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
 pub const kCGEventFlagMaskShift: u64 = 0x0002_0000;
 pub const kCGEventFlagMaskControl: u64 = 0x0004_0000;
@@ -101,8 +94,6 @@ pub const kCGWindowImageBoundsIgnoreFraming: u32 = 1 << 0;
 pub const kCGWindowImageNominalResolution: u32 = 1 << 4;
 pub const kCGNullWindowID: u32 = 0;
 
-pub type CGEventTapCallBack =
-    extern "C" fn(proxy: CGEventTapProxy, etype: u32, event: CGEventRef, user_info: *mut c_void) -> CGEventRef;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -140,8 +131,6 @@ extern "C" {
     pub fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source_handled: u8) -> i32;
     pub fn CFRunLoopStop(rl: CFRunLoopRef);
     pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    pub fn CFMachPortCreateRunLoopSource(alloc: CFAllocatorRef, port: CFMachPortRef, order: isize) -> CFRunLoopSourceRef;
-    pub fn CFMachPortInvalidate(port: CFMachPortRef);
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -172,15 +161,6 @@ pub struct ProcessSerialNumber {
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    pub fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: CGEventTapCallBack,
-        user_info: *mut c_void,
-    ) -> CFMachPortRef;
-    pub fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     pub fn CGEventGetLocation(e: CGEventRef) -> CGPoint;
     pub fn CGEventGetFlags(e: CGEventRef) -> u64;
     pub fn CGEventGetIntegerValueField(e: CGEventRef, field: u32) -> i64;

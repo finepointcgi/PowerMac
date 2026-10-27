@@ -28,15 +28,16 @@
 //!
 //! # Platforms
 //!
-//! * **macOS:** an active `CGEventTap` (HID level, falling back to session
-//!   level) on its own `CFRunLoop` thread that negates the scroll fields of
+//! * **macOS:** a subscriber of the shared active `CGEventTap` (`pm-hook`,
+//!   HID level, falling back to session level; priority
+//!   [`pm_hook::priority::SCROLL_REVERSER`]) that negates the scroll fields of
 //!   `kCGEventScrollWheel` events in place. Needs Accessibility permission
 //!   ([`needs_permission`], [`request_permission`]). Device classification:
 //!   see [`MacClassifier`]. The Magic Mouse produces continuous, phased
 //!   scroll events exactly like a trackpad, so it is classified as
 //!   [`Device::Trackpad`] (the same limitation the original app has without
 //!   its touch-counting heuristics).
-//! * **Windows:** a `WH_MOUSE_LL` hook on its own message-loop thread. LL hooks
+//! * **Windows:** a subscriber of the shared `WH_MOUSE_LL` hook (`pm-hook`). LL hooks
 //!   cannot modify events, so a wheel event that must be reversed is swallowed
 //!   and re-injected with `SendInput` and a negated delta, tagged with
 //!   [`SELF_INJECTED_TAG`]. LL hooks carry no per-event device information,
@@ -64,8 +65,8 @@
 //! zoom and horizontal-scroll modifiers keep their line-based behaviour.
 //!
 //! * **macOS:** one notch = [`Config::smooth_step_px`] pixels, posted as
-//!   phase-less `kCGScrollEventUnitPixel` events at the same tap location the
-//!   tap was installed at (normally the HID tap, so the system's natural
+//!   phase-less `kCGScrollEventUnitPixel` events at the HID tap location
+//!   (where the shared tap normally sits, so the system's natural
 //!   scrolling flip still applies exactly as it would have to the original).
 //!   The line delta's magnitude (macOS's own wheel acceleration) is ignored;
 //!   only its sign counts, and [`Config::smooth_acceleration`] replaces it.
@@ -100,14 +101,14 @@ pub use smooth::Easing;
 
 /// `pm-input`'s injection tag ("PMMW"): `kCGEventSourceUserData` on macOS,
 /// `dwExtraInfo` on Windows. Scroll events carrying it are never touched.
-pub const PM_INPUT_INJECTED_TAG: usize = 0x504D_4D57;
+pub const PM_INPUT_INJECTED_TAG: usize = pm_hook::tags::MWB;
 
 /// Tag ("SRVS") put on the scroll events we inject ourselves (`dwExtraInfo`
 /// on Windows, `kCGEventSourceUserData` on macOS): reversed re-injections on
 /// Windows and smooth-scrolling frames on both. Our own tap/hook skips them.
 /// It is deliberately distinct from [`PM_INPUT_INJECTED_TAG`]: Mouse Without
 /// Borders skips events with that tag, and it must still see reversed scrolls.
-pub const SELF_INJECTED_TAG: usize = 0x5352_5653;
+pub const SELF_INJECTED_TAG: usize = pm_hook::tags::SCROLL_REVERSER;
 
 // ---------------------------------------------------------------------------
 // Config

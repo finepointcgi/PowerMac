@@ -1,4 +1,5 @@
-//! macOS backend: `CGEventTap` capture, `CGEventPost` injection.
+//! macOS backend: capture through the shared event tap (`pm-hook`),
+//! `CGEventPost` injection.
 //!
 //! Coordinates are CoreGraphics global display coordinates: origin at the
 //! top-left of the primary (menu-bar) display, y grows down, units are
@@ -19,9 +20,8 @@ use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 
@@ -39,12 +39,8 @@ type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
 type CFDictionaryRef = *const c_void;
 type CFAllocatorRef = *const c_void;
-type CFMachPortRef = *mut c_void;
-type CFRunLoopRef = *mut c_void;
-type CFRunLoopSourceRef = *mut c_void;
 type CGEventRef = *mut c_void;
 type CGEventSourceRef = *mut c_void;
-type CGEventTapProxy = *mut c_void;
 type CGDirectDisplayID = u32;
 type CGError = i32;
 
@@ -67,30 +63,14 @@ struct CGRect {
     size: CGSize,
 }
 
-type CGEventTapCallBack =
-    unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
-
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    static kCFRunLoopCommonModes: CFStringRef;
-    static kCFRunLoopDefaultMode: CFStringRef;
     static kCFBooleanTrue: CFTypeRef;
     static kCFBooleanFalse: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
     static kCFTypeDictionaryValueCallBacks: u8;
 
     fn CFRelease(cf: CFTypeRef);
-    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source: u8) -> i32;
-    fn CFRunLoopStop(rl: CFRunLoopRef);
-    fn CFMachPortCreateRunLoopSource(
-        alloc: CFAllocatorRef,
-        port: CFMachPortRef,
-        order: isize,
-    ) -> CFRunLoopSourceRef;
-    fn CFMachPortInvalidate(port: CFMachPortRef);
     fn CFDictionaryCreate(
         alloc: CFAllocatorRef,
         keys: *const *const c_void,
@@ -108,15 +88,6 @@ extern "C" {
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: CGEventTapCallBack,
-        user_info: *mut c_void,
-    ) -> CFMachPortRef;
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
 
     fn CGEventCreate(source: CGEventSourceRef) -> CGEventRef;
     fn CGEventGetLocation(event: CGEventRef) -> CGPoint;
@@ -174,10 +145,6 @@ const kCFStringEncodingUTF8: u32 = 0x0800_0100;
 
 // CGEventTapLocation
 const kCGHIDEventTap: u32 = 0;
-const kCGSessionEventTap: u32 = 1;
-// CGEventTapPlacement / options
-const kCGHeadInsertEventTap: u32 = 0;
-const kCGEventTapOptionDefault: u32 = 0;
 // CGEventSourceStateID
 const kCGEventSourceStateHIDSystemState: i32 = 1;
 
@@ -196,8 +163,6 @@ const kCGEventScrollWheel: u32 = 22;
 const kCGEventOtherMouseDown: u32 = 25;
 const kCGEventOtherMouseUp: u32 = 26;
 const kCGEventOtherMouseDragged: u32 = 27;
-const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
 // CGEventField
 const kCGMouseEventClickState: u32 = 1;
@@ -207,7 +172,6 @@ const kCGMouseEventDeltaY: u32 = 5;
 const kCGKeyboardEventKeycode: u32 = 9;
 const kCGScrollWheelEventDeltaAxis1: u32 = 11;
 const kCGScrollWheelEventDeltaAxis2: u32 = 12;
-const kCGEventSourceUserData: u32 = 42;
 const kCGScrollWheelEventIsContinuous: u32 = 88;
 const kCGScrollWheelEventFixedPtDeltaAxis1: u32 = 93;
 const kCGScrollWheelEventFixedPtDeltaAxis2: u32 = 94;
@@ -238,10 +202,6 @@ const NX_DEVICERCMDKEYMASK: u64 = 0x0000_0010;
 const NX_DEVICELALTKEYMASK: u64 = 0x0000_0020;
 const NX_DEVICERALTKEYMASK: u64 = 0x0000_0040;
 const NX_DEVICERCTLKEYMASK: u64 = 0x0000_2000;
-
-fn mask(ty: u32) -> u64 {
-    1u64 << ty
-}
 
 /// (generic flag, device flag, all device flags of that family) for a modifier keycode.
 fn modifier_bits(keycode: u16) -> Option<(u64, u64, u64)> {
@@ -739,118 +699,47 @@ unsafe fn enable_background_cursor_control() {
 }
 
 // ---------------------------------------------------------------------------
-// Capture (event tap)
+// Capture (a pm-hook subscriber)
 // ---------------------------------------------------------------------------
 
-struct TapCtx {
-    cb: CaptureCallback,
-    tap: Cell<CFMachPortRef>,
-    wheel_rem: Cell<f64>,
-    hwheel_rem: Cell<f64>,
-}
-
+/// Keeps the subscription to the global tap alive.
 struct MacCapture {
-    stop: Arc<AtomicBool>,
-    run_loop: SendPtr,
-    thread: Option<JoinHandle<()>>,
+    _guard: pm_hook::Guard,
 }
 
 impl CaptureHandle for MacCapture {}
 
-impl Drop for MacCapture {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        unsafe { CFRunLoopStop(self.run_loop.0) };
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
+/// Subscribe to the shared event tap (`pm-hook`) at Mouse Without Borders'
+/// priority. Events this crate injected ([`INJECTED_TAG`]) are skipped.
 fn start_tap(cb: CaptureCallback) -> Result<Box<dyn CaptureHandle>> {
-    let events = mask(kCGEventLeftMouseDown)
-        | mask(kCGEventLeftMouseUp)
-        | mask(kCGEventRightMouseDown)
-        | mask(kCGEventRightMouseUp)
-        | mask(kCGEventMouseMoved)
-        | mask(kCGEventLeftMouseDragged)
-        | mask(kCGEventRightMouseDragged)
-        | mask(kCGEventKeyDown)
-        | mask(kCGEventKeyUp)
-        | mask(kCGEventFlagsChanged)
-        | mask(kCGEventScrollWheel)
-        | mask(kCGEventOtherMouseDown)
-        | mask(kCGEventOtherMouseUp)
-        | mask(kCGEventOtherMouseDragged);
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<SendPtr, String>>();
-
-    let thread = std::thread::Builder::new()
-        .name("pm-input-eventtap".into())
-        .spawn(move || unsafe {
-            let ctx = Box::into_raw(Box::new(TapCtx {
-                cb,
-                tap: Cell::new(std::ptr::null_mut()),
-                wheel_rem: Cell::new(0.0),
-                hwheel_rem: Cell::new(0.0),
-            }));
-            let mut tap = std::ptr::null_mut();
-            for loc in [kCGHIDEventTap, kCGSessionEventTap] {
-                tap = CGEventTapCreate(
-                    loc,
-                    kCGHeadInsertEventTap,
-                    kCGEventTapOptionDefault,
-                    events,
-                    tap_callback,
-                    ctx as *mut c_void,
-                );
-                if !tap.is_null() {
-                    break;
-                }
+    use pm_hook::{EventMask, Subscription, Verdict};
+    let mask = EventMask::KEYS | EventMask::MOUSE_BUTTONS | EventMask::MOVES | EventMask::SCROLL;
+    let wheel_rem = Cell::new(0.0);
+    let hwheel_rem = Cell::new(0.0);
+    let guard = pm_hook::subscribe(
+        Subscription::new("mouse-without-borders", pm_hook::priority::MOUSE_WITHOUT_BORDERS, mask, move |ev| {
+            let disp = unsafe { handle_event(&cb, ev.cg_type(), ev.cg_event(), &wheel_rem, &hwheel_rem) };
+            match disp {
+                Disposition::Pass => Verdict::Pass,
+                Disposition::Swallow => Verdict::Swallow,
             }
-            if tap.is_null() {
-                drop(Box::from_raw(ctx));
-                let _ = tx.send(Err("CGEventTapCreate failed: the process is not trusted for \
-                    Accessibility/Input Monitoring (System Settings > Privacy & Security)"
-                    .into()));
-                return;
-            }
-            (*ctx).tap.set(tap);
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-            let rl = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(tap, true);
-            let _ = tx.send(Ok(SendPtr(rl)));
-
-            while !stop2.load(Ordering::SeqCst) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0);
-            }
-
-            CGEventTapEnable(tap, false);
-            CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-            CFMachPortInvalidate(tap);
-            CFRelease(src as CFTypeRef);
-            CFRelease(tap as CFTypeRef);
-            drop(Box::from_raw(ctx));
-        })?;
-
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(rl)) => Ok(Box::new(MacCapture { stop, run_loop: rl, thread: Some(thread) })),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(anyhow!(e))
-        }
-        Err(_) => {
-            stop.store(true, Ordering::SeqCst);
-            Err(anyhow!("event tap thread did not start"))
-        }
+        })
+        .ignore_tags(&[INJECTED_TAG]),
+    );
+    let st = pm_hook::status();
+    if !st.is_active() {
+        drop(guard);
+        bail!(
+            "could not create the event tap ({:?}): the process is not trusted for \
+             Accessibility/Input Monitoring (System Settings > Privacy & Security)",
+            st.state
+        );
     }
+    Ok(Box::new(MacCapture { _guard: guard }))
 }
 
-fn dispatch(ctx: &TapCtx, ev: InputEvent) -> Disposition {
-    match catch_unwind(AssertUnwindSafe(|| (ctx.cb)(&ev))) {
+fn dispatch(cb: &CaptureCallback, ev: InputEvent) -> Disposition {
+    match catch_unwind(AssertUnwindSafe(|| cb(&ev))) {
         Ok(d) => d,
         Err(_) => {
             log::error!("pm-input: capture callback panicked");
@@ -875,33 +764,21 @@ fn lines_to_wheel(lines: f64, rem: &Cell<f64>) -> i32 {
     whole as i32
 }
 
-unsafe extern "C" fn tap_callback(
-    _proxy: CGEventTapProxy,
+/// Translate one tapped event to Windows semantics and ask the callback.
+unsafe fn handle_event(
+    cb: &CaptureCallback,
     ty: u32,
     event: CGEventRef,
-    user: *mut c_void,
-) -> CGEventRef {
-    let ctx = &*(user as *const TapCtx);
-
-    if ty == kCGEventTapDisabledByTimeout || ty == kCGEventTapDisabledByUserInput {
-        log::warn!("pm-input: event tap disabled ({ty:#x}); re-enabling");
-        let tap = ctx.tap.get();
-        if !tap.is_null() {
-            CGEventTapEnable(tap, true);
-        }
-        return event;
-    }
+    wheel_rem: &Cell<f64>,
+    hwheel_rem: &Cell<f64>,
+) -> Disposition {
     if event.is_null() {
-        return event;
+        return Disposition::Pass;
     }
-    if CGEventGetIntegerValueField(event, kCGEventSourceUserData) == INJECTED_TAG as i64 {
-        return event; // our own injection: never report
-    }
-
     let loc = CGEventGetLocation(event);
     let (x, y) = (loc.x.floor() as i32, loc.y.floor() as i32);
 
-    let disp = match ty {
+    match ty {
         kCGEventMouseMoved
         | kCGEventLeftMouseDragged
         | kCGEventRightMouseDragged
@@ -910,7 +787,7 @@ unsafe extern "C" fn tap_callback(
             // dissociated (set_cursor_locked), unlike the absolute location.
             let dx = CGEventGetIntegerValueField(event, kCGMouseEventDeltaX) as i32;
             let dy = CGEventGetIntegerValueField(event, kCGMouseEventDeltaY) as i32;
-            dispatch(ctx, InputEvent::Mouse(MouseEvent::Move { x, y, dx, dy }))
+            dispatch(cb, InputEvent::Mouse(MouseEvent::Move { x, y, dx, dy }))
         }
         kCGEventLeftMouseDown | kCGEventLeftMouseUp | kCGEventRightMouseDown
         | kCGEventRightMouseUp | kCGEventOtherMouseDown | kCGEventOtherMouseUp => {
@@ -930,7 +807,7 @@ unsafe extern "C" fn tap_callback(
             };
             match button {
                 Some(button) => {
-                    dispatch(ctx, InputEvent::Mouse(MouseEvent::Button { button, down, x, y }))
+                    dispatch(cb, InputEvent::Mouse(MouseEvent::Button { button, down, x, y }))
                 }
                 None => Disposition::Pass,
             }
@@ -945,7 +822,7 @@ unsafe extern "C" fn tap_callback(
                 let h = CGEventGetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis2)
                     as f64
                     / 65536.0;
-                (lines_to_wheel(v, &ctx.wheel_rem), lines_to_wheel(h, &ctx.hwheel_rem))
+                (lines_to_wheel(v, wheel_rem), lines_to_wheel(h, hwheel_rem))
             } else {
                 let v = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1) as i32;
                 let h = CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis2) as i32;
@@ -953,18 +830,18 @@ unsafe extern "C" fn tap_callback(
             };
             let mut d = Disposition::Pass;
             if v != 0 {
-                d = combine(d, dispatch(ctx, InputEvent::Mouse(MouseEvent::Wheel { delta: v })));
+                d = combine(d, dispatch(cb, InputEvent::Mouse(MouseEvent::Wheel { delta: v })));
             }
             if h != 0 {
                 // CG axis 2 positive = left; Windows HWHEEL positive = right.
-                d = combine(d, dispatch(ctx, InputEvent::Mouse(MouseEvent::HWheel { delta: -h })));
+                d = combine(d, dispatch(cb, InputEvent::Mouse(MouseEvent::HWheel { delta: -h })));
             }
             d
         }
         kCGEventKeyDown | kCGEventKeyUp => {
             let keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) as u16;
             match vk::mac_key_event(keycode, ty == kCGEventKeyDown) {
-                Some(k) => dispatch(ctx, InputEvent::Key(k)),
+                Some(k) => dispatch(cb, InputEvent::Key(k)),
                 None => Disposition::Pass,
             }
         }
@@ -976,26 +853,21 @@ unsafe extern "C" fn tap_callback(
                 // for synthetic sources that don't set device bits.
                 let down = flags & dev != 0 || (flags & generic != 0 && flags & family == 0);
                 match vk::mac_key_event(keycode, down) {
-                    Some(k) => dispatch(ctx, InputEvent::Key(k)),
+                    Some(k) => dispatch(cb, InputEvent::Key(k)),
                     None => Disposition::Pass,
                 }
             } else if keycode == mac::CAPS_LOCK {
                 // One flagsChanged per toggle -> a Windows-style press + release.
                 let d1 = vk::mac_key_event(keycode, true)
-                    .map_or(Disposition::Pass, |k| dispatch(ctx, InputEvent::Key(k)));
+                    .map_or(Disposition::Pass, |k| dispatch(cb, InputEvent::Key(k)));
                 let d2 = vk::mac_key_event(keycode, false)
-                    .map_or(Disposition::Pass, |k| dispatch(ctx, InputEvent::Key(k)));
+                    .map_or(Disposition::Pass, |k| dispatch(cb, InputEvent::Key(k)));
                 combine(d1, d2)
             } else {
                 Disposition::Pass // fn key etc.
             }
         }
         _ => Disposition::Pass,
-    };
-
-    match disp {
-        Disposition::Pass => event,
-        Disposition::Swallow => std::ptr::null_mut(),
     }
 }
 

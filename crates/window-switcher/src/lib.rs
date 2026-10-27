@@ -30,11 +30,14 @@
 //! filtering), [`switcher`] (key state machine), [`layout`] (tile grid) and
 //! [`engine`] (glue). Platform runtimes:
 //!
-//! * macOS — active `CGEventTap`, Accessibility + CGWindowList enumeration
+//! * macOS — the shared active event tap (`pm-hook`,
+//!   [`pm_hook::priority::WINDOW_SWITCHER`]; its health drives the Cmd+Tab
+//!   take-over), Accessibility + CGWindowList enumeration
 //!   (other Spaces through the private CGS / remote-token APIs AltTab uses),
 //!   ScreenCaptureKit thumbnails, `NSPanel` + `NSVisualEffectView` overlay
 //!   drawn with Core Animation on the main thread.
-//! * Windows — `WH_KEYBOARD_LL` / `WH_MOUSE_LL` hooks, `EnumWindows`
+//! * Windows — the shared `WH_KEYBOARD_LL` / `WH_MOUSE_LL` hooks (`pm-hook`,
+//!   forwarded to the switcher's GUI thread), `EnumWindows`
 //!   (Alt+Tab rules, cloaked windows on other virtual desktops), DWM live
 //!   thumbnails (`DwmRegisterThumbnail`) in a topmost tool window.
 //!

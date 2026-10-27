@@ -190,6 +190,7 @@ fn engine_cfg(name: &str, port: u16, matrix: &[&str]) -> Config {
         swap_cmd_ctrl: false,
         reconnect_secs: 1,
         auto_discover: false,
+        answer_name_queries: false,
         ..Default::default()
     }
 }

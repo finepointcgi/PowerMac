@@ -1,5 +1,6 @@
 //! macOS engine: a pointer thread that keeps the HID properties applied
-//! (and restores them on stop), plus an optional `CGEventTap` that remaps the
+//! (and restores them on stop), plus an optional subscription to the shared
+//! event tap (`pm-hook`, [`pm_hook::priority::MOUSE_TUNING`]) that remaps the
 //! middle / side buttons.
 
 #![allow(non_upper_case_globals, non_snake_case)]
@@ -8,10 +9,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
@@ -24,30 +23,16 @@ type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
 type CFDictionaryRef = *const c_void;
 type CFAllocatorRef = *const c_void;
-type CFMachPortRef = *mut c_void;
-type CFRunLoopRef = *mut c_void;
-type CFRunLoopSourceRef = *mut c_void;
 type CGEventRef = *mut c_void;
-type CGEventTapProxy = *mut c_void;
-type CGEventTapCallBack = unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    static kCFRunLoopCommonModes: CFStringRef;
-    static kCFRunLoopDefaultMode: CFStringRef;
     static kCFBooleanTrue: CFTypeRef;
     static kCFBooleanFalse: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
     static kCFTypeDictionaryValueCallBacks: u8;
 
     fn CFRelease(cf: CFTypeRef);
-    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source: u8) -> i32;
-    fn CFRunLoopStop(rl: CFRunLoopRef);
-    fn CFMachPortCreateRunLoopSource(alloc: CFAllocatorRef, port: CFMachPortRef, order: isize) -> CFRunLoopSourceRef;
-    fn CFMachPortInvalidate(port: CFMachPortRef);
     fn CFDictionaryCreate(
         alloc: CFAllocatorRef,
         keys: *const *const c_void,
@@ -61,15 +46,6 @@ extern "C" {
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: CGEventTapCallBack,
-        user_info: *mut c_void,
-    ) -> CFMachPortRef;
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
 }
 
@@ -85,15 +61,9 @@ extern "C" {
 const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
 const kCFStringEncodingUTF8: u32 = 0x0800_0100;
 
-const kCGHIDEventTap: u32 = 0;
-const kCGSessionEventTap: u32 = 1;
-const kCGHeadInsertEventTap: u32 = 0;
-const kCGEventTapOptionDefault: u32 = 0;
 const kCGEventOtherMouseDown: u32 = 25;
 const kCGEventOtherMouseUp: u32 = 26;
 const kCGEventOtherMouseDragged: u32 = 27;
-const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 const kCGMouseEventButtonNumber: u32 = 3;
 const kCGEventSourceUserData: u32 = 42;
 
@@ -272,115 +242,50 @@ fn pointer_thread(rx: mpsc::Receiver<Msg>, mut cfg: Config) {
 // Button tap
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
-struct SendPtr(*mut c_void);
-// SAFETY: only handed to CFRunLoopStop, which is thread-safe.
-unsafe impl Send for SendPtr {}
-
 struct TapCtx {
     table: Arc<Mutex<Vec<ButtonAction>>>,
     actions: mpsc::Sender<ButtonAction>,
     /// Buttons whose down event we swallowed (so their drag/up go too).
     swallowed: Cell<u32>,
-    tap: Cell<CFMachPortRef>,
 }
 
+/// The subscription; `stop` (or dropping it) unsubscribes.
 struct ButtonTap {
-    stop: Arc<AtomicBool>,
-    run_loop: SendPtr,
-    thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl ButtonTap {
     fn start(table: Arc<Mutex<Vec<ButtonAction>>>, actions: mpsc::Sender<ButtonAction>) -> Result<Self> {
+        use pm_hook::{EventMask, EventType, Subscription, Verdict};
         if !is_trusted(false) {
             return Err(anyhow!("Accessibility is not granted; mouse buttons cannot be remapped"));
         }
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop2 = stop.clone();
-        let (tx, rx) = mpsc::channel::<std::result::Result<SendPtr, String>>();
-        let thread = std::thread::Builder::new().name("mouse-tuning-buttons".into()).spawn(move || unsafe {
-            let ctx = Box::into_raw(Box::new(TapCtx {
-                table,
-                actions,
-                swallowed: Cell::new(0),
-                tap: Cell::new(std::ptr::null_mut()),
-            }));
-            let mask = (1u64 << kCGEventOtherMouseDown) | (1u64 << kCGEventOtherMouseUp) | (1u64 << kCGEventOtherMouseDragged);
-            let mut tap = std::ptr::null_mut();
-            for loc in [kCGHIDEventTap, kCGSessionEventTap] {
-                tap = CGEventTapCreate(loc, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, tap_callback, ctx as *mut c_void);
-                if !tap.is_null() {
-                    break;
+        let ctx = TapCtx { table, actions, swallowed: Cell::new(0) };
+        let mask = EventMask::of(&[EventType::OtherMouseDown, EventType::OtherMouseUp, EventType::OtherMouseDragged]);
+        let guard = pm_hook::subscribe(
+            Subscription::new("mouse-tuning", pm_hook::priority::MOUSE_TUNING, mask, move |ev| {
+                let (ty, event) = (ev.cg_type(), ev.cg_event());
+                if event.is_null() {
+                    return Verdict::Pass;
                 }
-            }
-            if tap.is_null() {
-                drop(Box::from_raw(ctx));
-                let _ = tx.send(Err("CGEventTapCreate failed".into()));
-                return;
-            }
-            (*ctx).tap.set(tap);
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-            let rl = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(tap, true);
-            let _ = tx.send(Ok(SendPtr(rl)));
-            while !stop2.load(Ordering::SeqCst) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0);
-            }
-            CGEventTapEnable(tap, false);
-            CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-            CFMachPortInvalidate(tap);
-            CFRelease(src as CFTypeRef);
-            CFRelease(tap as CFTypeRef);
-            drop(Box::from_raw(ctx));
-        })?;
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(rl)) => Ok(Self { stop, run_loop: rl, thread: Some(thread) }),
-            Ok(Err(e)) => {
-                let _ = thread.join();
-                Err(anyhow!(e))
-            }
-            Err(_) => {
-                stop.store(true, Ordering::SeqCst);
-                Err(anyhow!("button tap thread did not start"))
-            }
+                if catch_unwind(AssertUnwindSafe(|| unsafe { handle_button(&ctx, ty, event) })).unwrap_or(false) {
+                    Verdict::Swallow
+                } else {
+                    Verdict::Pass
+                }
+            })
+            .ignore_tags(&[PM_INPUT_INJECTED_TAG, SELF_INJECTED_TAG]),
+        );
+        let st = pm_hook::status();
+        if !st.is_active() {
+            drop(guard);
+            return Err(anyhow!("CGEventTapCreate failed ({:?})", st.state));
         }
+        Ok(Self { guard: Some(guard) })
     }
 
     fn stop(&mut self) {
-        if let Some(t) = self.thread.take() {
-            self.stop.store(true, Ordering::SeqCst);
-            unsafe { CFRunLoopStop(self.run_loop.0) };
-            let _ = t.join();
-        }
-    }
-}
-
-impl Drop for ButtonTap {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-unsafe extern "C" fn tap_callback(_proxy: CGEventTapProxy, ty: u32, event: CGEventRef, user: *mut c_void) -> CGEventRef {
-    let ctx = &*(user as *const TapCtx);
-    if ty == kCGEventTapDisabledByTimeout || ty == kCGEventTapDisabledByUserInput {
-        let tap = ctx.tap.get();
-        if !tap.is_null() {
-            log::warn!("mouse-tuning: button tap disabled ({ty:#x}); re-enabling");
-            CGEventTapEnable(tap, true);
-        }
-        return event;
-    }
-    if event.is_null() {
-        return event;
-    }
-    let swallow = catch_unwind(AssertUnwindSafe(|| handle_button(ctx, ty, event))).unwrap_or(false);
-    if swallow {
-        std::ptr::null_mut()
-    } else {
-        event
+        self.guard.take();
     }
 }
 

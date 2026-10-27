@@ -55,6 +55,12 @@ pub struct Config {
     pub discovery_interval_secs: u64,
     /// Seconds between discovery sweeps once at least one peer is connected.
     pub discovery_interval_connected_secs: u64,
+    /// Answer LLMNR name queries (UDP 5355) for `machine_name`, so Windows /
+    /// PowerToys finds this machine by name (see [`crate::llmnr`]).
+    #[serde(alias = "answerNameQueries")]
+    pub answer_name_queries: bool,
+    /// UDP port of the LLMNR responder (5355; other values only make sense in tests).
+    pub llmnr_port: u16,
 }
 
 impl Default for Config {
@@ -80,6 +86,8 @@ impl Default for Config {
             auto_discover: true,
             discovery_interval_secs: 60,
             discovery_interval_connected_secs: 300,
+            answer_name_queries: true,
+            llmnr_port: crate::llmnr::PORT,
         }
     }
 }

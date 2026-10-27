@@ -1,4 +1,5 @@
-//! Windows backend: `WH_MOUSE_LL` / `WH_KEYBOARD_LL` capture, `SendInput` injection.
+//! Windows backend: capture through the shared `WH_MOUSE_LL` / `WH_KEYBOARD_LL`
+//! hooks (`pm-hook`), `SendInput` injection.
 //!
 //! Coordinates are physical pixels in the virtual-desktop space (origin at the
 //! primary monitor's top-left; other monitors may have negative coordinates).
@@ -7,7 +8,7 @@
 //!
 //! Hook notes:
 //! - Low-level hooks run on the thread that installed them, which must pump
-//!   messages; we use a dedicated thread with a `GetMessageW` loop.
+//!   messages: that is `pm-hook`'s thread; this crate only subscribes.
 //! - The callback must return quickly: if it exceeds `LowLevelHooksTimeout`
 //!   (~1s on Win10+) Windows silently removes the hook.
 //! - Swallowing `WM_MOUSEMOVE` in the hook freezes the real cursor, which is what
@@ -21,20 +22,16 @@
 
 #![allow(clippy::upper_case_acronyms)]
 
-use std::cell::RefCell;
 use std::mem::{size_of, zeroed};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{mpsc, Mutex};
-use std::thread::JoinHandle;
-use std::time::Duration;
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{BOOL, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -46,14 +43,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateCursor, DispatchMessageW, GetCursorPos, GetMessageW, GetSystemMetrics,
-    PeekMessageW, PostThreadMessageW, SetCursorPos, SetSystemCursor, SetWindowsHookExW,
-    SystemParametersInfoW, TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
-    LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
+    CreateCursor, GetCursorPos, GetSystemMetrics, SetCursorPos, SetSystemCursor,
+    SystemParametersInfoW, KBDLLHOOKSTRUCT,
+    LLKHF_EXTENDED, LLKHF_UP, MSLLHOOKSTRUCT,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_SETCURSORS,
-    SYSTEM_CURSOR_ID, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    SYSTEM_CURSOR_ID, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN,
     WM_XBUTTONUP,
 };
 
@@ -316,104 +311,58 @@ impl InputBackend for WinBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Hooks
+// Capture (a pm-hook subscriber)
 // ---------------------------------------------------------------------------
 
-struct HookState {
-    cb: CaptureCallback,
-}
-
-thread_local! {
-    static HOOK_STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
-}
-
+/// Keeps the subscription to the shared hooks alive.
 struct WinCapture {
-    thread_id: u32,
-    thread: Option<JoinHandle<()>>,
+    _guard: pm_hook::Guard,
 }
 
 impl CaptureHandle for WinCapture {}
 
-impl Drop for WinCapture {
-    fn drop(&mut self) {
-        unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
 fn start_hooks(cb: CaptureCallback) -> Result<Box<dyn CaptureHandle>> {
-    let (tx, rx) = mpsc::channel::<std::result::Result<u32, String>>();
-    let thread = std::thread::Builder::new()
-        .name("pm-input-hooks".into())
-        .spawn(move || unsafe {
-            HOOK_STATE.with(|s| *s.borrow_mut() = Some(HookState { cb }));
-            // Make sure this thread has a message queue before reporting its id.
-            let mut msg: MSG = zeroed();
-            PeekMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0, PM_NOREMOVE);
-
-            let hmod = GetModuleHandleW(std::ptr::null());
-            let mouse: HHOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0);
-            let kbd: HHOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hmod, 0);
-            if mouse.is_null() || kbd.is_null() {
-                if !mouse.is_null() {
-                    UnhookWindowsHookEx(mouse);
-                }
-                if !kbd.is_null() {
-                    UnhookWindowsHookEx(kbd);
-                }
-                let _ = tx.send(Err("SetWindowsHookExW failed".into()));
-                return;
+    use pm_hook::{EventMask, Subscription, Verdict};
+    let mask = EventMask::KEYS | EventMask::MOUSE_BUTTONS | EventMask::MOVES | EventMask::SCROLL;
+    let guard = pm_hook::subscribe(
+        Subscription::new("mouse-without-borders", pm_hook::priority::MOUSE_WITHOUT_BORDERS, mask, move |ev| {
+            let disp = if let Some((msg, info)) = ev.mouse() {
+                on_mouse(&cb, msg, info)
+            } else if let Some((_, info)) = ev.keyboard() {
+                on_key(&cb, info)
+            } else {
+                Disposition::Pass
+            };
+            match disp {
+                Disposition::Pass => Verdict::Pass,
+                Disposition::Swallow => Verdict::Swallow,
             }
-            let _ = tx.send(Ok(GetCurrentThreadId()));
-
-            while GetMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0) > 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-
-            UnhookWindowsHookEx(mouse);
-            UnhookWindowsHookEx(kbd);
-            HOOK_STATE.with(|s| *s.borrow_mut() = None);
-        })?;
-
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(thread_id)) => Ok(Box::new(WinCapture { thread_id, thread: Some(thread) })),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(anyhow!(e))
-        }
-        Err(_) => Err(anyhow!("hook thread did not start")),
+        })
+        // Our own injections (LLxHF_INJECTED + INJECTED_TAG) are never reported.
+        .ignore_tags(&[INJECTED_TAG]),
+    );
+    let st = pm_hook::status();
+    if !st.is_active() {
+        drop(guard);
+        return Err(anyhow!("SetWindowsHookExW failed ({:?})", st.state));
     }
+    Ok(Box::new(WinCapture { _guard: guard }))
 }
 
-fn dispatch(ev: InputEvent) -> Disposition {
-    HOOK_STATE.with(|s| {
-        let s = s.borrow();
-        let Some(st) = s.as_ref() else { return Disposition::Pass };
-        catch_unwind(AssertUnwindSafe(|| (st.cb)(&ev))).unwrap_or_else(|_| {
-            log::error!("pm-input: capture callback panicked");
-            Disposition::Pass
-        })
+fn dispatch(cb: &CaptureCallback, ev: InputEvent) -> Disposition {
+    catch_unwind(AssertUnwindSafe(|| cb(&ev))).unwrap_or_else(|_| {
+        log::error!("pm-input: capture callback panicked");
+        Disposition::Pass
     })
 }
 
-unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code < 0 {
-        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-    }
-    let info = &*(lparam as *const MSLLHOOKSTRUCT);
-    if info.flags & LLMHF_INJECTED != 0 && info.dwExtraInfo == INJECTED_TAG {
-        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-    }
+fn on_mouse(cb: &CaptureCallback, msg: u32, info: &MSLLHOOKSTRUCT) -> Disposition {
     let (x, y) = (info.pt.x, info.pt.y);
     let hi = (info.mouseData >> 16) as u16;
-    let msg = wparam as u32;
     let ev = match msg {
         WM_MOUSEMOVE => {
             let mut cur = POINT { x, y };
-            GetCursorPos(&mut cur);
+            unsafe { GetCursorPos(&mut cur) };
             Some(MouseEvent::Move { x, y, dx: x - cur.x, dy: y - cur.y })
         }
         WM_LBUTTONDOWN | WM_LBUTTONUP => Some(MouseEvent::Button {
@@ -442,32 +391,17 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         WM_MOUSEHWHEEL => Some(MouseEvent::HWheel { delta: hi as i16 as i32 }),
         _ => None,
     };
-    if let Some(ev) = ev {
-        if dispatch(InputEvent::Mouse(ev)) == Disposition::Swallow {
-            return 1;
-        }
+    match ev {
+        Some(ev) => dispatch(cb, InputEvent::Mouse(ev)),
+        None => Disposition::Pass,
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
 
-unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code < 0 {
-        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-    }
-    let info = &*(lparam as *const KBDLLHOOKSTRUCT);
-    if info.flags & LLKHF_INJECTED != 0 && info.dwExtraInfo == INJECTED_TAG {
-        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-    }
-    let msg = wparam as u32;
-    if matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP) {
-        let ev = KeyEvent {
-            vk: info.vkCode,
-            down: info.flags & LLKHF_UP == 0,
-            extended: info.flags & LLKHF_EXTENDED != 0,
-        };
-        if dispatch(InputEvent::Key(ev)) == Disposition::Swallow {
-            return 1;
-        }
-    }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+fn on_key(cb: &CaptureCallback, info: &KBDLLHOOKSTRUCT) -> Disposition {
+    let ev = KeyEvent {
+        vk: info.vkCode,
+        down: info.flags & LLKHF_UP == 0,
+        extended: info.flags & LLKHF_EXTENDED != 0,
+    };
+    dispatch(cb, InputEvent::Key(ev))
 }

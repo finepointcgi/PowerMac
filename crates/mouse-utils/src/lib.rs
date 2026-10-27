@@ -14,14 +14,14 @@
 //!
 //! * [`engine`] is platform-independent: double-Ctrl and shake detection,
 //!   hotkey matching, animation timing. Each frame it produces a [`Scene`].
-//! * macOS: a `CGEventTap` thread feeds the engine; overlays (one borderless,
+//! * macOS: the shared event tap (`pm-hook`) feeds the engine; overlays (one borderless,
 //!   click-through `NSWindow` per screen at `NSScreenSaverWindowLevel`, drawn
 //!   with Core Animation layers) live on the **main thread**, driven by a
 //!   60 Hz `CFRunLoopTimer` that only runs while something is visible. Work is
 //!   posted with the main dispatch queue, so the app must service it (e.g.
 //!   `fancyzones::platform::run_main_loop`).
-//! * Windows: one dedicated thread owns `WH_MOUSE_LL` + `WH_KEYBOARD_LL`,
-//!   layered topmost click-through windows (per-pixel alpha via
+//! * Windows: input from the shared `WH_MOUSE_LL` + `WH_KEYBOARD_LL` hooks
+//!   (`pm-hook`); one dedicated thread owns the layered topmost click-through windows (per-pixel alpha via
 //!   `UpdateLayeredWindow`, drawn by [`raster`]) and a `SetTimer` animation timer.
 //!
 //! Events injected by Mouse Without Borders (tagged `pm_input::INJECTED_TAG`)
@@ -100,6 +100,11 @@ impl Shared {
 
     pub(crate) fn set_input_mode(&self, m: InputMode) {
         *self.input_mode.lock().unwrap_or_else(|e| e.into_inner()) = m;
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn current_input_mode(&self) -> InputMode {
+        *self.input_mode.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

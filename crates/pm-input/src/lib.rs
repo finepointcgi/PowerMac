@@ -6,8 +6,14 @@
 //! messages). Each backend translates to/from its native representation.
 //!
 //! Backends:
-//! - macOS: `CGEventTap` for capture, `CGEventPost` for injection.
-//! - Windows: `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks for capture, `SendInput` for injection.
+//! - macOS: the shared event tap ([`pm_hook`]) for capture, `CGEventPost` for injection.
+//! - Windows: the shared `WH_MOUSE_LL` / `WH_KEYBOARD_LL` hooks ([`pm_hook`]) for
+//!   capture, `SendInput` for injection.
+//!
+//! Capture is a `pm_hook` subscriber at [`pm_hook::priority::MOUSE_WITHOUT_BORDERS`]:
+//! after Keyboard Manager and Scroll Reverser (whose remapped keys / corrected
+//! wheel a remote machine receives) and before every local consumer, so
+//! nothing local fires while input is forwarded.
 
 use std::sync::Arc;
 
@@ -139,7 +145,7 @@ pub trait InputBackend: Send + Sync {
 
 /// Value stamped on every event this crate injects (macOS
 /// `kCGEventSourceUserData`, Windows `dwExtraInfo`) so capture can skip it.
-pub const INJECTED_TAG: usize = 0x504D_4D57; // "PMMW"
+pub const INJECTED_TAG: usize = pm_hook::tags::MWB; // "PMMW"
 
 /// Windows `WHEEL_DELTA`: one wheel notch.
 pub const WHEEL_DELTA: i32 = 120;

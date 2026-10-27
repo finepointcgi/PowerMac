@@ -1,5 +1,6 @@
 //! macOS backend: IOAVService DDC/CI, DisplayServices, gamma dimming, a
-//! CGEventTap for the media keys and an AppKit OSD.
+//! subscription to the shared event tap (`pm-hook`) for the media keys and
+//! an AppKit OSD.
 
 mod backend;
 mod ffi;

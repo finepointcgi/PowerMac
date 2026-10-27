@@ -10,7 +10,7 @@
 //!   Control, App Exposé, Launchpad, show desktop, copy/paste, ...).
 //!
 //! Smooth scrolling for mouse wheels lives in the `scroll-reverser` crate
-//! (same event tap as the reverser).
+//! (same subscriber of the shared event tap as the reverser).
 //!
 //! ```no_run
 //! use mouse_tuning::{Config, MouseTuning};
@@ -43,8 +43,10 @@
 //!   ([`linear_speed_factor`]: 0.25x..4x, 0.5 = the device's own resolution).
 //! * With acceleration on, speed sets the acceleration value itself, i.e. the
 //!   System Settings "Tracking speed" slider (0..3).
-//! * Side buttons: an active `CGEventTap` on `otherMouseDown/Up` (needs
-//!   Accessibility, like the other taps). Back/Forward are sent as Cmd+[ and
+//! * Side buttons: a subscriber of the shared event tap (`pm-hook`,
+//!   [`pm_hook::priority::MOUSE_TUNING`], after Mouse Without Borders so a
+//!   remote machine gets the real button) on `otherMouseDown/Up` (needs
+//!   Accessibility). Back/Forward are sent as Cmd+[ and
 //!   Cmd+] (Safari, Finder, Chrome, Firefox, Xcode, Music all honour them),
 //!   not as synthesized swipe gestures: the gesture route needs undocumented
 //!   CGS gesture fields that change between releases and cannot be verified
@@ -66,7 +68,7 @@
 //!   touchpads have their own settings in Windows).
 //! * Side buttons already navigate on Windows, so
 //!   [`ButtonsConfig::side_buttons_navigation`] does nothing there; explicit
-//!   [`ButtonsConfig::mappings`] work through a `WH_MOUSE_LL` hook (middle,
+//!   [`ButtonsConfig::mappings`] work through the shared `WH_MOUSE_LL` hook (`pm-hook`; middle,
 //!   X1 = back, X2 = forward).
 
 use serde::{Deserialize, Serialize};
@@ -95,7 +97,7 @@ pub const REAPPLY_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 
 /// Tag ("MTUN") on events this crate injects itself (`kCGEventSourceUserData`
 /// / `dwExtraInfo`). Keystrokes go through `pm-input` and carry its tag.
-pub const SELF_INJECTED_TAG: usize = 0x4D54_554E;
+pub const SELF_INJECTED_TAG: usize = pm_hook::tags::MOUSE_TUNING;
 
 /// `pm-input`'s injection tag ("PMMW"): button events carrying it (Mouse
 /// Without Borders) are never remapped.

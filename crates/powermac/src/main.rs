@@ -47,6 +47,11 @@ enum Cmd {
     },
     /// Print a new Mouse Without Borders security key.
     GenKey,
+    /// Mouse Without Borders tools (`powermac mwb doctor`).
+    Mwb {
+        #[command(subcommand)]
+        cmd: MwbCmd,
+    },
     /// Show config location, permissions and screens.
     Doctor {
         /// Ask the OS for missing permissions (macOS shows a prompt).
@@ -130,6 +135,14 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum MwbCmd {
+    /// Check everything that decides whether a Windows PC can pair with this
+    /// Mac (name, ports, key, LLMNR, VPN, firewall, recent connection
+    /// attempts) and print the PowerShell to run on the PC.
+    Doctor,
 }
 
 /// Running modules, kept globally so the Ctrl+C handler can shut them down
@@ -311,6 +324,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Doctor { prompt } => doctor(&path, prompt),
+        Cmd::Mwb { cmd: MwbCmd::Doctor } => mwb_glue::doctor(&path),
         Cmd::Settings { page } => settings_ui::run_with_page(path, page),
         Cmd::Clipboard => {
             let cfg = AppConfig::load_or_default(&path)?;

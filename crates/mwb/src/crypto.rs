@@ -150,8 +150,8 @@ impl CbcDecryptor {
             blk.copy_from_slice(chunk);
             let ct = blk;
             self.cipher.decrypt_block(GenericArray::from_mut_slice(&mut blk));
-            for i in 0..BLOCK {
-                blk[i] ^= self.prev[i];
+            for (b, p) in blk.iter_mut().zip(self.prev) {
+                *b ^= p;
             }
             self.prev = ct;
             out.extend_from_slice(&blk);

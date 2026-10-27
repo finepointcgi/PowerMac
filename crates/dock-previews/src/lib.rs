@@ -32,7 +32,8 @@
 //! leave grace state machine), [`layout`] (tiles and their buttons) and
 //! [`cycle`] (what a click on the active app's icon does).
 //!
-//! macOS runtime: an active `CGEventTap` (mouse + Esc/W/M; it only swallows
+//! macOS runtime: a subscriber of the shared event tap (`pm-hook`,
+//! [`pm_hook::priority::DOCK_PREVIEWS`]; mouse + Esc/W/M; it only swallows
 //! events aimed at the panel, and Dock clicks when click-to-cycle applies),
 //! a worker thread that reads the Dock's Accessibility tree, tracks the
 //! pointer at ~30 Hz while it is near the Dock, lists the hovered app's

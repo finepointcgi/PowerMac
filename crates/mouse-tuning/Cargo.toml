@@ -10,6 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 # Key injection for button actions (keystrokes) and the VK tables.
 pm-input = { path = "../pm-input" }
+pm-hook = { path = "../pm-hook" }
 
 # macOS: IOKit (IOHIDEventSystemClient), CoreFoundation, CoreGraphics and
 # ApplicationServices are bound directly via `extern "C"`.

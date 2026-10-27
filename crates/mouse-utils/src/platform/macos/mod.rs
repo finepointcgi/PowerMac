@@ -1,7 +1,9 @@
-//! macOS backend: CGEventTap thread for input, Core Animation overlays on
-//! the main thread.
+//! macOS backend: a subscriber of the shared event tap (`pm-hook`,
+//! [`pm_hook::priority::MOUSE_UTILS`], last: it only observes and swallows
+//! nothing but its own hotkeys) for input, Core Animation overlays on the
+//! main thread.
 //!
-//! The tap is created with the best mode the process is allowed:
+//! The input mode follows the shared tap's state:
 //! 1. active (mouse + keyboard; hotkeys are swallowed) — needs Accessibility;
 //! 2. listen-only mouse + keyboard — needs Input Monitoring;
 //! 3. listen-only mouse only — no permission needed.
@@ -16,10 +18,7 @@ mod overlay;
 
 pub use overlay::debug_probe;
 
-use std::ffi::c_void;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -37,11 +36,6 @@ pub fn double_click_time() -> Duration {
     } else {
         Duration::from_millis(500)
     }
-}
-
-struct TapContext {
-    shared: Arc<Shared>,
-    port: AtomicPtr<c_void>,
 }
 
 fn mods_from_flags(f: u64) -> Mods {
@@ -69,27 +63,15 @@ fn modifier_bit(keycode: u16) -> Option<u64> {
     })
 }
 
-extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRef, info: *mut c_void) -> CGEventRef {
-    let ctx = unsafe { &*(info as *const TapContext) };
-    if etype == kCGEventTapDisabledByTimeout || etype == kCGEventTapDisabledByUserInput {
-        let port = ctx.port.load(Ordering::SeqCst);
-        if !port.is_null() {
-            unsafe { CGEventTapEnable(port, true) };
-        }
-        return event;
-    }
+/// Returns true to swallow (only our own hotkeys, in active mode).
+fn handle_event(sh: &Arc<Shared>, etype: u32, event: CGEventRef) -> bool {
     if event.is_null() {
-        return event;
-    }
-    // Skip events injected by our own Mouse Without Borders.
-    if unsafe { CGEventGetIntegerValueField(event, kCGEventSourceUserData) } == pm_input::INJECTED_TAG as i64 {
-        return event;
+        return false;
     }
     let loc = || {
         let p = unsafe { CGEventGetLocation(event) };
         Point::new(p.x, p.y)
     };
-    let sh = &ctx.shared;
     match etype {
         kCGEventMouseMoved | kCGEventLeftMouseDragged | kCGEventRightMouseDragged | kCGEventOtherMouseDragged => {
             let (dx, dy) = unsafe {
@@ -112,7 +94,7 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
         }
         kCGEventKeyDown | kCGEventKeyUp => {
             let code = unsafe { CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) } as u16;
-            let Some((vk, _)) = pm_input::vk::mac_to_vk(code) else { return event };
+            let Some((vk, _)) = pm_input::vk::mac_to_vk(code) else { return false };
             let down = etype == kCGEventKeyDown;
             let repeat = unsafe { CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) } != 0;
             let mods = mods_from_flags(unsafe { CGEventGetFlags(event) });
@@ -121,13 +103,11 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
             } else {
                 sh.with(|e, now| e.on_key(vk, down, mods, now))
             };
-            if swallow {
-                return std::ptr::null();
-            }
+            return swallow;
         }
         kCGEventFlagsChanged => {
             let code = unsafe { CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) } as u16;
-            let (Some(bit), Some((vk, _))) = (modifier_bit(code), pm_input::vk::mac_to_vk(code)) else { return event };
+            let (Some(bit), Some((vk, _))) = (modifier_bit(code), pm_input::vk::mac_to_vk(code)) else { return false };
             let flags = unsafe { CGEventGetFlags(event) };
             let down = flags & bit != 0;
             let mods = mods_from_flags(flags);
@@ -135,123 +115,109 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
         }
         _ => {}
     }
-    event
+    false
 }
 
-const MOUSE_MASK: u64 = event_mask(kCGEventLeftMouseDown)
-    | event_mask(kCGEventLeftMouseUp)
-    | event_mask(kCGEventRightMouseDown)
-    | event_mask(kCGEventRightMouseUp)
-    | event_mask(kCGEventMouseMoved)
-    | event_mask(kCGEventLeftMouseDragged)
-    | event_mask(kCGEventRightMouseDragged)
-    | event_mask(kCGEventOtherMouseDown)
-    | event_mask(kCGEventOtherMouseDragged);
-const KEY_MASK: u64 = event_mask(kCGEventKeyDown) | event_mask(kCGEventKeyUp) | event_mask(kCGEventFlagsChanged);
+/// The input mode the shared tap's state allows, capped by
+/// `MOUSE_UTILS_MAX_INPUT=listen|mouse|none` (diagnostics: exercises the
+/// fallback paths on a machine that has permissions).
+fn input_mode(st: &pm_hook::Status, cap: u8) -> InputMode {
+    let mode = match st.state {
+        pm_hook::TapState::Active => InputMode::Full,
+        pm_hook::TapState::ListenOnly { keyboard: true } => InputMode::ListenOnly,
+        pm_hook::TapState::ListenOnly { keyboard: false } => InputMode::MouseOnly,
+        _ => InputMode::None,
+    };
+    let rank = |m: InputMode| match m {
+        InputMode::Full => 0,
+        InputMode::ListenOnly => 1,
+        InputMode::MouseOnly => 2,
+        _ => 3,
+    };
+    let capped = [InputMode::Full, InputMode::ListenOnly, InputMode::MouseOnly, InputMode::None][cap.min(3) as usize];
+    if rank(mode) >= rank(capped) {
+        mode
+    } else {
+        capped
+    }
+}
+
+fn log_mode(mode: InputMode) {
+    match mode {
+        InputMode::Full => {}
+        InputMode::ListenOnly => log::warn!("mouse-utils: no Accessibility permission; hotkeys work but also reach the focused app"),
+        InputMode::MouseOnly => log::warn!(
+            "mouse-utils: no Accessibility / Input Monitoring permission; hotkeys and double-Ctrl are disabled \
+             (click highlights and programmatic triggers still work)"
+        ),
+        _ => log::warn!("mouse-utils: could not create any event tap; only programmatic triggers work"),
+    }
+}
 
 pub(crate) struct Runtime {
-    tap_runloop: usize,
-    tap_thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl Runtime {
     pub(crate) fn start(shared: Arc<Shared>) -> Result<Self> {
+        use pm_hook::{EventMask, EventType, Subscription, Verdict};
         overlay::install(shared.clone());
         shared.set_kick(overlay::kick);
 
-        let (ready_tx, ready_rx) = mpsc::channel::<Option<(usize, InputMode)>>();
-        let ctx = Box::new(TapContext { shared: shared.clone(), port: AtomicPtr::new(std::ptr::null_mut()) });
-        let tap_thread = std::thread::Builder::new().name("mouse-utils-tap".into()).spawn(move || unsafe {
-            let ctx_ptr = Box::into_raw(ctx);
-            let attempts = [
-                (kCGEventTapOptionDefault, MOUSE_MASK | KEY_MASK, InputMode::Full),
-                (kCGEventTapOptionListenOnly, MOUSE_MASK | KEY_MASK, InputMode::ListenOnly),
-                (kCGEventTapOptionListenOnly, MOUSE_MASK, InputMode::MouseOnly),
-            ];
-            // Diagnostics: MOUSE_UTILS_MAX_INPUT=listen|mouse|none caps the tap mode
-            // (to exercise the fallback paths on a machine that has permissions).
-            let skip = match std::env::var("MOUSE_UTILS_MAX_INPUT").as_deref() {
-                Ok("listen") => 1,
-                Ok("mouse") => 2,
-                Ok("none") => 3,
-                _ => 0,
-            };
-            let mut created = None;
-            for (opt, mask, mode) in attempts.into_iter().skip(skip) {
-                // Without Accessibility an active tap can't be created; don't bother asking.
-                if opt == kCGEventTapOptionDefault && AXIsProcessTrusted() == 0 {
-                    continue;
-                }
-                if mask & KEY_MASK != 0 && opt == kCGEventTapOptionListenOnly && !CGPreflightListenEventAccess() {
-                    continue;
-                }
-                let port = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, opt, mask, tap_callback, ctx_ptr as *mut c_void);
-                if !port.is_null() {
-                    created = Some((port, mode));
-                    break;
-                }
-            }
-            let Some((port, mode)) = created else {
-                drop(Box::from_raw(ctx_ptr));
-                let _ = ready_tx.send(None);
-                return;
-            };
-            (*ctx_ptr).port.store(port as *mut c_void, Ordering::SeqCst);
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), port, 0);
-            let rl = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(port, true);
-            let _ = ready_tx.send(Some((rl as usize, mode)));
-            CFRunLoopRun();
-            CGEventTapEnable(port, false);
-            CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-            CFMachPortInvalidate(port);
-            CFRelease(src);
-            CFRelease(port);
-            drop(Box::from_raw(ctx_ptr));
-        })?;
-
-        let (rl, tap_thread) = match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Some((rl, mode))) => {
-                shared.set_input_mode(mode);
-                match mode {
-                    InputMode::Full => {}
-                    InputMode::ListenOnly => log::warn!(
-                        "mouse-utils: no Accessibility permission; hotkeys work but also reach the focused app"
-                    ),
-                    _ => log::warn!(
-                        "mouse-utils: no Accessibility / Input Monitoring permission; hotkeys and double-Ctrl are disabled \
-                         (click highlights and programmatic triggers still work)"
-                    ),
-                }
-                (rl, Some(tap_thread))
-            }
-            Ok(None) => {
-                let _ = tap_thread.join();
-                shared.set_input_mode(InputMode::None);
-                log::warn!("mouse-utils: could not create any event tap; only programmatic triggers work");
-                (0, None)
-            }
-            Err(_) => {
-                shared.set_input_mode(InputMode::None);
-                log::warn!("mouse-utils: event tap thread did not start");
-                (0, None)
-            }
+        let cap: u8 = match std::env::var("MOUSE_UTILS_MAX_INPUT").as_deref() {
+            Ok("listen") => 1,
+            Ok("mouse") => 2,
+            Ok("none") => 3,
+            _ => 0,
         };
-        Ok(Runtime { tap_runloop: rl, tap_thread })
+        if cap >= 3 {
+            shared.set_input_mode(InputMode::None);
+            log_mode(InputMode::None);
+            return Ok(Runtime { guard: None });
+        }
+        let mut mask = EventMask::of(&[
+            EventType::LeftMouseDown,
+            EventType::LeftMouseUp,
+            EventType::RightMouseDown,
+            EventType::RightMouseUp,
+            EventType::MouseMoved,
+            EventType::LeftMouseDragged,
+            EventType::RightMouseDragged,
+            EventType::OtherMouseDown,
+            EventType::OtherMouseDragged,
+        ]);
+        if cap < 2 {
+            mask = mask | EventMask::KEYS;
+        }
+        let sh = shared.clone();
+        let sh_status = shared.clone();
+        let guard = pm_hook::subscribe(
+            Subscription::new("mouse-utils", pm_hook::priority::MOUSE_UTILS, mask, move |ev| {
+                let swallow = handle_event(&sh, ev.cg_type(), ev.cg_event());
+                // Capped to listen-only: hotkeys also reach the focused app.
+                if swallow && cap == 0 {
+                    Verdict::Swallow
+                } else {
+                    Verdict::Pass
+                }
+            })
+            // Skip events injected by our own Mouse Without Borders.
+            .ignore_tags(&[pm_input::INJECTED_TAG])
+            // Without Accessibility: observe through a listen-only tap.
+            .allow_listen_only()
+            .on_status(move |st| {
+                let mode = input_mode(st, cap);
+                if sh_status.current_input_mode() != mode {
+                    sh_status.set_input_mode(mode);
+                    log_mode(mode);
+                }
+            }),
+        );
+        Ok(Runtime { guard: Some(guard) })
     }
 
     pub(crate) fn stop(&mut self) {
-        if self.tap_runloop != 0 {
-            unsafe {
-                CFRunLoopStop(self.tap_runloop as CFRunLoopRef);
-                CFRunLoopWakeUp(self.tap_runloop as CFRunLoopRef);
-            }
-            self.tap_runloop = 0;
-        }
-        if let Some(t) = self.tap_thread.take() {
-            let _ = t.join();
-        }
+        self.guard.take();
         overlay::uninstall();
     }
 }

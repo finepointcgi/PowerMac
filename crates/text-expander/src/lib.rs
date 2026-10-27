@@ -54,12 +54,15 @@
 //! through the clipboard, which is saved and restored afterwards. A
 //! `{cursor}` is reached with Left-arrow presses.
 //!
-//! **macOS:** an active `CGEventTap` at the session level (Accessibility
-//! permission); the typed text comes from `CGEventKeyboardGetUnicodeString`,
-//! so any keyboard layout works. Injected events are tagged with
-//! [`INJECTED_TAG`] ("PMTE"), which this tap and Keyboard Manager skip.
-//! **Windows:** `WH_KEYBOARD_LL` + `WH_MOUSE_LL` hooks, `ToUnicodeEx` (without
-//! touching the dead-key state) and `SendInput` with `KEYEVENTF_UNICODE`.
+//! Input comes from the shared hook ([`pm_hook`]) at
+//! [`pm_hook::priority::TEXT_EXPANDER`], after Keyboard Manager (so remapped
+//! keys are what gets typed into the buffer).
+//! **macOS:** the shared active `CGEventTap` (Accessibility permission); the
+//! typed text comes from `CGEventKeyboardGetUnicodeString`, so any keyboard
+//! layout works. Injected events are tagged with [`INJECTED_TAG`] ("PMTE"),
+//! which this subscriber and Keyboard Manager skip.
+//! **Windows:** the shared `WH_KEYBOARD_LL` + `WH_MOUSE_LL` hooks, `ToUnicodeEx`
+//! (without touching the dead-key state) and `SendInput` with `KEYEVENTF_UNICODE`.
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;

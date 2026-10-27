@@ -2,7 +2,7 @@
 //! HUD panel (rounded, vibrancy material) with an SF Symbol icon and a level
 //! bar, shown near the bottom of the target display and faded out. All
 //! AppKit work runs on the main queue; [`show`] can be called from any
-//! thread (the event tap thread).
+//! thread (the shared event tap thread).
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};

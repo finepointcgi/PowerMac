@@ -1,4 +1,5 @@
-//! macOS backend: an active `CGEventTap` for `kCGEventScrollWheel` that
+//! macOS backend: a subscriber of the shared event tap (`pm-hook`) for
+//! `kCGEventScrollWheel` at [`pm_hook::priority::SCROLL_REVERSER`] that
 //! negates the scroll delta fields in place (no re-posting), and, with smooth
 //! scrolling on, swallows discrete mouse-wheel notches and replays them as
 //! eased pixel scroll events (tagged [`SELF_INJECTED_TAG`]) from a frame thread.
@@ -7,12 +8,10 @@
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ffi::{c_char, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -27,20 +26,12 @@ type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
 type CFDictionaryRef = *const c_void;
 type CFAllocatorRef = *const c_void;
-type CFMachPortRef = *mut c_void;
-type CFRunLoopRef = *mut c_void;
-type CFRunLoopSourceRef = *mut c_void;
 type CGEventRef = *mut c_void;
-type CGEventTapProxy = *mut c_void;
 type CGEventSourceRef = *mut c_void;
 
-type CGEventTapCallBack =
-    unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    static kCFRunLoopCommonModes: CFStringRef;
-    static kCFRunLoopDefaultMode: CFStringRef;
     static kCFBooleanTrue: CFTypeRef;
     static kCFBooleanFalse: CFTypeRef;
     static kCFTypeDictionaryKeyCallBacks: u8;
@@ -48,17 +39,6 @@ extern "C" {
     static kCFPreferencesAnyApplication: CFStringRef;
 
     fn CFRelease(cf: CFTypeRef);
-    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
-    fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source: u8) -> i32;
-    fn CFRunLoopStop(rl: CFRunLoopRef);
-    fn CFMachPortCreateRunLoopSource(
-        alloc: CFAllocatorRef,
-        port: CFMachPortRef,
-        order: isize,
-    ) -> CFRunLoopSourceRef;
-    fn CFMachPortInvalidate(port: CFMachPortRef);
     fn CFDictionaryCreate(
         alloc: CFAllocatorRef,
         keys: *const *const c_void,
@@ -75,15 +55,6 @@ extern "C" {
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn CGEventTapCreate(
-        tap: u32,
-        place: u32,
-        options: u32,
-        events_of_interest: u64,
-        callback: CGEventTapCallBack,
-        user_info: *mut c_void,
-    ) -> CFMachPortRef;
-    fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetIntegerValueField(event: CGEventRef, field: u32) -> i64;
     fn CGEventSetIntegerValueField(event: CGEventRef, field: u32, value: i64);
     fn CGEventGetDoubleValueField(event: CGEventRef, field: u32) -> f64;
@@ -113,9 +84,6 @@ extern "C" {
 const kCFStringEncodingUTF8: u32 = 0x0800_0100;
 
 const kCGHIDEventTap: u32 = 0;
-const kCGSessionEventTap: u32 = 1;
-const kCGHeadInsertEventTap: u32 = 0;
-const kCGEventTapOptionDefault: u32 = 0;
 
 const kCGEventScrollWheel: u32 = 22;
 const kCGScrollEventUnitPixel: u32 = 0;
@@ -128,8 +96,6 @@ const MODIFIER_MASK: u64 =
     kCGEventFlagMaskShift | kCGEventFlagMaskControl | kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand;
 /// Smooth-scrolling frame interval (120 Hz).
 const FRAME: Duration = Duration::from_micros(8_333);
-const kCGEventTapDisabledByTimeout: u32 = 0xFFFF_FFFE;
-const kCGEventTapDisabledByUserInput: u32 = 0xFFFF_FFFF;
 
 const kCGScrollWheelEventDeltaAxis1: u32 = 11;
 const kCGScrollWheelEventDeltaAxis2: u32 = 12;
@@ -190,18 +156,11 @@ pub(crate) fn natural_scrolling() -> bool {
     }
 }
 
-#[derive(Clone, Copy)]
-struct SendPtr(*mut c_void);
-// SAFETY: only used to hand the run loop to CFRunLoopStop, which is thread-safe.
-unsafe impl Send for SendPtr {}
-unsafe impl Sync for SendPtr {}
-
 struct TapCtx {
     shared: Arc<SharedConfig>,
     observer: Option<Observer>,
     classifier: RefCell<MacClassifier>,
-    tap: Cell<CFMachPortRef>,
-    /// Smooth-scrolling frame thread (posts at the tap's own location).
+    /// Smooth-scrolling frame thread (posts at the HID level).
     animator: RefCell<Option<Animator>>,
 }
 
@@ -256,35 +215,19 @@ impl Drop for PixelPoster {
 
 fn noop() {}
 
+/// The subscription; dropping it (or `stop`) unsubscribes.
 pub(crate) struct Tap {
-    stop: Arc<AtomicBool>,
-    run_loop: SendPtr,
-    thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl Tap {
     pub(crate) fn stop(mut self) {
-        self.shutdown();
-    }
-
-    fn shutdown(&mut self) {
-        // Only once: after the join the run loop belongs to a dead thread, and
-        // CFRunLoopStop on it traps (stop() followed by Drop used to do that).
-        if let Some(t) = self.thread.take() {
-            self.stop.store(true, Ordering::SeqCst);
-            unsafe { CFRunLoopStop(self.run_loop.0) };
-            let _ = t.join();
-        }
-    }
-}
-
-impl Drop for Tap {
-    fn drop(&mut self) {
-        self.shutdown();
+        self.guard.take();
     }
 }
 
 pub(crate) fn start(shared: Arc<SharedConfig>, observer: Option<Observer>) -> Result<Tap> {
+    use pm_hook::{EventMask, Subscription, Verdict};
     if !is_trusted(false) {
         return Err(Error::PermissionDenied(
             "Accessibility is not granted to this process (or the terminal that launched it); \
@@ -293,116 +236,39 @@ pub(crate) fn start(shared: Arc<SharedConfig>, observer: Option<Observer>) -> Re
         )
         .into());
     }
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<SendPtr, String>>();
-
-    let thread = std::thread::Builder::new()
-        .name("scroll-reverser-tap".into())
-        .spawn(move || unsafe {
-            let ctx = Box::into_raw(Box::new(TapCtx {
-                shared,
-                observer,
-                classifier: RefCell::new(MacClassifier::new()),
-                tap: Cell::new(std::ptr::null_mut()),
-                animator: RefCell::new(None),
-            }));
-            let mut tap = std::ptr::null_mut();
-            let mut location = kCGHIDEventTap;
-            for loc in [kCGHIDEventTap, kCGSessionEventTap] {
-                location = loc;
-                tap = CGEventTapCreate(
-                    loc,
-                    kCGHeadInsertEventTap,
-                    kCGEventTapOptionDefault,
-                    1u64 << kCGEventScrollWheel,
-                    tap_callback,
-                    ctx as *mut c_void,
-                );
-                if !tap.is_null() {
-                    break;
+    let ctx = TapCtx { shared, observer, classifier: RefCell::new(MacClassifier::new()), animator: RefCell::new(None) };
+    // Smooth scrolling posts at the HID level, like the HID tap it replaces.
+    match PixelPoster::new(kCGHIDEventTap) {
+        Some(mut poster) => match Animator::start(Box::new(move |d| poster.post(d)), FRAME, noop, noop) {
+            Ok(a) => *ctx.animator.borrow_mut() = Some(a),
+            Err(e) => log::error!("scroll-reverser: smooth scrolling thread: {e}"),
+        },
+        None => log::error!("scroll-reverser: CGEventSourceCreate failed; no smooth scrolling"),
+    }
+    let guard = pm_hook::subscribe(
+        Subscription::new("scroll-reverser", pm_hook::priority::SCROLL_REVERSER, EventMask::SCROLL, move |ev| {
+            let event = ev.cg_event();
+            if ev.cg_type() != kCGEventScrollWheel || event.is_null() {
+                return Verdict::Pass;
+            }
+            match catch_unwind(AssertUnwindSafe(|| unsafe { handle_scroll(&ctx, event) })) {
+                Ok(true) => Verdict::Swallow, // replayed by the smoother
+                Ok(false) => Verdict::Pass,   // possibly reversed in place
+                Err(_) => {
+                    log::error!("scroll-reverser: panic in tap callback");
+                    Verdict::Pass
                 }
             }
-            if tap.is_null() {
-                drop(Box::from_raw(ctx));
-                let _ = tx.send(Err("CGEventTapCreate failed".into()));
-                return;
-            }
-            (*ctx).tap.set(tap);
-            if location != kCGHIDEventTap {
-                log::warn!("scroll-reverser: HID event tap unavailable, using the session tap");
-            }
-            match PixelPoster::new(location) {
-                Some(mut poster) => {
-                    match Animator::start(Box::new(move |d| poster.post(d)), FRAME, noop, noop) {
-                        Ok(a) => *(*ctx).animator.borrow_mut() = Some(a),
-                        Err(e) => log::error!("scroll-reverser: smooth scrolling thread: {e}"),
-                    }
-                }
-                None => log::error!("scroll-reverser: CGEventSourceCreate failed; no smooth scrolling"),
-            }
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), tap, 0);
-            let rl = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(tap, true);
-            let _ = tx.send(Ok(SendPtr(rl)));
-
-            while !stop2.load(Ordering::SeqCst) {
-                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0);
-            }
-
-            CGEventTapEnable(tap, false);
-            CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-            CFMachPortInvalidate(tap);
-            CFRelease(src as CFTypeRef);
-            CFRelease(tap as CFTypeRef);
-            drop(Box::from_raw(ctx));
-        })?;
-
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(rl)) => Ok(Tap { stop, run_loop: rl, thread: Some(thread) }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            if is_trusted(false) {
-                Err(anyhow!(e))
-            } else {
-                Err(Error::PermissionDenied(e).into())
-            }
-        }
-        Err(_) => {
-            stop.store(true, Ordering::SeqCst);
-            Err(anyhow!("event tap thread did not start"))
-        }
+        })
+        .ignore_tags(&[PM_INPUT_INJECTED_TAG, SELF_INJECTED_TAG]),
+    );
+    let st = pm_hook::status();
+    if !st.is_active() {
+        drop(guard);
+        let e = format!("CGEventTapCreate failed ({:?})", st.state);
+        return Err(if is_trusted(false) { anyhow!(e) } else { Error::PermissionDenied(e).into() });
     }
-}
-
-unsafe extern "C" fn tap_callback(
-    _proxy: CGEventTapProxy,
-    ty: u32,
-    event: CGEventRef,
-    user: *mut c_void,
-) -> CGEventRef {
-    let ctx = &*(user as *const TapCtx);
-    if ty == kCGEventTapDisabledByTimeout || ty == kCGEventTapDisabledByUserInput {
-        let tap = ctx.tap.get();
-        if !tap.is_null() {
-            log::warn!("scroll-reverser: event tap disabled ({ty:#x}); re-enabling");
-            CGEventTapEnable(tap, true);
-        }
-        return event;
-    }
-    if ty != kCGEventScrollWheel || event.is_null() {
-        return event;
-    }
-    match catch_unwind(AssertUnwindSafe(|| handle_scroll(ctx, event))) {
-        Ok(true) => std::ptr::null_mut(), // swallowed; replayed by the smoother
-        Ok(false) => event,
-        Err(_) => {
-            log::error!("scroll-reverser: panic in tap callback");
-            event
-        }
-    }
+    Ok(Tap { guard: Some(guard) })
 }
 
 /// Returns true when the event is swallowed (smooth scrolling replays it).

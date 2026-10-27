@@ -105,15 +105,18 @@
 //!
 //! [`engine::Engine`] is a platform-independent state machine (VK + down/up in,
 //! pass / replace-with-actions out) that follows PowerToys'
-//! `KeyboardEventHandlers.cpp`. The macOS backend runs an active
-//! `CGEventTap` (key down/up, flagsChanged, plus mouse buttons so modifier
-//! flags stay consistent) on its own CFRunLoop thread; it rewrites events in
-//! place when one key becomes another and otherwise swallows them and posts
-//! replacements right after itself (`CGEventTapPostEvent`), fixing the
-//! modifier flags of every event that passes while a remap changes the
-//! modifier state. The Windows backend uses a `WH_KEYBOARD_LL` hook and
-//! `SendInput`. Injected events are tagged ([`INJECTED_TAG`]) and skipped,
-//! as are Mouse Without Borders' (`pm_input::INJECTED_TAG`).
+//! `KeyboardEventHandlers.cpp`. Both backends subscribe to the shared input
+//! hook ([`pm_hook`]) at [`pm_hook::priority::KEYBOARD_MANAGER`], ahead of
+//! Mouse Without Borders and of every module that matches shortcuts, so
+//! those see the remapped keys. On macOS (key down/up, flagsChanged, plus
+//! mouse buttons so modifier flags stay consistent) it rewrites events in
+//! place when one key becomes another and otherwise replaces them
+//! (`Verdict::Replace`: the replacements go to the later subscribers and
+//! are posted right after the tap), fixing the modifier flags of every
+//! event that passes while a remap changes the modifier state. On Windows
+//! it swallows the key and `SendInput`s the replacement. Injected events
+//! are tagged ([`INJECTED_TAG`]) and skipped, as are Mouse Without Borders'
+//! (`pm_input::INJECTED_TAG`) and the text expander's.
 //!
 //! macOS needs Accessibility permission for the process (or the terminal
 //! that runs it); without it [`KeyboardManager::start`] fails cleanly.
@@ -173,12 +176,12 @@ pub use windows_style::WindowsStylePreset;
 
 /// Tag stamped on every event Keyboard Manager injects (macOS
 /// `kCGEventSourceUserData`, Windows `dwExtraInfo`): "PMKM".
-pub const INJECTED_TAG: usize = 0x504D_4B4D;
+pub const INJECTED_TAG: usize = pm_hook::tags::KEYBOARD_MANAGER;
 /// Mouse Without Borders' tag; its injected (remote) input is not remapped.
 pub const MWB_TAG: usize = pm_input::INJECTED_TAG;
 /// Tag of the text expander's injected events ("PMTE"); not remapped
 /// either (its unicode text events carry keycode 0, i.e. "A").
-pub const TEXT_EXPANDER_TAG: usize = 0x504D_5445;
+pub const TEXT_EXPANDER_TAG: usize = pm_hook::tags::TEXT_EXPANDER;
 
 pub(crate) enum Job {
     Paste,

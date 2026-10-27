@@ -1,7 +1,7 @@
 //! The MWB engine: sockets, handshake, machine pool, edge switching and
 //! input forwarding / injection.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
@@ -18,6 +18,7 @@ use crate::clipboard;
 use crate::config::Config;
 use crate::crypto;
 use crate::discovery::{self, Backoff, BackoffReason, CandidateProvider};
+use crate::llmnr;
 use crate::matrix::{Dir, Matrix, MAX_MACHINE};
 use crate::protocol::{llkhf, ptype, wm, Data, ID_ALL, ID_NONE, MOVE_MOUSE_RELATIVE};
 use crate::transport::{SecureReader, SecureWriter};
@@ -37,6 +38,12 @@ const MIN_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 const MATRIX_HOLD: Duration = Duration::from_secs(15);
 /// Delay before broadcasting the layout after (re)connecting a discovered machine.
 const MATRIX_BROADCAST_DELAY: Duration = Duration::from_millis(1500);
+/// While a peer is connected through a socket it opened to us, a failed
+/// client connection to it (its firewall drops our SYNs) is retried this
+/// rarely instead of every `reconnect_secs`. One socket carries everything.
+const CLIENT_RETRY_WHILE_CONNECTED: Duration = Duration::from_secs(60);
+/// Incoming connection attempts kept for diagnostics.
+const INCOMING_HISTORY: usize = 16;
 
 /// Notifications emitted by the engine.
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +84,16 @@ pub struct DiscoveredPeer {
     pub addr: SocketAddr,
 }
 
+/// One connection a machine opened to our listener (for diagnostics: when
+/// pairing doesn't work, this shows whether the PC tried at all).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingAttempt {
+    pub from: SocketAddr,
+    pub at: SystemTime,
+    /// "connected" (handshake pending), "trusted as NAME", or why it ended.
+    pub result: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Status {
     pub machine_name: String,
@@ -98,6 +115,12 @@ pub struct Status {
     pub last_search: Option<SystemTime>,
     /// Hosts that answered with a different security key (left alone for a while).
     pub other_key: Vec<SocketAddr>,
+    /// Recent connections to our listener, newest last.
+    pub incoming: Vec<IncomingAttempt>,
+    /// Message-socket addresses learnt from machines that connected to us.
+    pub learned: Vec<(String, SocketAddr)>,
+    /// The LLMNR responder (`None`: off or unsupported).
+    pub llmnr: Option<llmnr::LlmnrStatus>,
 }
 
 struct Conn {
@@ -166,8 +189,8 @@ enum Origin {
     Configured,
     /// Client socket opened by a discovery probe.
     Discovered(SocketAddr),
-    /// Accepted on our listener.
-    Incoming,
+    /// Accepted on our listener (sequence number of the [`IncomingAttempt`]).
+    Incoming(u64),
 }
 
 #[derive(Default)]
@@ -207,6 +230,13 @@ struct Shared {
     events: Mutex<Option<Sender<EngineEvent>>>,
     capture_active: AtomicBool,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// lower-case name -> (name, message-socket address) of machines that
+    /// connected to us: where to connect back when nothing else resolves.
+    learned: Mutex<HashMap<String, (String, SocketAddr)>>,
+    /// lower-case name -> when our last client connection to it failed.
+    client_failed: Mutex<HashMap<String, Instant>>,
+    incoming: Mutex<VecDeque<(u64, IncomingAttempt)>>,
+    llmnr: Mutex<Option<llmnr::Responder>>,
 }
 
 pub struct Engine;
@@ -401,8 +431,13 @@ impl Engine {
             disc: Mutex::new(DiscState { next_sweep: Some(now + FIRST_SWEEP_DELAY), ..Default::default() }),
             discover_now: AtomicBool::new(false),
             provider,
+            learned: Mutex::new(HashMap::new()),
+            client_failed: Mutex::new(HashMap::new()),
+            incoming: Mutex::new(VecDeque::new()),
+            llmnr: Mutex::new(None),
             cfg: RwLock::new(config),
         });
+        shared.set_llmnr(shared.cfg().answer_name_queries);
         info!("MWB engine '{}' id {} listening on {}", my_name, my_id, local_addr);
 
         // Sender thread.
@@ -518,7 +553,15 @@ impl EngineHandle {
             return false;
         }
         let was_auto = self.shared.cfg().auto_discover;
+        let llmnr_changed = {
+            let c = self.shared.cfg();
+            c.answer_name_queries != new.answer_name_queries || c.llmnr_port != new.llmnr_port
+        };
         *self.shared.cfg.write().unwrap() = new.clone();
+        if llmnr_changed {
+            self.shared.set_llmnr(false);
+            self.shared.set_llmnr(new.answer_name_queries);
+        }
         self.shared.set_peers(new.peers.clone());
         self.shared.apply_matrix(new);
         if new.auto_discover && !was_auto {
@@ -562,6 +605,7 @@ impl EngineHandle {
         s.flush();
         s.stop.store(true, Ordering::SeqCst);
         drop(self.capture.lock().unwrap().take());
+        s.set_llmnr(false);
         {
             let mut st = s.state.lock().unwrap();
             if st.des != s.my_id {
@@ -678,10 +722,11 @@ impl Shared {
                 Ok((stream, addr)) => {
                     info!("incoming connection from {addr}");
                     let _ = stream.set_nonblocking(false);
+                    let seq = self.record_incoming(addr);
                     let s = self.clone();
                     let _ = thread::Builder::new()
                         .name(format!("mwb-srv-{addr}"))
-                        .spawn(move || s.run_connection(stream, false, addr.ip().to_string(), Origin::Incoming));
+                        .spawn(move || s.run_connection(stream, false, addr.ip().to_string(), Origin::Incoming(seq)));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(50)),
                 Err(e) => {
@@ -727,6 +772,17 @@ impl Shared {
             if self.has_client_conn(&name) {
                 continue;
             }
+            // Connected the other way and our last attempt failed (firewalled
+            // PC): one socket is enough, retry only now and then.
+            let failed_recently = self
+                .client_failed
+                .lock()
+                .unwrap()
+                .get(&name.to_lowercase())
+                .is_some_and(|t| t.elapsed() < CLIENT_RETRY_WHILE_CONNECTED);
+            if failed_recently && self.has_any_conn(&name) {
+                continue;
+            }
             {
                 let mut c = self.connecting.lock().unwrap();
                 if !c.insert(name.to_lowercase()) {
@@ -737,8 +793,18 @@ impl Shared {
             let _ = thread::Builder::new().name(format!("mwb-cli-{name}")).spawn(move || {
                 let r = s.connect_peer(&name);
                 s.connecting.lock().unwrap().remove(&name.to_lowercase());
-                if let Err(e) = r {
-                    debug!("connect to {name}: {e:#}");
+                match r {
+                    Ok(()) => {
+                        s.client_failed.lock().unwrap().remove(&name.to_lowercase());
+                    }
+                    Err(e) => {
+                        s.client_failed.lock().unwrap().insert(name.to_lowercase(), Instant::now());
+                        if s.has_any_conn(&name) {
+                            debug!("connect to {name}: {e:#} (still connected through the socket it opened to us)");
+                        } else {
+                            debug!("connect to {name}: {e:#}");
+                        }
+                    }
                 }
             });
         }
@@ -748,6 +814,61 @@ impl Shared {
         self.conns.lock().unwrap().iter().any(|c| c.is_client && c.name().eq_ignore_ascii_case(name))
     }
 
+    fn has_any_conn(&self, name: &str) -> bool {
+        self.conns.lock().unwrap().iter().any(|c| c.name().eq_ignore_ascii_case(name))
+    }
+
+    /// `addr` is our own message socket (a machine on this host connected to us).
+    fn is_own_listener(&self, addr: &SocketAddr) -> bool {
+        let port = self.cfg().port.wrapping_add(1);
+        if addr.port() != port {
+            return false;
+        }
+        let ip = match addr.ip() {
+            IpAddr::V6(v) => v.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v)),
+            ip => ip,
+        };
+        ip.is_loopback() || discovery::own_addresses().iter().any(|o| IpAddr::V4(*o) == ip)
+    }
+
+    /// Start (`on`) or stop the LLMNR responder.
+    fn set_llmnr(&self, on: bool) {
+        // (config first: status() takes the config while holding the responder)
+        let port = self.cfg().llmnr_port;
+        let mut g = self.llmnr.lock().unwrap();
+        if !on {
+            if let Some(r) = g.take() {
+                r.stop();
+            }
+            return;
+        }
+        if g.is_some() || !llmnr::SUPPORTED {
+            return;
+        }
+        match llmnr::Responder::start(&self.my_name, port) {
+            Ok(r) => *g = Some(r),
+            Err(e) => warn!("llmnr: can't answer name queries for '{}' on UDP {port}: {e}", self.my_name),
+        }
+    }
+
+    fn record_incoming(&self, from: SocketAddr) -> u64 {
+        let seq = self.serial.fetch_add(1, Ordering::SeqCst);
+        let mut q = self.incoming.lock().unwrap();
+        q.push_back((seq, IncomingAttempt { from, at: SystemTime::now(), result: "connected".into() }));
+        while q.len() > INCOMING_HISTORY {
+            q.pop_front();
+        }
+        seq
+    }
+
+    fn update_incoming(&self, seq: u64, result: String) {
+        if let Some((_, a)) = self.incoming.lock().unwrap().iter_mut().find(|(s, _)| *s == seq) {
+            a.result = result;
+        }
+    }
+
+    /// Where to connect to `name`: its `peers` entry, then the address it last
+    /// connected to us from; with neither, its name resolved by DNS.
     fn resolve_peer_addrs(&self, name: &str) -> anyhow::Result<Vec<SocketAddr>> {
         let spec = self
             .peers
@@ -756,13 +877,36 @@ impl Shared {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| name.to_string());
+            .filter(|v| !v.is_empty());
+        let learned = self.learned.lock().unwrap().get(&name.to_lowercase()).map(|(_, a)| *a);
+        if let (None, Some(a)) = (&spec, learned) {
+            // It connected to us from there; its name (a Windows computer
+            // name) rarely resolves on a Mac, so skip the lookup.
+            return Ok(vec![a]);
+        }
+        let resolved = self.resolve_spec(spec.as_deref().unwrap_or(name));
+        let mut out = Vec::new();
+        let mut err = None;
+        match resolved {
+            Ok(v) => out = v,
+            Err(e) => err = Some(e),
+        }
+        if let Some(a) = learned.filter(|a| !out.contains(a)) {
+            // After the explicit address.
+            out.push(a);
+        }
+        match (out.is_empty(), err) {
+            (true, Some(e)) => Err(e),
+            _ => Ok(out),
+        }
+    }
+
+    fn resolve_spec(&self, spec: &str) -> anyhow::Result<Vec<SocketAddr>> {
         let (host, base) = match spec.rsplit_once(':') {
             Some((h, p)) if !h.contains(':') || h.starts_with('[') => {
                 (h.trim_matches(|c| c == '[' || c == ']').to_string(), p.parse::<u16>().context("bad port")?)
             }
-            _ => (spec.clone(), self.cfg().port),
+            _ => (spec.to_string(), self.cfg().port),
         };
         Ok((host.as_str(), base.wrapping_add(1)).to_socket_addrs()?.collect())
     }
@@ -770,7 +914,8 @@ impl Shared {
     fn connect_peer(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
         let addrs = self.resolve_peer_addrs(name)?;
         let mut last_err = None;
-        for a in addrs {
+        // Never dial our own listener (a peer on this host recorded as ip:our port).
+        for a in addrs.into_iter().filter(|a| !self.is_own_listener(a)) {
             match TcpStream::connect_timeout(&a, Duration::from_secs(3)) {
                 Ok(s) => {
                     debug!("connected to {name} at {a}");
@@ -795,8 +940,11 @@ impl Shared {
         } else if let Err(e) = r {
             // Incoming failures are the main clue when pairing doesn't work
             // (wrong key, firewall resets), so log them where users can see them.
-            if matches!(origin, Origin::Incoming) {
+            if let Origin::Incoming(seq) = origin {
                 info!("incoming connection from {hint_name} ended: {e}");
+                if !end.trusted {
+                    self.update_incoming(seq, format!("ended before the handshake: {e}"));
+                }
             } else {
                 debug!("connection {hint_name} ended: {e}");
             }
@@ -921,14 +1069,24 @@ impl Shared {
                         // Before the first heartbeat goes out: broadcasts only reach matrix machines.
                         match origin {
                             Origin::Discovered(addr) => self.on_discovered(&name, remote_id, addr, true),
-                            Origin::Incoming => {
+                            Origin::Incoming(seq) => {
+                                self.update_incoming(seq, format!("trusted as '{name}'"));
+                                // Remember where it is: PowerToys connects to the same port
+                                // number it listens on, so its listener is ip:(our port + 1).
+                                // We connect back there (the second socket MWB normally has)
+                                // even when its name doesn't resolve here.
+                                let back = remote.map(|r| SocketAddr::new(r.ip(), self.cfg().port.wrapping_add(1)));
+                                // (Not when it is this host: a test peer on loopback.)
+                                if let Some(a) = back.filter(|a| !self.is_own_listener(a)) {
+                                    self.learned.lock().unwrap().insert(name.to_lowercase(), (name.clone(), a));
+                                }
                                 // MWB adds a machine that connects with the right key to its
-                                // layout (MachineStuff.AddToMachinePool); remember where it is.
+                                // layout (MachineStuff.AddToMachinePool), discovery or not.
                                 let new_machine = !known && !self.st().matrix.contains(&name);
-                                if new_machine && self.cfg().auto_discover {
-                                    if let Some(r) = remote {
-                                        let port = self.cfg().port.wrapping_add(1);
-                                        self.on_discovered(&name, remote_id, SocketAddr::new(r.ip(), port), false);
+                                if new_machine {
+                                    match back {
+                                        Some(a) => self.on_discovered(&name, remote_id, a, false),
+                                        None => self.add_to_layout(&name, false),
                                     }
                                 }
                             }
@@ -1125,8 +1283,13 @@ impl Shared {
         let spec = peer_spec(addr, self.cfg().port);
         {
             let mut peers = self.peers.lock().unwrap();
-            peers.retain(|k, _| !k.eq_ignore_ascii_case(name));
-            peers.insert(name.to_string(), spec);
+            // A machine that connected to us keeps a configured address (its
+            // source address is remembered separately, see `learned`).
+            let configured = peers.iter().any(|(k, v)| k.eq_ignore_ascii_case(name) && !v.trim().is_empty());
+            if active || !configured {
+                peers.retain(|k, _| !k.eq_ignore_ascii_case(name));
+                peers.insert(name.to_string(), spec);
+            }
         }
         {
             let mut d = self.disc.lock().unwrap();
@@ -1134,6 +1297,14 @@ impl Shared {
             d.found.retain(|p| !p.name.eq_ignore_ascii_case(name));
             d.found.push(DiscoveredPeer { name: name.to_string(), id, addr });
         }
+        info!("discovered '{name}' (id {id}) at {addr}");
+        self.emit(EngineEvent::PeerDiscovered { name: name.to_string(), id, addr });
+        self.add_to_layout(name, active);
+    }
+
+    /// Put `name` to the right of this machine if there is room. `active`: our
+    /// layout wins over the peers' for a moment and is sent to them.
+    fn add_to_layout(&self, name: &str, active: bool) {
         let changed = {
             let mut st = self.st();
             if st.matrix.insert_new(&self.my_name, name) {
@@ -1147,8 +1318,6 @@ impl Shared {
                 None
             }
         };
-        info!("discovered '{name}' (id {id}) at {addr}");
-        self.emit(EngineEvent::PeerDiscovered { name: name.to_string(), id, addr });
         if let Some(m) = changed {
             info!("added '{name}' to the layout: {:?}", m.slots);
             self.emit(EngineEvent::MatrixChanged(m));
@@ -1283,6 +1452,13 @@ impl Shared {
             auto_discover: self.cfg().auto_discover,
             last_search: d.last_search,
             other_key: d.backoff.blocked(BackoffReason::KeyMismatch, Instant::now()),
+            incoming: self.incoming.lock().unwrap().iter().map(|(_, a)| a.clone()).collect(),
+            learned: {
+                let mut v: Vec<_> = self.learned.lock().unwrap().values().cloned().collect();
+                v.sort();
+                v
+            },
+            llmnr: self.llmnr.lock().unwrap().as_ref().map(|r| r.status()),
         }
     }
 

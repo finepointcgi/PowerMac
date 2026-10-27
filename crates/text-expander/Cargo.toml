@@ -13,6 +13,7 @@ fastrand = "2"
 arboard = "3.7.0"
 # clipboard snapshots (full fidelity on macOS), foreground app, shared tags
 keyboard-manager = { path = "../keyboard-manager" }
+pm-hook = { path = "../pm-hook" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"

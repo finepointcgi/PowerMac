@@ -1,8 +1,9 @@
-//! Windows backend: `WH_MOUSE_LL` hook on a dedicated message-loop thread.
+//! Windows backend: a subscriber of the shared `WH_MOUSE_LL` hook
+//! (`pm-hook`, priority [`pm_hook::priority::SCROLL_REVERSER`]).
 //!
 //! Low-level hooks cannot modify events, so a wheel event that must be
-//! reversed is swallowed and re-injected (with `SendInput`, from the message
-//! loop rather than inside the hook proc) with the negated delta and
+//! reversed is swallowed and re-injected (with `SendInput`, from a worker
+//! thread rather than inside the hook callback) with the negated delta and
 //! `dwExtraInfo = SELF_INJECTED_TAG`. Events tagged by us or by `pm-input`
 //! pass through untouched.
 //!
@@ -13,26 +14,19 @@
 //! reversed) notches are handed to a frame thread that replays them as many
 //! small `SendInput` wheel deltas tagged `SELF_INJECTED_TAG`.
 
-use std::cell::RefCell;
-use std::mem::{size_of, zeroed};
+use std::mem::size_of;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{mpsc, Arc};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_WHEEL, MOUSEINPUT, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
-    SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HHOOK, LLMHF_INJECTED, MSG,
-    MSLLHOOKSTRUCT, PM_NOREMOVE, WH_MOUSE_LL, WM_APP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_QUIT,
+    LLMHF_INJECTED, WM_MOUSEHWHEEL, WM_MOUSEWHEEL,
 };
 
 use crate::smooth::Animator;
@@ -44,13 +38,11 @@ use crate::{
 /// Smooth-scrolling frame interval (~125 Hz; needs the 1 ms timer period).
 const FRAME: Duration = Duration::from_millis(8);
 
-/// Posted to the hook thread: wParam = 1 for horizontal, lParam = new delta.
-const WM_REINJECT: u32 = WM_APP + 0x5352;
-
 struct HookCtx {
     shared: Arc<SharedConfig>,
     observer: Option<Observer>,
-    thread_id: u32,
+    /// Re-injects reversed wheel events after the hook returned.
+    reinject: pm_hook::Worker,
     animator: Option<Animator>,
 }
 
@@ -67,90 +59,63 @@ fn modifiers_held() -> bool {
         .any(|&vk| unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000 != 0)
 }
 
-thread_local! {
-    static CTX: RefCell<Option<HookCtx>> = const { RefCell::new(None) };
-}
-
+/// The subscription; dropping it (or `stop`) unsubscribes.
 pub(crate) struct Tap {
-    thread_id: u32,
-    thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl Tap {
     pub(crate) fn stop(mut self) {
-        self.shutdown();
-    }
-
-    fn shutdown(&mut self) {
-        if let Some(t) = self.thread.take() {
-            unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
-            let _ = t.join();
-        }
-    }
-}
-
-impl Drop for Tap {
-    fn drop(&mut self) {
-        self.shutdown();
+        self.guard.take();
     }
 }
 
 pub(crate) fn start(shared: Arc<SharedConfig>, observer: Option<Observer>) -> Result<Tap> {
-    let (tx, rx) = mpsc::channel::<std::result::Result<u32, String>>();
-    let thread = std::thread::Builder::new()
-        .name("scroll-reverser-hook".into())
-        .spawn(move || unsafe {
-            let thread_id = GetCurrentThreadId();
-            let animator = Animator::start(
-                Box::new(|d: [i64; 2]| {
-                    let c = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-                    if d[0] != 0 {
-                        reinject(false, c(d[0]));
-                    }
-                    if d[1] != 0 {
-                        reinject(true, c(d[1]));
-                    }
-                }),
-                FRAME,
-                timer_fine,
-                timer_coarse,
-            )
-            .map_err(|e| log::error!("scroll-reverser: smooth scrolling thread: {e}"))
-            .ok();
-            CTX.with(|c| *c.borrow_mut() = Some(HookCtx { shared, observer, thread_id, animator }));
-            let mut msg: MSG = zeroed();
-            // Create the thread's message queue before publishing its id.
-            PeekMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0, PM_NOREMOVE);
-
-            let hmod = GetModuleHandleW(std::ptr::null());
-            let hook: HHOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hmod, 0);
-            if hook.is_null() {
-                let _ = tx.send(Err("SetWindowsHookExW(WH_MOUSE_LL) failed".into()));
-                return;
+    use pm_hook::{EventMask, Subscription, Verdict};
+    let animator = Animator::start(
+        Box::new(|d: [i64; 2]| {
+            let c = |v: i64| v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+            if d[0] != 0 {
+                unsafe { reinject(false, c(d[0])) };
             }
-            let _ = tx.send(Ok(thread_id));
-
-            while GetMessageW(&mut msg, std::ptr::null_mut() as HWND, 0, 0) > 0 {
-                if msg.hwnd.is_null() && msg.message == WM_REINJECT {
-                    reinject(msg.wParam == 1, msg.lParam as i32);
-                    continue;
-                }
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+            if d[1] != 0 {
+                unsafe { reinject(true, c(d[1])) };
             }
-
-            UnhookWindowsHookEx(hook);
-            CTX.with(|c| *c.borrow_mut() = None);
-        })?;
-
-    match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(thread_id)) => Ok(Tap { thread_id, thread: Some(thread) }),
-        Ok(Err(e)) => {
-            let _ = thread.join();
-            Err(anyhow!(e))
-        }
-        Err(_) => Err(anyhow!("hook thread did not start")),
+        }),
+        FRAME,
+        timer_fine,
+        timer_coarse,
+    )
+    .map_err(|e| log::error!("scroll-reverser: smooth scrolling thread: {e}"))
+    .ok();
+    let reinject = pm_hook::Worker::new("scroll-reverser-reinject")?;
+    let ctx = HookCtx { shared, observer, reinject, animator };
+    let guard = pm_hook::subscribe(Subscription::new(
+        "scroll-reverser",
+        pm_hook::priority::SCROLL_REVERSER,
+        EventMask::SCROLL,
+        move |ev| {
+            let Some((msg, info)) = ev.mouse() else { return Verdict::Pass };
+            if msg != WM_MOUSEWHEEL && msg != WM_MOUSEHWHEEL {
+                return Verdict::Pass;
+            }
+            let delta = (info.mouseData >> 16) as u16 as i16 as i32;
+            let extra = if info.flags & LLMHF_INJECTED != 0 { info.dwExtraInfo } else { 0 };
+            let swallow = catch_unwind(AssertUnwindSafe(|| handle_wheel(&ctx, msg == WM_MOUSEHWHEEL, delta, extra)))
+                .unwrap_or(false);
+            if swallow {
+                Verdict::Swallow
+            } else {
+                Verdict::Pass
+            }
+        },
+    ));
+    let st = pm_hook::status();
+    if !st.is_active() {
+        drop(guard);
+        return Err(anyhow!("SetWindowsHookExW(WH_MOUSE_LL) failed ({:?})", st.state));
     }
+    Ok(Tap { guard: Some(guard) })
 }
 
 unsafe fn reinject(horizontal: bool, delta: i32) {
@@ -174,10 +139,8 @@ unsafe fn reinject(horizontal: bool, delta: i32) {
 }
 
 /// Returns true when the event should be swallowed.
-fn handle_wheel(horizontal: bool, delta: i32, extra: usize) -> bool {
-    CTX.with(|c| {
-        let c = c.borrow();
-        let Some(ctx) = c.as_ref() else { return false };
+fn handle_wheel(ctx: &HookCtx, horizontal: bool, delta: i32, extra: usize) -> bool {
+    {
         let cfg = ctx.shared.load();
         let mut plan = windows_plan(&cfg, horizontal, delta, extra, false);
         if matches!(plan, WinPlan::Smooth(_)) && modifiers_held() {
@@ -205,10 +168,7 @@ fn handle_wheel(horizontal: bool, delta: i32, extra: usize) -> bool {
         }
         match plan {
             WinPlan::Pass => false,
-            WinPlan::Reinject(d) => unsafe {
-                PostThreadMessageW(ctx.thread_id, WM_REINJECT, horizontal as WPARAM, d as LPARAM)
-                    != 0
-            },
+            WinPlan::Reinject(d) => ctx.reinject.submit(move || unsafe { reinject(horizontal, d) }),
             WinPlan::Smooth(notches) => match &ctx.animator {
                 Some(a) => {
                     let n = if horizontal { [0.0, notches] } else { [notches, 0.0] };
@@ -218,22 +178,5 @@ fn handle_wheel(horizontal: bool, delta: i32, extra: usize) -> bool {
                 None => false,
             },
         }
-    })
-}
-
-unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let msg = wparam as u32;
-    if code >= 0 && (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
-        let info = &*(lparam as *const MSLLHOOKSTRUCT);
-        let delta = (info.mouseData >> 16) as u16 as i16 as i32;
-        let extra = if info.flags & LLMHF_INJECTED != 0 { info.dwExtraInfo } else { 0 };
-        let swallow = catch_unwind(AssertUnwindSafe(|| {
-            handle_wheel(msg == WM_MOUSEHWHEEL, delta, extra)
-        }))
-        .unwrap_or(false);
-        if swallow {
-            return 1;
-        }
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }

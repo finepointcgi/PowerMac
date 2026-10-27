@@ -1,9 +1,9 @@
 //! Windows backend.
 //!
 //! * Drag detection: `SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART..END)`
-//!   (out-of-context) + a 15 ms thread timer polling cursor/Shift/Ctrl, and a
-//!   `WH_MOUSE_LL` hook during drags (secondary / middle / X buttons, wheel
-//!   layout switching).
+//!   (out-of-context) + a 15 ms thread timer polling cursor/Shift/Ctrl, and
+//!   during drags the shared `WH_MOUSE_LL` hook's events (secondary / middle /
+//!   X buttons, wheel layout switching).
 //! * New windows: `EVENT_OBJECT_SHOW` (app last zone / open on active monitor).
 //! * Display / work area changes: a hidden top-level window receiving
 //!   `WM_DISPLAYCHANGE` and `WM_SETTINGCHANGE(SPI_SETWORKAREA)`.
@@ -14,7 +14,10 @@
 //!   (`WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE`)
 //!   painted with GDI (color-key background + constant alpha), plus one for
 //!   the layout name label.
-//! * Hotkeys: `WH_KEYBOARD_LL` hook (Win+Arrow cannot be `RegisterHotKey`ed).
+//! * Hotkeys: the shared `WH_KEYBOARD_LL` hook (`pm-hook`,
+//!   [`pm_hook::priority::FANCYZONES`]; Win+Arrow cannot be `RegisterHotKey`ed),
+//!   forwarded to this module's thread with [`pm_hook::win::Forwarder`]; the
+//!   drag-time mouse events (right / middle button, wheel) come the same way.
 //! * Window placement: `SetWindowPos` compensated with
 //!   `DWMWA_EXTENDED_FRAME_BOUNDS` for the invisible resize borders.
 //!
@@ -25,7 +28,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -547,7 +550,6 @@ struct HookState {
     label_timer: usize,
     flash_timer: usize,
     poll_timer: usize,
-    mouse_hook: HHOOK,
     wheel_acc: i32,
     rotation_held: bool,
     rotation_preview: bool,
@@ -557,6 +559,10 @@ struct HookState {
 thread_local! {
     static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
 }
+
+/// A window drag is in progress: the mouse events matter (they used to come
+/// from a `WH_MOUSE_LL` hook installed only for the drag).
+static DRAG_MOUSE: AtomicBool = AtomicBool::new(false);
 
 fn with_state<R>(f: impl FnOnce(&mut HookState) -> R) -> Option<R> {
     STATE.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.as_mut().map(f)))
@@ -683,19 +689,12 @@ fn handle_key(vk: u16, down: bool, up: bool) -> Option<LRESULT> {
     None
 }
 
-unsafe extern "system" fn ll_keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
-        let w = wparam as u32;
-        let down = w == WM_KEYDOWN || w == WM_SYSKEYDOWN;
-        let up = w == WM_KEYUP || w == WM_SYSKEYUP;
-        if kb.flags & LLKHF_INJECTED == 0 {
-            if let Some(r) = handle_key(kb.vkCode as u16, down, up) {
-                return r;
-            }
-        }
-    }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+/// The old `WH_KEYBOARD_LL` body, run on the FancyZones thread through the
+/// forwarder: true = swallow.
+fn kb_event(msg: u32, kb: &KBDLLHOOKSTRUCT) -> bool {
+    let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+    let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+    kb.flags & LLKHF_INJECTED == 0 && handle_key(kb.vkCode as u16, down, up).is_some()
 }
 
 /// Wheel notch(es) during a drag; `true` if consumed (`MouseButtonsHook`).
@@ -730,22 +729,37 @@ fn on_wheel(s: &mut HookState, delta: i32) -> bool {
     handled
 }
 
-unsafe extern "system" fn ll_mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        match wparam as u32 {
-            WM_RBUTTONDOWN | WM_XBUTTONDOWN => post(WM_APP_SECONDARY, 0),
-            WM_MBUTTONDOWN => post(WM_APP_MIDDLE, 0),
-            WM_MOUSEWHEEL => {
-                let ms = &*(lparam as *const MSLLHOOKSTRUCT);
-                let delta = (ms.mouseData >> 16) as u16 as i16 as i32;
-                if with_state(|s| on_wheel(s, delta)).unwrap_or(false) {
-                    return 1; // used to switch layouts: don't scroll the window below
-                }
+/// The old drag-time `WH_MOUSE_LL` body (FancyZones thread): true = swallow.
+fn mouse_event(msg: u32, ms: &MSLLHOOKSTRUCT) -> bool {
+    match msg {
+        WM_RBUTTONDOWN | WM_XBUTTONDOWN => post(WM_APP_SECONDARY, 0),
+        WM_MBUTTONDOWN => post(WM_APP_MIDDLE, 0),
+        WM_MOUSEWHEEL => {
+            let delta = (ms.mouseData >> 16) as u16 as i16 as i32;
+            if with_state(|s| on_wheel(s, delta)).unwrap_or(false) {
+                return true; // used to switch layouts: don't scroll the window below
             }
-            _ => {}
         }
+        _ => {}
     }
-    CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    false
+}
+
+/// Subscribe to the shared hooks; events are handled on this (the
+/// FancyZones) thread, which owns the drag state, like the old hooks.
+fn subscribe(target: pm_hook::win::ForwardTarget) -> pm_hook::Guard {
+    use pm_hook::{EventMask, EventType, Subscription, Verdict};
+    let mask = EventMask::of(&[EventType::KeyDown, EventType::KeyUp, EventType::RightMouseDown, EventType::OtherMouseDown, EventType::ScrollWheel]);
+    pm_hook::subscribe(Subscription::new("fancyzones", pm_hook::priority::FANCYZONES, mask, move |ev| {
+        if ev.mouse().is_some() && !DRAG_MOUSE.load(Ordering::SeqCst) {
+            return Verdict::Pass;
+        }
+        if target.call(ev) {
+            Verdict::Swallow
+        } else {
+            Verdict::Pass
+        }
+    }))
 }
 
 unsafe extern "system" fn win_event(_: HWINEVENTHOOK, event: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
@@ -779,10 +793,7 @@ fn on_move_start(hwnd: HWND) {
             areas
         };
         let timer = unsafe { SetTimer(std::ptr::null_mut(), 0, DRAG_TIMER_MS, None) };
-        if s.mouse_hook.is_null() {
-            let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
-            s.mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(ll_mouse), hinst, 0) };
-        }
+        DRAG_MOUSE.store(true, Ordering::SeqCst);
         s.wheel_acc = 0;
         if let Some(mut old) = s.drag.replace(ActiveDrag { window: w, start, areas, timer, transparency: None }) {
             unsafe { KillTimer(std::ptr::null_mut(), old.timer) };
@@ -825,10 +836,7 @@ fn reset_transparency(d: &mut ActiveDrag) {
 }
 
 fn end_drag_hooks(s: &mut HookState) {
-    if !s.mouse_hook.is_null() {
-        unsafe { UnhookWindowsHookEx(s.mouse_hook) };
-        s.mouse_hook = std::ptr::null_mut();
-    }
+    DRAG_MOUSE.store(false, Ordering::SeqCst);
     s.wheel_acc = 0;
     s.shared.zones_shown.store(false, Ordering::Relaxed);
 }
@@ -1450,7 +1458,6 @@ impl Runtime {
                     label_timer: 0,
                     flash_timer: 0,
                     poll_timer,
-                    mouse_hook: std::ptr::null_mut(),
                     wheel_acc: 0,
                     rotation_held: false,
                     rotation_preview: false,
@@ -1466,12 +1473,16 @@ impl Runtime {
             let h_move = SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, std::ptr::null_mut(), Some(win_event), 0, 0, flags);
             let h_show = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, std::ptr::null_mut(), Some(win_event), 0, 0, flags);
             let h_destroy = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, std::ptr::null_mut(), Some(win_event), 0, 0, flags);
-            let h_kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_keyboard), hinst, 0);
             if h_move.is_null() {
                 let _ = tx.send(Err("SetWinEventHook failed".into()));
                 return;
             }
-            if h_kb.is_null() {
+            let fwd = pm_hook::win::Forwarder::new(|f| match f {
+                pm_hook::win::Forwarded::Key { msg, info } => kb_event(*msg, info),
+                pm_hook::win::Forwarded::Mouse { msg, info } => mouse_event(*msg, info),
+            });
+            let hook = fwd.as_ref().map(|f| subscribe(f.target()));
+            if hook.is_none() || !pm_hook::status().is_active() {
                 log::warn!("fancyzones: WH_KEYBOARD_LL hook failed; keyboard snapping disabled");
             }
             // Make sure the thread has a message queue before reporting ready.
@@ -1530,16 +1541,13 @@ impl Runtime {
                     UnhookWinEvent(h);
                 }
             }
-            if !h_kb.is_null() {
-                UnhookWindowsHookEx(h_kb);
-            }
+            drop(hook);
+            drop(fwd);
+            DRAG_MOUSE.store(false, Ordering::SeqCst);
             if let Some(mut st) = STATE.with(|s| s.borrow_mut().take()) {
                 if let Some(mut d) = st.drag.take() {
                     KillTimer(std::ptr::null_mut(), d.timer);
                     reset_transparency(&mut d);
-                }
-                if !st.mouse_hook.is_null() {
-                    UnhookWindowsHookEx(st.mouse_hook);
                 }
                 for t in [st.label_timer, st.flash_timer, st.poll_timer] {
                     if t != 0 {

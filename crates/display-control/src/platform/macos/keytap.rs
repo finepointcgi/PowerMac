@@ -1,15 +1,12 @@
-//! Media-key takeover and hotkeys through an active CGEventTap (needs
-//! Accessibility). Brightness / volume keys arrive as `NSSystemDefined`
+//! Media-key takeover and hotkeys through the shared active event tap
+//! (`pm-hook`, [`pm_hook::priority::DISPLAY_CONTROL`]; needs Accessibility). Brightness / volume keys arrive as `NSSystemDefined`
 //! events (subtype 8); recent Apple keyboards also send the brightness keys
 //! as key events 144 / 145. Keys aimed at a display we don't handle (the
 //! built-in one, or one without control) pass through untouched.
 #![allow(non_upper_case_globals)]
 
-use std::ffi::c_void;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{bail, Result};
 use objc2::encode::{Encode, Encoding};
@@ -33,7 +30,6 @@ unsafe impl Encode for CgEventPtr {
 
 struct TapContext {
     inner: Arc<Inner>,
-    port: AtomicPtr<c_void>,
     router: Mutex<KeyRouter>,
     /// Mac keycodes whose hotkey key-down we swallowed (swallow the up too).
     hotkey_downs: Mutex<Vec<u16>>,
@@ -87,19 +83,12 @@ fn handle_media(ctx: &TapContext, ev: MediaKeyEvent, source: KeySource, mods: Mo
     }
 }
 
-extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRef, info: *mut c_void) -> CGEventRef {
-    let ctx = unsafe { &*(info as *const TapContext) };
-    if etype == kCGEventTapDisabledByTimeout || etype == kCGEventTapDisabledByUserInput {
-        let port = ctx.port.load(Ordering::SeqCst);
-        if !port.is_null() {
-            unsafe { CGEventTapEnable(port, true) };
-        }
-        return event;
-    }
+/// Returns true to swallow.
+fn handle_event(ctx: &TapContext, etype: u32, event: CGEventRef) -> bool {
     if event.is_null() || !ctx.inner.lock().config.enabled {
-        return event;
+        return false;
     }
-    let swallow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mods = mods_from_flags(unsafe { CGEventGetFlags(event) });
         match etype {
             kCGEventSystemDefined => {
@@ -137,78 +126,38 @@ extern "C" fn tap_callback(_proxy: CGEventTapProxy, etype: u32, event: CGEventRe
             _ => false,
         }
     }))
-    .unwrap_or(false);
-    if swallow {
-        std::ptr::null()
-    } else {
-        event
-    }
+    .unwrap_or(false)
 }
 
+/// The subscription; `stop` (or dropping it) unsubscribes.
 pub(crate) struct KeyHook {
-    runloop: usize,
-    thread: Option<JoinHandle<()>>,
+    guard: Option<pm_hook::Guard>,
 }
 
 impl KeyHook {
     pub(crate) fn start(inner: Arc<Inner>) -> Result<Self> {
+        use pm_hook::{EventMask, EventType, Subscription, Verdict};
         if unsafe { AXIsProcessTrusted() } == 0 {
             bail!("Accessibility permission is required to take over the brightness / volume keys");
         }
-        let (ready_tx, ready_rx) = mpsc::channel::<Option<usize>>();
-        let ctx = Box::new(TapContext { inner, port: AtomicPtr::new(std::ptr::null_mut()), router: Mutex::new(KeyRouter::default()), hotkey_downs: Mutex::new(Vec::new()) });
-        let thread = std::thread::Builder::new().name("display-control-keys".into()).spawn(move || unsafe {
-            let ctx_ptr = Box::into_raw(ctx);
-            let mask = event_mask(kCGEventKeyDown) | event_mask(kCGEventKeyUp) | event_mask(kCGEventSystemDefined);
-            let port = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, tap_callback, ctx_ptr as *mut c_void);
-            if port.is_null() {
-                drop(Box::from_raw(ctx_ptr));
-                let _ = ready_tx.send(None);
-                return;
+        let ctx = TapContext { inner, router: Mutex::new(KeyRouter::default()), hotkey_downs: Mutex::new(Vec::new()) };
+        let mask = EventMask::of(&[EventType::KeyDown, EventType::KeyUp, EventType::SystemDefined]);
+        let guard = pm_hook::subscribe(Subscription::new("display-control", pm_hook::priority::DISPLAY_CONTROL, mask, move |ev| {
+            if handle_event(&ctx, ev.cg_type(), ev.cg_event()) {
+                Verdict::Swallow
+            } else {
+                Verdict::Pass
             }
-            (*ctx_ptr).port.store(port as *mut c_void, Ordering::SeqCst);
-            let src = CFMachPortCreateRunLoopSource(std::ptr::null(), port, 0);
-            let rl = CFRunLoopGetCurrent();
-            CFRunLoopAddSource(rl, src, kCFRunLoopCommonModes);
-            CGEventTapEnable(port, true);
-            let _ = ready_tx.send(Some(rl as usize));
-            CFRunLoopRun();
-            CGEventTapEnable(port, false);
-            CFRunLoopRemoveSource(rl, src, kCFRunLoopCommonModes);
-            CFMachPortInvalidate(port);
-            CFRelease(src);
-            CFRelease(port);
-            drop(Box::from_raw(ctx_ptr));
-        })?;
-        match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Some(rl)) => {
-                log::info!("display-control: key takeover active");
-                Ok(Self { runloop: rl, thread: Some(thread) })
-            }
-            Ok(None) => {
-                let _ = thread.join();
-                bail!("could not create the event tap (Accessibility / Input Monitoring permission?)")
-            }
-            Err(_) => bail!("event tap thread did not start"),
+        }));
+        if !pm_hook::status().is_active() {
+            drop(guard);
+            bail!("could not create the event tap (Accessibility / Input Monitoring permission?)");
         }
+        log::info!("display-control: key takeover active");
+        Ok(Self { guard: Some(guard) })
     }
 
     pub(crate) fn stop(&mut self) {
-        if self.runloop != 0 {
-            unsafe {
-                CFRunLoopStop(self.runloop as CFRunLoopRef);
-                CFRunLoopWakeUp(self.runloop as CFRunLoopRef);
-            }
-            self.runloop = 0;
-        }
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-impl Drop for KeyHook {
-    fn drop(&mut self) {
-        self.stop();
+        self.guard.take();
     }
 }
