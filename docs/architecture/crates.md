@@ -29,6 +29,7 @@
 | `clipboard-history` | Clipboard watcher, history store, picker |
 | `color-picker` | Screen color sampling, PowerToys color formats, editor |
 | `text-extractor` | Region capture + Vision / Windows.Media.Ocr |
+| `net-monitor` | Read-only per-app TCP/UDP connection monitor (libproc / IP Helper tables, snapshot diffing) and the per-app firewall rules model (most-specific-wins evaluation, `net-rules.json`, Little Snitch `.lsrules` import; not enforced) |
 | `file-tools` | PowerRename, New+, Image Resizer, Finder basics, Finder / Explorer integration |
 
 ## Layout of a feature crate

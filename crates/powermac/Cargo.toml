@@ -31,6 +31,7 @@ dock-previews = { path = "../dock-previews" }
 text-expander = { path = "../text-expander" }
 menubar-manager = { path = "../menubar-manager" }
 workspaces = { path = "../workspaces" }
+net-monitor = { path = "../net-monitor" }
 pm-hook = { path = "../pm-hook" }
 pm-update = { path = "../pm-update" }
 clap = { version = "4", features = ["derive"] }

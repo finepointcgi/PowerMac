@@ -28,6 +28,7 @@ members = [
     "crates/dock-previews",
     "crates/text-expander",
     "crates/workspaces",
+    "crates/net-monitor",
     "crates/pm-update",
     "crates/powermac",
 ]

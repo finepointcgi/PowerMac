@@ -16,6 +16,7 @@ All settings are plain JSON files that you can edit with the settings window, th
 | `config.json` | Which modules run and their settings (one camelCase section per module). |
 | `fancyzones.json` | FancyZones settings, custom layouts, applied layouts per monitor, quick-switch keys. Compatible with PowerToys FancyZones JSON. |
 | `file-tools.json` | PowerRename, New+, Image Resizer and Finder basics settings and remembered state. |
+| `net-rules.json` | Per-app firewall rules for the [Network Monitor](../features/network-monitor.md) (not enforced; `powermac net rules …` edits it). |
 | `Templates/` | New+ templates (unless `newPlus.templatesDir` points elsewhere). |
 
 ## Files the app manages

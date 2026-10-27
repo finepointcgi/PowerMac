@@ -11,6 +11,10 @@ The `powermac` executable runs the app and every helper window. All subcommands 
 | `powermac workspace capture [<name>]` | Save the windows on screen as a new workspace ("Workspace N" without a name). |
 | `powermac workspace launch <name\|id>` | Restore a workspace; prints each app's result (exit code 1 when one failed). |
 | `powermac workspace edit` | Open the Workspaces editor. |
+| `powermac net list [--all] [--json]` | Every app's current TCP/UDP connections ([Network Monitor](../features/network-monitor.md)); `--all` adds listening sockets. Read-only; use `sudo` on macOS to include other users' and system processes. |
+| `powermac net watch [-i <secs>] [--all] [--json]` | Print connections as they open, close and change state. |
+| `powermac net audit [--blocked] [--json]` | What the firewall rules would do to each current connection (nothing is blocked). |
+| `powermac net rules list\|add\|remove\|enable\|disable\|default\|import\|check` | Edit `net-rules.json`: e.g. `add deny --app /Applications/Safari.app`, `add allow --app Safari --remote '*.apple.com' --port 443`, `import group.lsrules` (Little Snitch), `check <app> <host-or-ip[:port]>`. |
 | `powermac permissions [--json]` | Each privacy permission, its state and the enabled features that use it; `--json` prints the live state for scripts (the settings window runs this to bypass macOS' per-process caching). Never prompts. |
 | `powermac update check [--pre]` | Ask GitHub Releases for a newer version (one request; nothing is downloaded); see [Updates](updates.md). |
 | `powermac mwb doctor` | Everything that decides whether a Windows PC can pair with this Mac, plus the PowerShell to run on the PC ([Pairing with Windows](../features/mouse-without-borders-pairing.md)). |

@@ -9,6 +9,7 @@ mod display_glue;
 mod menubar_glue;
 mod modules;
 mod mwb_glue;
+mod net_cli;
 mod notch_glue;
 mod quick;
 mod scaling_glue;
@@ -65,6 +66,12 @@ enum Cmd {
     Workspace {
         #[command(subcommand)]
         cmd: WorkspaceCmd,
+    },
+    /// Network monitor and per-app firewall rules: `list`, `watch`, `audit`,
+    /// `rules list|add|remove|enable|disable|default|import|check`.
+    Net {
+        #[command(subcommand)]
+        cmd: net_cli::NetCmd,
     },
     /// Show the privacy permissions this PowerMac has (no prompts).
     Permissions {
@@ -365,6 +372,7 @@ fn main() -> Result<()> {
             run(&path, !no_tray, open_settings)
         }
         Cmd::Workspace { cmd } => workspace_cmd(&path, cmd),
+        Cmd::Net { cmd } => net_cli::run(&path, cmd),
         Cmd::Permissions { json } => permissions_cmd(&path, json),
         Cmd::Update { cmd: UpdateCmd::Check { pre } } => update_cmd(&path, pre),
         Cmd::Init { force } => {

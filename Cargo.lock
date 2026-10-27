@@ -2614,6 +2614,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "net-monitor"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3395,6 +3407,7 @@ dependencies = [
  "mouse-tuning",
  "mouse-utils",
  "mwb",
+ "net-monitor",
  "notch-shelf",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

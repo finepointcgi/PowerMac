@@ -50,6 +50,7 @@ A Rust port of PowerToys-style utilities that runs on **macOS and Windows**, as 
 | **Clipboard History** | Off by default. Everything you copy (text, rich text, images, files), searchable in a picker on Cmd+Shift+V (Win+Shift+V); pin items, paste again. Password managers' concealed items and excluded apps are never recorded. The tray lists the 10 most recent items. |
 | **Color Picker** | Ctrl+Option+C (Win+Shift+C) picks a color anywhere on screen and copies it as HEX, RGB, HSL, … or a custom format; the editor shows history, variations and every format. |
 | **Text Extractor** | Ctrl+Option+T (Win+Shift+T): drag over any part of the screen and the text in it is copied (Vision OCR on macOS, Windows.Media.Ocr on Windows). |
+| **Network Monitor** | Little Snitch / Radio Silence-style: `powermac net list` / `watch` shows every app's live TCP/UDP connections (grouped by app bundle, with direction and local/internet scope; read-only), and per-app **firewall rules** (allow / deny / ask by app, host, domain, address, network, port, protocol and direction; most specific wins; Little Snitch `.lsrules` import) live in `net-rules.json`. The rules are a model: `powermac net audit` shows what they would do, but nothing is blocked yet ([docs](docs/features/network-monitor.md)). |
 | **File Tools** | **PowerRename** (bulk rename with search/replace, regex and previews), **New+** (new files and folders from your templates), **Image Resizer** and the **Finder basics**: Open in Terminal / Editor, Copy Path, Eject all drives, show hidden files, what is using a file. All from Finder Quick Actions (Explorer context menu on Windows) once installed from Settings → File Tools or the tray. |
 
 ## Install
@@ -89,6 +90,7 @@ cargo build --release
 ./target/release/powermac resize --size 50% *.jpg  # Image Resizer (without a size option: its window)
 ./target/release/powermac finder eject-all       # also open-terminal, copy-path, show-hidden, who-uses, … (no arguments: help)
 ./target/release/powermac workspace list         # also capture [NAME], launch NAME|ID, edit
+./target/release/powermac net list               # every app's connections (also watch, audit, rules …)
 ./target/release/powermac permissions            # each permission, its state and who uses it (--json)
 ./target/release/powermac update check           # ask GitHub for a newer release (nothing is installed)
 ./target/release/powermac mwb doctor             # pairing diagnostics for Windows PCs
@@ -151,6 +153,7 @@ crates/text-expander     abbreviation expansion (event tap / LL hook), variables
 crates/menubar-manager   hide menu bar icons behind separators, notch detection, floating bar
 crates/pm-ui             shared egui theme and widgets
 crates/workspaces        capture / restore desktops of apps and windows, the Workspaces editor
+crates/net-monitor       per-app TCP/UDP connection monitor (libproc / IP Helper), firewall rules model, .lsrules import
 crates/pm-update         update check against GitHub Releases (semver, once a day, via curl)
 crates/pm-config         the shared config.json model, status/request files, launch-at-login
 crates/settings-ui       egui settings window (runs as `powermac settings`)
@@ -183,4 +186,5 @@ On a Mac with permissions granted, these were also run live:
 - **Text Expansion / Settings:** characters the bundled fonts lack (e.g. the ツ in the default `;shrug` snippet) are drawn as boxes in the settings window; they expand correctly.
 - **Menu Bar:** moving icons from Settings synthesizes a Cmd-drag and needs Accessibility; Cmd-dragging them yourself always works. Only one manager per process.
 - **Not ported yet:** Mouse Jump, Always On Top.
+- **Network Monitor:** the firewall rules aren't enforced (that needs a Network Extension content filter, an Apple paid-program entitlement, or WFP on Windows); the monitor polls the socket table, so very short connections can be missed, and host/domain rules only apply where a host name is known.
 - **Distribution:** releases aren't notarized (see Install); updates are offered, not installed.

@@ -25,6 +25,7 @@ Every module can be turned on or off on its own in **Settings** or in `config.js
 | [Color Picker](color-picker.md) | on | Ctrl+Option+C | none | Win+Shift+C |
 | [Text Extractor](text-extractor.md) | on | Ctrl+Option+T | Screen Recording | Win+Shift+T |
 | [File Tools](file-tools.md) | Quick Actions installed on request | Finder right-click | none | Explorer verbs |
+| [Network Monitor](network-monitor.md) | command line (`powermac net`) | — | none (root to see other users' processes) | yes (UDP without peers) |
 
 ## Common behaviour
 

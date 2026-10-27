@@ -1,0 +1,22 @@
+[package]
+name = "net-monitor"
+version.workspace = true
+edition.workspace = true
+description = "Network monitor for PowerMac: live per-app TCP/UDP sockets (read-only) and a per-app firewall rules model"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_System_Threading",
+] }
