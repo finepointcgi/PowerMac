@@ -1,0 +1,30 @@
+[package]
+name = "pm-audio-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PowerMac Audio: a Core Audio AudioServerPlugIn (HAL driver) with loopback virtual devices"
+
+# cdylib: the executable inside `PowerMac Audio.driver` (built and signed by
+# scripts/build-audio-driver.sh). rlib: unit tests, the host harness and the
+# shared `spec` module that audio-control uses to install and configure it.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["plugin"]
+# The plug-in itself (object model, IO, exported factory). audio-control
+# depends on this crate with `default-features = false` and only gets `spec`.
+plugin = ["dep:core-foundation", "dep:core-foundation-sys"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { version = "0.9", optional = true }
+core-foundation-sys = { version = "0.8", optional = true }
+
+[[example]]
+name = "host_harness"
+required-features = ["plugin"]

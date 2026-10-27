@@ -231,6 +231,7 @@ dependencies = [
  "log",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
+ "pm-audio-driver",
  "serde",
  "serde_json",
  "windows",
@@ -3219,6 +3220,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "pm-audio-driver"
+version = "1.0.0"
+dependencies = [
+ "core-foundation",
+ "core-foundation-sys",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pm-config"
 version = "1.0.0"
 dependencies = [
@@ -3237,12 +3248,14 @@ dependencies = [
  "mouse-utils",
  "mwb",
  "notch-shelf",
+ "pm-update",
  "scroll-reverser",
  "serde",
  "serde_json",
  "text-expander",
  "text-extractor",
  "window-switcher",
+ "workspaces",
 ]
 
 [[package]]
@@ -3264,10 +3277,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-nowplaying"
+version = "1.0.0"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "pm-ui"
 version = "1.0.0"
 dependencies = [
  "eframe",
+]
+
+[[package]]
+name = "pm-update"
+version = "1.0.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3358,6 +3389,7 @@ dependencies = [
  "fancyzones",
  "file-tools",
  "keyboard-manager",
+ "libc",
  "log",
  "menubar-manager",
  "mouse-tuning",
@@ -3367,7 +3399,9 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "pm-config",
+ "pm-hook",
  "pm-input",
+ "pm-update",
  "scroll-reverser",
  "serde",
  "serde_json",
@@ -3377,6 +3411,7 @@ dependencies = [
  "tray-icon",
  "window-switcher",
  "windows-sys 0.59.0",
+ "workspaces",
 ]
 
 [[package]]
@@ -3853,12 +3888,14 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "pm-config",
  "pm-ui",
+ "pm-update",
  "scroll-reverser",
  "serde",
  "serde_json",
  "text-expander",
  "text-extractor",
  "window-switcher",
+ "workspaces",
 ]
 
 [[package]]

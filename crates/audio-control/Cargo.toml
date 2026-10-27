@@ -8,6 +8,7 @@ anyhow.workspace = true
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+pm-audio-driver = { path = "../pm-audio-driver", default-features = false }
 
 # macOS: CoreAudio is bound by hand in src/macos/ffi.rs. The process-tap entry
 # points (macOS 14.2+) and the private TCC preflight are resolved with dlsym so

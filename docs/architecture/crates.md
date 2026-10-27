@@ -24,7 +24,8 @@
 | `text-expander` | Snippet expansion, variables, espanso import |
 | `display-control` | DDC/CI, native and gamma brightness, media-key takeover, OSD |
 | `display-scaling` | Display modes, virtual HiDPI displays, override plists |
-| `audio-control` | Default-device rules, device levels, per-app volume |
+| `audio-control` | Default-device rules, device levels, per-app volume, installing and configuring the virtual audio driver |
+| `pm-audio-driver` | PowerMac Audio: Core Audio HAL plug-in (cdylib in `PowerMac Audio.driver`) with loopback virtual devices |
 | `clipboard-history` | Clipboard watcher, history store, picker |
 | `color-picker` | Screen color sampling, PowerToys color formats, editor |
 | `text-extractor` | Region capture + Vision / Windows.Media.Ocr |

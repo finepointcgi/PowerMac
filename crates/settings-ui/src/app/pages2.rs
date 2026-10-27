@@ -488,6 +488,9 @@ impl SettingsApp {
         if let Some(e) = status.as_ref().and_then(|s| s.error.clone()) {
             warn_label(ui, &e);
         }
+        if mac {
+            self.sound_driver_card(ui);
+        }
         for r in level_req {
             if let AudioRequest::AppVolume { bundle_id, volume } = &r {
                 self.audio_app_local.insert(bundle_id.clone(), (*volume, Instant::now()));
@@ -522,6 +525,92 @@ impl SettingsApp {
         if refresh {
             self.audio_local = None;
             self.poll_new_modules();
+        }
+    }
+
+    /// The PowerMac Audio virtual device driver: status, and install /
+    /// remove behind a confirmation, because both restart Core Audio.
+    fn sound_driver_card(&mut self, ui: &mut Ui) {
+        use audio_control::driver::{self, DriverStatus};
+        const JOB: &str = "audio-driver";
+        let bundled = driver::find_bundled_driver();
+        let status = driver::status(bundled.as_deref());
+        let busy = self.busy.contains(JOB);
+        let confirm_id = Id::unique("audio-driver-confirm");
+        // Some(true): confirming an install / update; Some(false): a removal.
+        let mut confirm: Option<bool> = ui.data(|d| d.get_temp(confirm_id));
+        let mut start: Option<bool> = None;
+        card_with(
+            ui,
+            "Virtual audio device",
+            Some("PowerMac Audio is a loopback device: what apps play to it can be recorded from it, like BlackHole or Loopback. 2 to 64 channels at 44.1, 48 or 96 kHz, with no added latency."),
+            |ui| {
+                let (desc, installed, update) = match &status {
+                    DriverStatus::NotInstalled => ("Not installed.".to_string(), false, false),
+                    DriverStatus::Installed { version } => (format!("Version {version}, in /Library/Audio/Plug-Ins/HAL."), true, false),
+                    DriverStatus::UpdateAvailable { installed, bundled } => (format!("Version {installed} is installed; this PowerMac has {bundled}."), true, true),
+                };
+                row(ui, "PowerMac Audio driver", Some(&desc), |ui| {
+                    if busy {
+                        ui.spinner();
+                        return;
+                    }
+                    if confirm.is_some() {
+                        return;
+                    }
+                    if installed && ui.button("Uninstall…").clicked() {
+                        confirm = Some(false);
+                    }
+                    if (!installed || update) && bundled.is_some() && ui.button(if update { "Update…" } else { "Install…" }).clicked() {
+                        confirm = Some(true);
+                    }
+                    status_pill(ui, installed && !update, if update { "Update available" } else if installed { "Installed" } else { "Not installed" });
+                });
+                if let Some(install) = confirm {
+                    callout(
+                        ui,
+                        icon::WARNING,
+                        "This restarts Core Audio",
+                        if install { driver::RESTART_WARNING } else { driver::UNINSTALL_WARNING },
+                    );
+                    block(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                confirm = None;
+                            }
+                            let label = if install { "Install and restart audio" } else { "Remove and restart audio" };
+                            if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(pal(ui).error)).clicked() {
+                                start = Some(install);
+                                confirm = None;
+                            }
+                        });
+                    });
+                }
+                if busy {
+                    block(ui, |ui| hint(ui, "Waiting for the administrator password in the macOS prompt…"));
+                }
+                if bundled.is_none() && !installed {
+                    block(ui, |ui| hint(ui, "This build doesn't include the driver. Build it with scripts/build-audio-driver.sh."));
+                }
+            },
+        );
+        self.note(ui, JOB);
+        ui.data_mut(|d| match confirm {
+            Some(c) => {
+                d.insert_temp(confirm_id, c);
+            }
+            None => d.remove::<bool>(confirm_id),
+        });
+        match (start, bundled) {
+            (Some(true), Some(b)) => self.run_background(JOB, move || {
+                driver::install(&b)
+                    .map(|v| format!("PowerMac Audio {v} is installed. It shows up in Output and Input once Core Audio has restarted."))
+                    .map_err(|e| format!("{e:#}"))
+            }),
+            (Some(false), _) => self.run_background(JOB, move || {
+                driver::uninstall().map(|()| "PowerMac Audio was removed.".to_string()).map_err(|e| format!("{e:#}"))
+            }),
+            _ => {}
         }
     }
 

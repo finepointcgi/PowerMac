@@ -10,10 +10,13 @@
 //! * **Per-app volume** – macOS 14.4+: Core Audio process taps (experimental,
 //!   off by default, needs the audio-capture permission). Windows: audio
 //!   sessions (`ISimpleAudioVolume`).
+//! * **Virtual devices** ([`driver`]) – install, remove and configure the
+//!   PowerMac Audio HAL driver (`crates/pm-audio-driver`, macOS).
 //!
 //! macOS backend: `src/macos` (CoreAudio, hand-bound). Windows backend:
 //! `src/windows` (MMDevice API, `IPolicyConfig`, audio sessions).
 
+pub mod driver;
 pub mod rules;
 mod types;
 
