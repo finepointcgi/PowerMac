@@ -1,5 +1,5 @@
 //! Manual checks:
-//! * `cargo run -p color-picker --example probe hotkey` registers and
+//! * `cargo run -p color-picker --example color_picker_probe hotkey` registers and
 //!   unregisters the default hotkey (prints whether that worked).
 //! * `... probe pick` shows the picker and prints the color (Esc cancels).
 //! * `... probe pick-timeout <secs>` exits after <secs> even without a pick.

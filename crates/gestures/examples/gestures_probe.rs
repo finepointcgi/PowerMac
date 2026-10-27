@@ -1,5 +1,5 @@
 //! Read-only check that MultitouchSupport delivers touch frames:
-//! `cargo run -p gestures --example probe -- [seconds]`. Prints the devices,
+//! `cargo run -p gestures --example gestures_probe -- [seconds]`. Prints the devices,
 //! a line per second with the frame count and current finger count, and
 //! every gesture the recognizer sees (nothing is bound, nothing runs).
 

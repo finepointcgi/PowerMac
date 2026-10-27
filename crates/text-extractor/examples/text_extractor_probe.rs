@@ -1,5 +1,5 @@
 //! Manual checks:
-//! * `cargo run -p text-extractor --example probe ocr <image>` — OCR a file.
+//! * `cargo run -p text-extractor --example text_extractor_probe ocr <image>` — OCR a file.
 //! * `... probe clipboard` — OCR the image on the clipboard.
 //! * `... probe languages` — recognition languages.
 //! * `... probe permission` — Screen Recording permission state (no prompt).

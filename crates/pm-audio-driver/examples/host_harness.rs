@@ -6,7 +6,15 @@
 //! ./scripts/build-audio-driver.sh
 //! cargo run -p pm-audio-driver --example host_harness -- "target/release/PowerMac Audio.driver"
 //! ```
+//!
+//! macOS only (the driver is a CoreAudio plug-in).
 
+#[cfg(not(all(target_os = "macos", feature = "plugin")))]
+fn main() {
+    eprintln!("host_harness needs macOS and the `plugin` feature");
+}
+
+#[cfg(all(target_os = "macos", feature = "plugin"))]
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| "target/release/PowerMac Audio.driver".into());
     let path = std::path::Path::new(&path);

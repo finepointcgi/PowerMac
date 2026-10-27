@@ -1,4 +1,4 @@
-//! Read-only probe: `cargo run -p display-scaling --example probe` lists
+//! Read-only probe: `cargo run -p display-scaling --example display_scaling_probe` lists
 //! every display and its modes; `-- --virtual-selftest [W H [TW TH [HOLD_MS]]]` (macOS) also
 //! creates a virtual HiDPI display for a W x H panel, prints its modes and
 //! destroys it (no mirroring, no mode changes).
