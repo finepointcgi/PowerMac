@@ -13,6 +13,9 @@ All notable changes to PowerMac are listed here. The format follows
 - **Window Switcher**: setting its shortcut to Cmd+Tab now switches between every window, not apps. Before, macOS kept Cmd+Tab unless **Replace Cmd+Tab** was also on. Setting the front app's windows shortcut to Cmd+` takes that over the same way, and the settings page says when a shortcut replaces the system one.
 - **Window Switcher**: PowerMac's own Settings window is listed like any other window.
 - **Window Switcher**: when a password field turns on secure input (which hides the keyboard from PowerMac, so Cmd+Tab goes back to the macOS app switcher), the log now names the app that turned it on.
+- **FancyZones**: dragging a window could show no zones, mostly on a second monitor. macOS can report a dragged window's old position to Accessibility until the mouse is released, so FancyZones took the drag for a drag inside the window and gave up. It now follows the window server's position during the drag.
+- **FancyZones**: with layouts per Space on, a layout picked for a monitor in Settings could be overridden by the layout saved earlier for the current Space. Picking one in Settings now applies it on every Space.
+- **FancyZones**: each step of a window drag is logged at debug level (`RUST_LOG=fancyzones=debug`).
 
 ### Added
 

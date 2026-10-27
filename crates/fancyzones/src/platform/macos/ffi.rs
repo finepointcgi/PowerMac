@@ -116,6 +116,8 @@ extern "C" {
     pub fn CFArrayGetValueAtIndex(a: CFTypeRef, i: isize) -> CFTypeRef;
     pub fn CFArrayGetTypeID() -> CFTypeID;
     pub fn CFUUIDCreateString(alloc: CFAllocatorRef, uuid: CFTypeRef) -> CFStringRef;
+    pub fn CFArrayCreate(alloc: CFAllocatorRef, values: *const *const c_void, n: isize, callbacks: *const c_void) -> CFTypeRef;
+    pub fn CFDictionaryGetValue(d: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -153,6 +155,8 @@ extern "C" {
     pub fn CGDisplaySerialNumber(d: CGDirectDisplayID) -> u32;
     pub fn CGDisplayIsBuiltin(d: CGDirectDisplayID) -> u32;
     pub fn CGMainDisplayID() -> CGDirectDisplayID;
+    pub fn CGWindowListCreateDescriptionFromArray(windows: CFTypeRef) -> CFTypeRef;
+    pub fn CGRectMakeWithDictionaryRepresentation(dict: CFTypeRef, rect: *mut CGRect) -> bool;
     pub fn CGPreflightListenEventAccess() -> bool;
 }
 
@@ -174,6 +178,36 @@ pub fn find_symbol(name: &std::ffi::CStr) -> *mut c_void {
 }
 
 /// Current cursor position (global, top-left origin).
+/// The window server's bounds of window `wid` (global, top-left origin).
+/// Unlike the Accessibility frame, it follows a window while the user drags
+/// it (macOS can report the old AX position until the drag ends).
+pub fn window_server_bounds(wid: u32) -> Option<CGRect> {
+    unsafe {
+        let ids = [wid as usize as *const c_void];
+        let arr = CFArrayCreate(std::ptr::null(), ids.as_ptr(), 1, std::ptr::null());
+        if arr.is_null() {
+            return None;
+        }
+        let desc = CGWindowListCreateDescriptionFromArray(arr);
+        CFRelease(arr);
+        if desc.is_null() {
+            return None;
+        }
+        let mut out = None;
+        if CFArrayGetCount(desc) > 0 {
+            let d = CFArrayGetValueAtIndex(desc, 0);
+            let key = CfString::new("kCGWindowBounds");
+            let b = CFDictionaryGetValue(d, key.0);
+            let mut r = std::mem::zeroed::<CGRect>();
+            if !b.is_null() && CGRectMakeWithDictionaryRepresentation(b, &mut r) {
+                out = Some(r);
+            }
+        }
+        CFRelease(desc);
+        out
+    }
+}
+
 pub fn cursor_location() -> Option<CGPoint> {
     unsafe {
         let e = CGEventCreate(std::ptr::null());
