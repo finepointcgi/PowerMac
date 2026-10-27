@@ -89,6 +89,7 @@
 //! | 850 | scroll-reverser | scroll | wheel direction and smoothing before routing and before FancyZones' wheel |
 //! | 800 | mwb (pm-input capture) | everything | swallows all input while controlling a remote machine |
 //! | 700 | mouse-tuning buttons | other-mouse buttons | button actions are local; a remote machine gets the real button |
+//! | 650 | gestures (click watcher) | left button, drags | tells taps from clicks; swallows the click of a bound N-finger click |
 //! | 600 | text-expander | key down, clicks | sees the remapped keys; its typed replacement reaches the panels below |
 //! | 550 | dock-previews | mouse, scroll, key down | its panel's keys / clicks |
 //! | 500 | window-switcher | keys, flags, moves, left button | Option+Tab, Cmd+Tab take-over |
@@ -161,6 +162,8 @@ pub mod priority {
     pub const SCROLL_REVERSER: i32 = 850;
     pub const MOUSE_WITHOUT_BORDERS: i32 = 800;
     pub const MOUSE_TUNING: i32 = 700;
+    /// Trackpad gestures' click watcher (N-finger clicks; `crates/gestures`).
+    pub const GESTURES: i32 = 650;
     pub const TEXT_EXPANDER: i32 = 600;
     pub const DOCK_PREVIEWS: i32 = 550;
     pub const WINDOW_SWITCHER: i32 = 500;

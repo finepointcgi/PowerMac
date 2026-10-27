@@ -174,6 +174,14 @@ pub fn apply(running: &mut Running, old: Option<&AppConfig>, new: &AppConfig) {
     if changed(old.map(|o| &o.audio), &new.audio) {
         apply_audio(running, &new.audio);
     }
+    // The battery controller always runs (status only while the limit is
+    // off) so the tray and the settings window can show the battery.
+    if changed(old.map(|o| &o.battery_limit), &new.battery_limit) {
+        apply_battery(running, &new.battery_limit);
+    }
+    if changed(old.map(|o| &o.gestures), &new.gestures) {
+        apply_gestures(running, &new.gestures);
+    }
     if changed(old.map(|o| &o.dock_previews), &new.dock_previews) {
         apply_dock_previews(running, &new.dock_previews);
     }
@@ -287,6 +295,57 @@ fn apply_audio(running: &mut Running, cfg: &audio_control::Config) {
             }
             crate::audio_glue::write_stopped();
             log::info!("sound: stopped");
+        }
+        (false, None) => {}
+    }
+}
+
+fn apply_battery(running: &mut Running, cfg: &battery_limit::Config) {
+    let limit = || if cfg.enabled { format!("{} %", cfg.normalized().limit_percent) } else { "off, status only".into() };
+    match running.battery.as_ref() {
+        Some(h) => {
+            h.update(cfg.clone());
+            log::info!("battery: settings applied (limit {})", limit());
+        }
+        None => match battery_limit::BatteryLimit::start(cfg.clone()) {
+            Ok(h) => {
+                log::info!("battery: running (limit {})", limit());
+                running.battery = Some(h);
+                crate::battery_glue::start_once();
+            }
+            Err(e) => log::error!("battery: {e:#}"),
+        },
+    }
+}
+
+/// Trackpad gestures: the engine runs while the section is on (it reads the
+/// trackpad only while something is bound or the settings window records).
+fn apply_gestures(running: &mut Running, cfg: &gestures::GesturesConfig) {
+    match (cfg.enabled, running.gestures.as_ref()) {
+        (true, Some(h)) => {
+            h.update(cfg.clone());
+            log::info!("gestures: settings applied ({} binding{})", cfg.bindings.len(), if cfg.bindings.len() == 1 { "" } else { "s" });
+        }
+        (true, None) => {
+            let h = gestures::Gestures::start(cfg.clone());
+            crate::gestures_glue::attach(&h);
+            let n = cfg.bindings.iter().filter(|b| b.enabled).count();
+            match h.status() {
+                gestures::Status::Unavailable(e) => log::warn!("gestures: {e}"),
+                _ => log::info!("gestures: running ({n} binding{})", if n == 1 { "" } else { "s" }),
+            }
+            for b in cfg.bindings.iter().filter(|b| b.enabled && b.gesture.may_conflict_with_macos()) {
+                log::info!("gestures: {} is also a macOS gesture (System Settings → Trackpad); both happen", b.gesture.label());
+            }
+            running.gestures = Some(h);
+            crate::gestures_glue::start_once();
+        }
+        (false, Some(_)) => {
+            if let Some(h) = running.gestures.take() {
+                h.stop();
+            }
+            crate::gestures_glue::write_stopped();
+            log::info!("gestures: stopped");
         }
         (false, None) => {}
     }

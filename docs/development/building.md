@@ -5,7 +5,7 @@
 ```bash
 cargo build --workspace            # debug
 cargo build --release -p powermac  # release binary
-./scripts/bundle-macos.sh          # release PowerMac.app
+./scripts/bundle-macos.sh          # release PowerMac.app (with the battery helper in Contents/MacOS and PowerMac Audio.driver in Contents/Resources; neither is installed)
 ```
 
 Cross-check the Windows backends from a Mac:

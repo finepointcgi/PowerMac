@@ -27,6 +27,8 @@ file-tools = { path = "../file-tools" }
 window-switcher = { path = "../window-switcher" }
 display-scaling = { path = "../display-scaling" }
 audio-control = { path = "../audio-control" }
+battery-limit = { path = "../battery-limit" }
+gestures = { path = "../gestures" }
 dock-previews = { path = "../dock-previews" }
 text-expander = { path = "../text-expander" }
 menubar-manager = { path = "../menubar-manager" }

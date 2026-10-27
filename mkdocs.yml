@@ -83,11 +83,14 @@ nav:
           - Scrolling: features/scrolling.md
           - Mouse Utilities: features/mouse-utils.md
           - Keyboard Manager: features/keyboard-manager.md
+          - Automation (hotkeys, buttons, gestures): features/automation.md
           - Text Expander: features/text-expander.md
       - Hardware:
           - Displays (brightness and volume): features/displays.md
           - Display Scaling (HiDPI): features/display-scaling.md
           - Sound: features/sound.md
+          - App routing and the mixer: features/audio-routing-mixer.md
+          - Battery: features/battery.md
           - Awake: features/awake.md
       - Tools:
           - Clipboard History: features/clipboard-history.md

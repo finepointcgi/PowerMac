@@ -8,6 +8,14 @@ All notable changes to PowerMac are listed here. The format follows
 
 ### Added
 
+- **Sound → App routing**: send an app to other output devices or PowerMac virtual devices (only there, or as well as its normal output, with extra gain), with a live status per route. Saved in `audio.appRoutes`.
+- **Mixer** page (Displays & Power): app, microphone and loopback sources and device outputs as channel strips with faders, mute/solo and live 20 Hz meters (`audio-watch.json` / `audio-meters.json`, only while the page is open), a send matrix, per-strip parametric EQ with a draggable response curve and a look-ahead limiter, strip states with sample-rate guidance (**Open Audio MIDI Setup**) and the System Audio Recording / Microphone rows. Saved in `audio.mixer`; live edits go through `AudioRequest::SetMixer`.
+- The app bundle ships **PowerMac Audio.driver** in `Contents/Resources` (`bundle-macos.sh` runs `build-audio-driver.sh`); it is installed only from Settings → Sound. `NSMicrophoneUsageDescription` for mixer inputs.
+- **Battery** is back: Settings → Battery (health, the strategy this Mac allows — charge inhibit, firmware range or limit via discharge — with its trade-offs shown before enabling, limit, sailing, heat protection, discharge, charge to 100 % once, macOS's own Charge Limit with a button to Battery settings, and an explicit **Install helper…**), the tray's Battery line and the `batteryLimit` section. Nothing is installed automatically.
+- **Automation** page (Mouse & Keyboard): hotkeys (`keyboardManager.hotkeys`), mouse buttons with every automation action, and **trackpad gestures** (`gestures` section; record a gesture through the app, per-app bindings, warnings for gestures macOS uses too). One action editor for all of them, including shell commands (command or script, interpreter, working folder, environment, background / wait, time limit, notifications, per-action logs with **Open log**) and a **Test** button that shows the outcome and output. Hotkeys join the global shortcut check. Shell actions log to the app's log folder and notify through the app.
+- **Network** page (Security & Network; tray → **Network activity…**): live per-app connections with scope badges and a filter, the rules editor (allow / deny / ask, app, remote, ports, protocol, direction, priority, default action) with Little Snitch `.lsrules` import, and an Audit view — with a banner that nothing is blocked.
+- `pm_hook::priority::GESTURES` (650) for the gestures click watcher.
+
 - **Setup**: a first-run window (Welcome → Choose features → Permissions → Done; `powermac settings --page welcome`) that turns feature groups on or off and walks through the permissions they need: why each is needed and by which features, live status refreshed every second (from a fresh process, since macOS caches some answers per process), **Open** for exactly the right System Settings pane, **Request…** where macOS has a prompt, guidance for outdated entries ("remove the old PowerMac with −, add PowerMac.app with +") and **Restart PowerMac**, which quits cleanly and starts the bundle again with `open -n`, reopening the window. It opens on first launch and, unless turned off, when a needed permission is missing at startup; tray → **Setup & permissions…**, a **⚠ Needs …** line and a dot on the tray icon while something is missing.
 - **Settings → General → Permissions & Health**: the same permission rows, the shared input hook's health (state, re-enables, slow handlers) and one line per module — running, waiting for a permission, didn't start, off — from the new `app-status.json`.
 - **Updates**: a daily check of GitHub Releases (`updates.check`, `includePrereleases`), **Update available: vX.Y.Z** in the tray, and a Settings → General card with the release notes and a Download button (opens the browser; nothing installs itself). Handles no releases, rate limits and being offline. `powermac update check`, `powermac --version`.
@@ -27,7 +35,7 @@ All notable changes to PowerMac are listed here. The format follows
 
 ### Removed
 
-- **Battery** charge limit (and its privileged helper). Old config files still load; the section is ignored. The Notch Shelf's Battery widget stays.
+- (Earlier in this cycle the battery charge limit was removed; it is back, see above. Config files from either version load.)
 
 ## [1.0.0] - 2026-10-26
 

@@ -4,16 +4,17 @@ Many modules watch or change global input, move other apps' windows or capture t
 
 | Permission | Needed by |
 |---|---|
-| **Accessibility** | Mouse Without Borders, FancyZones, Scrolling, Mouse Utilities, Keyboard Manager, Text Expander, Window Switcher, Dock Previews, Menu Bar Manager, Clipboard History's hotkey, mouse button mappings, Displays' brightness/volume keys |
+| **Accessibility** | Mouse Without Borders, FancyZones, Scrolling, Mouse Utilities, Keyboard Manager (and its automation hotkeys), Text Expander, Window Switcher, Dock Previews, Menu Bar Manager, Clipboard History's hotkey, mouse button mappings, keeping bound trackpad clicks from apps, Displays' brightness/volume keys |
 | **Input Monitoring** | Mouse Without Borders, FancyZones, Mouse Utilities, Keyboard Manager |
 | **Screen Recording** | Text Extractor (screen capture), Window Switcher and Dock Previews thumbnails, Menu Bar Manager's floating bar on macOS 15 and older. Without it these fall back to app icons; OCR of files and clipboard images still works. |
 | **Automation (Finder)** | Finder basics acting on the front Finder window without a selection (opt-in). |
 | **Automation (Music, Spotify)** | Notch Shelf's Now Playing widget when `useAppleScript` is on (opt-in). |
-| **Audio capture** | Sound's per-app volume (experimental, macOS 14.4+). |
+| **System Audio Recording** | Sound's per-app volume (experimental, macOS 14.4+), app routing and app sources in the mixer. |
+| **Microphone** | Microphone and audio-interface sources in the Sound mixer (asked the first time the mixer opens one). |
 | **Calendars** | Notch Shelf's Calendar widget. |
 | **Reminders** | Notch Shelf's Reminders widget. |
 | **Camera** | Notch Shelf's Mirror widget. |
-| **Administrator password (once)** | Installing a display override plist. |
+| **Administrator password (once)** | Installing a display override plist; installing the battery charge-limit helper (only from Settings → Battery → Install helper…); installing the PowerMac Audio driver (Settings → Sound). |
 | none | Color Picker, Notch Shelf's shelf, Displays sliders, pointer speed/acceleration, File Tools, Awake |
 
 ## The setup window

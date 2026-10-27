@@ -57,8 +57,16 @@ pub struct AppConfig {
     /// Display modes, HiDPI on non-Retina displays, custom resolutions
     /// (has its own `enabled`; off by default).
     pub display_scaling: display_scaling::Config,
-    /// Default-device rules and per-app volume (has its own `enabled`).
+    /// Default-device rules, per-app volume, per-app routing and the mixer
+    /// (has its own `enabled`; routes and the mixer are empty / off by default).
     pub audio: audio_control::Config,
+    /// Battery charge limit (has its own `enabled`; off by default: nothing
+    /// is written to the SMC and no helper is installed until it's turned on
+    /// and the helper installed from Settings → Battery).
+    pub battery_limit: battery_limit::Config,
+    /// Trackpad gestures that run automation actions (nothing bound by
+    /// default, and with nothing bound the trackpad isn't read).
+    pub gestures: gestures::GesturesConfig,
     /// Window previews on Dock icons (has its own `enabled`).
     pub dock_previews: dock_previews::Config,
     /// Snippets typed from abbreviations (has its own `enabled`; off by default).
@@ -132,6 +140,8 @@ impl Default for AppConfig {
             window_switcher: window_switcher::Config::default(),
             display_scaling: display_scaling::Config::default(),
             audio: audio_control::Config::default(),
+            battery_limit: battery_limit::Config::default(),
+            gestures: gestures::GesturesConfig::default(),
             dock_previews: dock_previews::Config::default(),
             text_expander: text_expander::Config::default(),
             menu_bar: menubar_manager::Config::default(),
@@ -402,24 +412,67 @@ fn rand_id() -> u32 {
 mod tests {
     use super::*;
 
-    /// Config files from versions with the (removed) battery charge limit
-    /// still load; the old section is ignored and dropped on the next save.
+    /// The battery charge limit section (dropped in 1.0.x, restored since)
+    /// loads from configs written by either version.
     #[test]
-    fn removed_charge_limit_section_is_ignored() {
+    fn battery_limit_section_loads() {
         let dir = std::env::temp_dir().join(format!("pm-config-battery-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
-        // The key of the removed section (spelled in two parts so a search for
-        // leftovers of the feature stays clean).
-        let old_key = concat!("battery", "Limit");
-        let json = format!(r#"{{"windowSwitcher":{{"showDelayMs":150}},"{old_key}":{{"enabled":true,"limitPercent":80,"sailing":true}}}}"#);
+        let json = r#"{"windowSwitcher":{"showDelayMs":150},"batteryLimit":{"enabled":true,"limitPercent":80,"sailingPercent":3}}"#;
         std::fs::write(&path, json).unwrap();
         let c = AppConfig::load_or_default(&path).unwrap();
         assert_eq!(c.window_switcher.show_delay_ms, 150);
+        assert!(c.battery_limit.enabled);
+        assert_eq!((c.battery_limit.limit_percent, c.battery_limit.sailing_percent), (80, 3));
+        // Fields added later keep their defaults.
+        assert!(c.battery_limit.limit_via_discharge);
+        assert_eq!(c.battery_limit.heat_protection_celsius, 35);
         c.save(&path).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains(old_key));
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["batteryLimit"]["limitViaDischarge"], true);
+        assert_eq!(v["batteryLimit"]["limitPercent"], 80);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Routes, the mixer, hotkeys and gestures round-trip with camelCase
+    /// keys, and partial sections keep their defaults.
+    #[test]
+    fn automation_audio_and_gesture_sections() {
+        let mut c = AppConfig::default();
+        assert!(c.audio.app_routes.is_empty() && !c.audio.mixer.enabled);
+        assert!(c.gestures.enabled && c.gestures.bindings.is_empty() && c.gestures.swallow_clicks);
+        assert!(c.keyboard_manager.hotkeys.is_empty());
+        c.audio.app_routes.insert(
+            "com.spotify.client".into(),
+            audio_control::AppRoute { name: "Spotify".into(), keep_default: true, ..audio_control::AppRoute::to(audio_control::DeviceMatch::name("AirPods")) },
+        );
+        c.audio.mixer.enabled = true;
+        c.audio.mixer.sources.push(audio_control::MixSource { id: "s1".into(), name: "Music".into(), ..Default::default() });
+        c.audio.mixer.outputs.push(audio_control::MixOutput { id: "o1".into(), name: "Speakers".into(), ..Default::default() });
+        c.audio.mixer.set_send("s1", "o1", -6.0, false);
+        c.keyboard_manager.hotkeys.push(keyboard_manager::Hotkey {
+            from: "Ctrl+Alt+B".parse().unwrap(),
+            action: keyboard_manager::automation::Action::Shell(keyboard_manager::ShellAction { command: "make".into(), ..Default::default() }),
+            app: None,
+            enabled: true,
+        });
+        c.gestures.bindings.push(gestures::GestureBinding::new(
+            "3-finger-tap".parse().unwrap(),
+            keyboard_manager::automation::Action::Shortcut { keys: "Cmd+W".into() },
+        ));
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["audio"]["appRoutes"]["com.spotify.client"]["keepDefault"], true);
+        assert_eq!(v["audio"]["mixer"]["sends"][0]["gainDb"], -6.0);
+        assert_eq!(v["keyboardManager"]["hotkeys"][0]["action"]["type"], "shell");
+        assert_eq!(v["gestures"]["bindings"][0]["gesture"], "3-finger-tap");
+        assert_eq!(v["gestures"]["swallowClicks"], true);
+        let back: AppConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(back.audio, c.audio);
+        assert_eq!(back.keyboard_manager.hotkeys, c.keyboard_manager.hotkeys);
+        assert_eq!(back.gestures, c.gestures);
+        let p: AppConfig = serde_json::from_str(r#"{"gestures": {"bindings": [{"gesture": "4-finger-swipe-up", "action": {"type": "openUri", "uri": "https://example.com"}}]}}"#).unwrap();
+        assert!(p.gestures.enabled && p.gestures.swallow_clicks && p.gestures.bindings.len() == 1);
     }
 
     #[test]
@@ -476,8 +529,10 @@ mod tests {
         assert_eq!(c.text_extractor.settings, d.text_extractor.settings);
         assert_eq!(c.window_switcher, d.window_switcher);
         assert_eq!(c.display_scaling, d.display_scaling);
-        assert!(!c.display_scaling.enabled && !c.text_expander.enabled);
+        assert!(!c.display_scaling.enabled && !c.text_expander.enabled && !c.battery_limit.enabled);
         assert_eq!(c.audio, d.audio);
+        assert_eq!(c.battery_limit, d.battery_limit);
+        assert_eq!(c.gestures, d.gestures);
         assert_eq!(c.dock_previews, d.dock_previews);
         assert_eq!(c.text_expander, d.text_expander);
         assert_eq!(c.menu_bar, d.menu_bar);
@@ -500,7 +555,7 @@ mod tests {
         c2.text_expander.snippets.push(text_expander::Snippet::new(";sig", "Best,\nAda"));
         let v = serde_json::to_value(&c2).unwrap();
         for k in ["mouseTuning", "displayControl", "clipboardHistory", "notchShelf", "colorPicker", "textExtractor", "windowSwitcher",
-                  "displayScaling", "audio", "dockPreviews", "textExpander", "menuBar", "workspaces", "updates", "setup"] {
+                  "displayScaling", "audio", "batteryLimit", "gestures", "dockPreviews", "textExpander", "menuBar", "workspaces", "updates", "setup"] {
             assert!(v.get(k).is_some(), "{k}");
         }
         assert_eq!(v["colorPicker"]["enabled"], false);

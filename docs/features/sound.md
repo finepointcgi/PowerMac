@@ -17,6 +17,8 @@ Crate: `crates/audio-control` · Settings page: **Sound** · Config: `audio`
 - **Keep the built-in mic with Bluetooth headphones**, so they stay in high-quality (A2DP) mode.
 - **Per-app volume:** macOS 14.4+ through Core Audio process taps (experimental, off by default, needs the audio capture permission). Windows uses audio sessions natively. Levels are saved in `appVolumes`, keyed by bundle id or exe name.
 
+For per-app routing and the mixer matrix (gain, mute, solo, EQ, limiter, meters) see [App routing and the mixer](audio-routing-mixer.md).
+
 ## Settings
 
 | Key | Default |

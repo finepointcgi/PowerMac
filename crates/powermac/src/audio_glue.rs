@@ -4,7 +4,14 @@
 //! the default device, device levels and per-app levels through
 //! `audio-request.json` (polled every 150 ms). Per-app levels changed
 //! anywhere (tray presets, settings sliders) are saved into the config's
-//! `appVolumes` a moment after the last change.
+//! `appVolumes` a moment after the last change, and routes / the mixer
+//! changed through the handle (`RoutesChanged` / `MixerChanged`) into
+//! `appRoutes` / `mixer` the same way.
+//!
+//! Meters: while the settings window shows the mixer it renews
+//! `audio-watch.json` every second; while that is fresh a second thread
+//! writes `audio-meters.json` (`Handle::meters`) every 50 ms. Nothing is
+//! written at 20 Hz otherwise.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,13 +19,24 @@ use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use audio_control::{CapturePermission, DeviceKind, Event};
-use pm_config::bridge::{self, AudioRequest, AudioStatus, RequestReader, AUDIO_REQUEST_FILE, AUDIO_STATUS_FILE};
+use pm_config::bridge::{
+    self, AudioRequest, AudioStatus, AudioWatch, RequestReader, AUDIO_METERS_FILE, AUDIO_REQUEST_FILE, AUDIO_STATUS_FILE, AUDIO_WATCH_FILE,
+    AUDIO_WATCH_FRESH_MS,
+};
 use pm_config::AppConfig;
 
 use crate::RUNNING;
 
 /// A per-app level changed and isn't saved yet.
 static LEVELS_DIRTY: AtomicBool = AtomicBool::new(false);
+/// Routes changed through the handle and aren't saved yet.
+static ROUTES_DIRTY: AtomicBool = AtomicBool::new(false);
+/// The mixer changed through the handle and isn't saved yet.
+static MIXER_DIRTY: AtomicBool = AtomicBool::new(false);
+/// The settings window shows Sound / the mixer (`audio-watch.json` is fresh).
+static WATCHED: AtomicBool = AtomicBool::new(false);
+/// ... and wants the meters.
+static METERS_WANTED: AtomicBool = AtomicBool::new(false);
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 fn config_path() -> Option<PathBuf> {
@@ -29,6 +47,8 @@ fn config_path() -> Option<PathBuf> {
 pub fn attach(h: &audio_control::Handle) {
     h.set_event_callback(|ev| match ev {
         Event::AppLevelChanged { .. } => LEVELS_DIRTY.store(true, Ordering::Relaxed),
+        Event::RoutesChanged => ROUTES_DIRTY.store(true, Ordering::Relaxed),
+        Event::MixerChanged => MIXER_DIRTY.store(true, Ordering::Relaxed),
         Event::RuleApplied { kind, name, reason, .. } => {
             log::info!("sound: switched the {} to {name} ({reason:?})", kind_name(*kind))
         }
@@ -51,14 +71,46 @@ pub fn start_once() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let Some(path) = config_path() else { return };
+        let p2 = path.clone();
         let _ = std::thread::Builder::new().name("audio-status".into()).spawn(move || run(&path));
+        let _ = std::thread::Builder::new().name("audio-meters".into()).spawn(move || run_meters(&p2));
     });
+}
+
+/// Write the meters at ~20 Hz while the settings window asks for them.
+fn run_meters(path: &Path) {
+    let mut checked = Instant::now() - Duration::from_secs(1);
+    loop {
+        if checked.elapsed() >= Duration::from_millis(500) {
+            checked = Instant::now();
+            let w = bridge::read_fresh::<AudioWatch>(path, AUDIO_WATCH_FILE, AUDIO_WATCH_FRESH_MS);
+            WATCHED.store(w.is_some(), Ordering::Relaxed);
+            METERS_WANTED.store(w.is_some_and(|w| w.meters), Ordering::Relaxed);
+        }
+        if !METERS_WANTED.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+        let t = Instant::now();
+        // Never wait for the config watcher here (it may hold RUNNING for a while).
+        let meters = match RUNNING.try_lock() {
+            Ok(g) => g.as_ref().and_then(|r| r.audio.as_ref()).map(|h| h.meters()),
+            Err(_) => None,
+        };
+        if let Some(m) = meters {
+            if let Err(e) = bridge::write(path, AUDIO_METERS_FILE, &m) {
+                log::debug!("sound: meters file: {e:#}");
+            }
+        }
+        std::thread::sleep(audio_control::METER_INTERVAL.saturating_sub(t.elapsed()));
+    }
 }
 
 fn run(path: &Path) {
     let mut reader = RequestReader::new(path, AUDIO_REQUEST_FILE);
     let mut written = Instant::now() - Duration::from_secs(10);
     let mut dirty_since: Option<Instant> = None;
+    let mut mixer_dirty_since: Option<Instant> = None;
     loop {
         std::thread::sleep(Duration::from_millis(150));
         if let Some(req) = reader.poll::<AudioRequest>(path, AUDIO_REQUEST_FILE) {
@@ -71,6 +123,18 @@ fn run(path: &Path) {
         if dirty_since.is_some_and(|t| t.elapsed() >= Duration::from_millis(600)) {
             dirty_since = None;
             save_levels();
+        }
+        let routes = ROUTES_DIRTY.swap(false, Ordering::Relaxed);
+        let mixer = MIXER_DIRTY.swap(false, Ordering::Relaxed);
+        if routes || mixer {
+            mixer_dirty_since = Some(Instant::now());
+            PENDING_SAVE.fetch_or(u8::from(routes) | (u8::from(mixer) << 1), Ordering::Relaxed);
+            // The status shows the new strips soon.
+            written = written.min(Instant::now() - Duration::from_millis(1_500));
+        }
+        if mixer_dirty_since.is_some_and(|t| t.elapsed() >= Duration::from_millis(600)) {
+            mixer_dirty_since = None;
+            save_mixer(PENDING_SAVE.swap(0, Ordering::Relaxed));
         }
         if REFRESH.swap(false, Ordering::Relaxed) {
             written = Instant::now() - Duration::from_millis(1_700);
@@ -109,6 +173,8 @@ fn apply_request(req: AudioRequest) {
         AudioRequest::DeviceMute { uid, muted } => h.set_device_mute(&uid, muted),
         AudioRequest::AppVolume { bundle_id, volume } => h.set_app_volume(&bundle_id, volume),
         AudioRequest::AppMute { bundle_id, muted } => h.set_app_mute(&bundle_id, muted),
+        AudioRequest::SetMixer { mixer } => h.set_mixer(mixer),
+        AudioRequest::SetRoute { bundle_id, route } => h.set_route(&bundle_id, route),
         AudioRequest::RequestPermission => Ok(()),
     };
     set_error(r);
@@ -133,6 +199,46 @@ fn save_levels() {
     }
 }
 
+/// Bit 0: routes, bit 1: the mixer (what [`save_mixer`] writes).
+static PENDING_SAVE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Save the running module's routes and / or mixer (`what`: bit 0 routes,
+/// bit 1 mixer) into `audio.appRoutes` / `audio.mixer`. Only the part that
+/// changed through the handle is written, so a newer edit the settings
+/// window saved to the other part is never overwritten.
+fn save_mixer(what: u8) {
+    let (routes, mixer) = {
+        let guard = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref().and_then(|r| r.audio.as_ref()) {
+            Some(h) => (h.routes(), h.mixer()),
+            None => return,
+        }
+    };
+    let cur = crate::current_config().audio;
+    let routes = (what & 1 != 0 && cur.app_routes != routes).then_some(routes);
+    let mixer = (what & 2 != 0 && cur.mixer != mixer).then_some(mixer);
+    if routes.is_none() && mixer.is_none() {
+        return;
+    }
+    let r = crate::edit_config(|c| {
+        if let Some(r) = routes {
+            c.audio.app_routes = r;
+        }
+        if let Some(m) = mixer {
+            c.audio.mixer = m;
+        }
+    });
+    if let Err(e) = r {
+        log::warn!("sound: saving routes / mixer: {e:#}");
+    }
+}
+
+/// Whether the apps playing audio should be listed (per-app volume, a
+/// route or the mixer is on, or the settings window shows Sound).
+fn wants_apps(c: &audio_control::Config) -> bool {
+    c.per_app_volume || !c.app_routes.is_empty() || c.mixer.enabled || WATCHED.load(Ordering::Relaxed)
+}
+
 /// What the tray and the status file show.
 pub(crate) fn snapshot(h: &audio_control::Handle, with_apps: bool) -> AudioStatus {
     AudioStatus {
@@ -143,6 +249,7 @@ pub(crate) fn snapshot(h: &audio_control::Handle, with_apps: bool) -> AudioStatu
         per_app_supported: audio_control::per_app_volume_supported(),
         capture_permission: h.capture_permission(),
         error: LAST_ERROR.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+        mixer: Some(h.mixer_state()),
     }
 }
 
@@ -169,8 +276,9 @@ fn write_status(path: &Path) {
             *LATEST.lock().unwrap_or_else(|p| p.into_inner()) = None;
             return;
         };
-        let per_app = h.config().per_app_volume;
-        let st = snapshot(h, per_app);
+        let c = h.config();
+        let per_app = c.per_app_volume;
+        let st = snapshot(h, wants_apps(&c));
         *LATEST.lock().unwrap_or_else(|p| p.into_inner()) = Some((st.clone(), per_app));
         st
     };

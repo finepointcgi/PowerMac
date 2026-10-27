@@ -46,6 +46,14 @@ pub enum Page {
     MenuBar,
     /// Saved desktops of apps and windows.
     Workspaces,
+    /// Sound's mixer matrix: sources → outputs, EQ, limiter, meters.
+    Mixer,
+    /// Battery health and the charge limit.
+    Battery,
+    /// Hotkeys, mouse buttons and trackpad gestures that run actions.
+    Automation,
+    /// Live per-app connections and the firewall rules model.
+    Network,
     /// The first-run setup (welcome, features, permissions, tips). Not in
     /// the sidebar: it takes the whole window.
     Welcome,
@@ -53,7 +61,7 @@ pub enum Page {
 
 impl Page {
     /// Sidebar order (grouped by [`Page::section`]).
-    pub const ALL: [Page; 21] = [
+    pub const ALL: [Page; 25] = [
         Page::General,
         Page::FancyZones,
         Page::WindowSwitcher,
@@ -66,14 +74,18 @@ impl Page {
         Page::ScrollReverser,
         Page::MouseUtils,
         Page::KeyboardManager,
+        Page::Automation,
         Page::TextExpander,
         Page::Displays,
         Page::Sound,
+        Page::Mixer,
+        Page::Battery,
         Page::Awake,
         Page::ClipboardHistory,
         Page::ColorPicker,
         Page::TextExtractor,
         Page::FileTools,
+        Page::Network,
         Page::Mwb,
     ];
 
@@ -100,6 +112,10 @@ impl Page {
             Page::TextExpander => "Text Expansion",
             Page::MenuBar => "Menu Bar",
             Page::Workspaces => "Workspaces",
+            Page::Mixer => "Mixer",
+            Page::Battery => "Battery",
+            Page::Automation => "Automation",
+            Page::Network => "Network",
             Page::Welcome => "Welcome",
         }
     }
@@ -136,8 +152,10 @@ impl Page {
             | Page::ScrollReverser
             | Page::MouseUtils
             | Page::KeyboardManager
+            | Page::Automation
             | Page::TextExpander => "Mouse & Keyboard",
-            Page::Displays | Page::Sound | Page::Awake => "Displays & Power",
+            Page::Displays | Page::Sound | Page::Mixer | Page::Battery | Page::Awake => "Displays & Power",
+            Page::Network => "Security & Network",
             Page::ClipboardHistory | Page::ColorPicker | Page::TextExtractor | Page::FileTools => {
                 "Productivity"
             }
@@ -643,8 +661,74 @@ pub fn hotkey_uses(c: &AppConfig) -> Vec<HotkeyUse> {
         let h = wsp.hotkey;
         v.push(hk_use(Page::Workspaces, "Workspaces editor", h.win, h.ctrl, h.alt, h.shift, h.code));
     }
+    if km.enabled {
+        for (i, h) in km.hotkeys.iter().enumerate() {
+            if !h.enabled || h.app.is_some() {
+                continue;
+            }
+            let combo = match h.from {
+                keyboard_manager::Trigger::Key(k) => Combo { vk: k, ..Default::default() },
+                keyboard_manager::Trigger::Shortcut(s) => shortcut_combo(&s),
+            };
+            v.push(HotkeyUse { page: Page::Automation, name: format!("Hotkey {} ({})", i + 1, h.action.label()), combo });
+        }
+    }
     v.retain(|u| u.combo.vk != 0);
     v
+}
+
+/// One automation hotkey being edited: the trigger as typed / recorded.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HotkeyRow {
+    /// "F13", "Ctrl+Alt+B".
+    pub from: String,
+    pub action: keyboard_manager::automation::Action,
+    /// Only while this app is in front (shortcuts only); empty = every app.
+    pub app: String,
+    pub enabled: bool,
+}
+
+impl HotkeyRow {
+    pub fn new() -> Self {
+        HotkeyRow {
+            from: String::new(),
+            action: keyboard_manager::automation::Action::Shell(Default::default()),
+            app: String::new(),
+            enabled: true,
+        }
+    }
+
+    pub fn from_hotkey(h: &keyboard_manager::Hotkey) -> Self {
+        HotkeyRow { from: h.from.to_string(), action: h.action.clone(), app: h.app.clone().unwrap_or_default(), enabled: h.enabled }
+    }
+
+    /// Nothing recorded yet (not saved).
+    pub fn is_blank(&self) -> bool {
+        self.from.trim().is_empty()
+    }
+
+    pub fn hotkey(&self) -> Result<keyboard_manager::Hotkey, String> {
+        let from: keyboard_manager::Trigger = self.from.trim().parse()?;
+        let app = self.app.trim();
+        if !app.is_empty() && matches!(from, keyboard_manager::Trigger::Key(_)) {
+            return Err(format!("{from} is a single key; only shortcuts can be limited to one app."));
+        }
+        if let keyboard_manager::automation::Action::Shortcut { keys } = &self.action {
+            parse_combo(keys).map_err(|e| format!("the shortcut to press: {e}"))?;
+        }
+        Ok(keyboard_manager::Hotkey {
+            from,
+            action: self.action.clone(),
+            app: (!app.is_empty()).then(|| app.to_string()),
+            enabled: self.enabled,
+        })
+    }
+}
+
+impl Default for HotkeyRow {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Shortcuts used twice. Each clash is reported once, on the page of the
@@ -852,6 +936,8 @@ pub struct AppDraft {
     pub display_hotkeys: [String; 7],
     /// Workspaces: the shortcut that opens the editor.
     pub workspaces_hotkey: String,
+    /// Automation hotkeys (`keyboardManager.hotkeys`), with the trigger as text.
+    pub hotkeys: Vec<HotkeyRow>,
     /// Shortcuts of other files (FancyZones), for the conflict check.
     #[serde(skip)]
     pub external_hotkeys: Vec<HotkeyUse>,
@@ -893,6 +979,7 @@ impl AppDraft {
                 let h = cfg.workspaces.hotkey;
                 format_hk(h.win, h.ctrl, h.alt, h.shift, h.code)
             },
+            hotkeys: k.hotkeys.iter().map(HotkeyRow::from_hotkey).collect(),
             external_hotkeys: Vec::new(),
             cfg,
         }
@@ -969,12 +1056,28 @@ impl AppDraft {
             Ok(s) => km.paste_plain_text.hotkey = s,
             Err(e) => errs.push(problem(Page::KeyboardManager, format!("Paste as plain text shortcut: {e}"))),
         }
+        km.hotkeys.clear();
+        for (i, h) in self.hotkeys.iter().enumerate() {
+            if h.is_blank() {
+                continue;
+            }
+            match h.hotkey() {
+                Ok(hk) => km.hotkeys.push(hk),
+                Err(e) => errs.push(problem(Page::Automation, format!("Hotkey {}: {e}", i + 1))),
+            }
+        }
         if km.windows_style.excluded_apps.iter().any(|a| a.trim().is_empty()) {
             errs.push(problem(Page::KeyboardManager, "Windows-style keys, excluded apps: remove the empty entry."));
         }
 
         // Mouse
         for m in &c.mouse_tuning.buttons.mappings {
+            if let mouse_tuning::ButtonAction::Action(keyboard_manager::automation::Action::Shortcut { keys }) = &m.action {
+                if let Err(e) = keyboard_manager::keys::parse_combo(keys) {
+                    let name = MAPPABLE_BUTTONS.iter().find(|(b, _)| *b == m.button).map(|(_, n)| *n).unwrap_or("Button");
+                    errs.push(problem(Page::Automation, format!("{name}: {e}")));
+                }
+            }
             if let mouse_tuning::ButtonAction::Keystroke { keys } = &m.action {
                 if let Err(e) = mouse_tuning::keys::parse_combo(keys) {
                     let name = MAPPABLE_BUTTONS.iter().find(|(b, _)| *b == m.button).map(|(_, n)| *n).unwrap_or("Button");
@@ -1288,6 +1391,11 @@ mod tests {
         }
         assert_eq!(Page::from_name("mwb"), Some(Page::Mwb));
         assert_eq!(Page::from_name("sound"), Some(Page::Sound));
+        for (n, p) in [("mixer", Page::Mixer), ("battery", Page::Battery), ("automation", Page::Automation), ("network", Page::Network)] {
+            assert_eq!(Page::from_name(n), Some(p));
+            assert!(p.section().is_some());
+        }
+        assert_eq!(Page::Network.section(), Some("Security & Network"));
         assert_eq!(Page::from_name(""), None);
         assert_eq!(Page::from_name("teleporter"), None);
         for p in Page::ALL {
@@ -1674,6 +1782,55 @@ mod tests {
         assert_eq!(back.audio, c.audio);
         assert_eq!(back.dock_previews, c.dock_previews);
         assert_eq!(back.text_expander, c.text_expander);
+    }
+
+    /// Automation hotkeys, routes, the mixer, the battery limit and
+    /// gestures survive the draft; hotkeys join the global shortcut check.
+    #[test]
+    fn automation_sections_round_trip_and_hotkeys_conflict() {
+        use keyboard_manager::automation::Action;
+        let mut c = AppConfig::with_new_key();
+        c.keyboard_manager.enabled = true;
+        c.keyboard_manager.hotkeys.push(keyboard_manager::Hotkey {
+            from: "Ctrl+Alt+B".parse().unwrap(),
+            action: Action::Shell(keyboard_manager::ShellAction { command: "make".into(), ..Default::default() }),
+            app: None,
+            enabled: true,
+        });
+        c.keyboard_manager.hotkeys.push(keyboard_manager::Hotkey {
+            from: "F13".parse().unwrap(),
+            action: Action::OpenUri { uri: "https://example.com".into() },
+            app: None,
+            enabled: false,
+        });
+        c.audio.app_routes.insert("com.spotify.client".into(), audio_control::AppRoute::to(audio_control::DeviceMatch::name("AirPods")));
+        c.audio.mixer.enabled = true;
+        c.battery_limit.limit_percent = 75;
+        c.gestures.bindings.push(gestures::GestureBinding::new("3-finger-tap".parse().unwrap(), Action::Shortcut { keys: "Cmd+W".into() }));
+        let mut d = AppDraft::new(c.clone(), now());
+        assert_eq!(d.hotkeys.len(), 2);
+        assert_eq!(d.hotkeys[0].from, c.keyboard_manager.hotkeys[0].from.to_string());
+        let back = d.build(now()).unwrap();
+        assert_eq!(back.keyboard_manager.hotkeys, c.keyboard_manager.hotkeys);
+        assert_eq!(back.audio, c.audio);
+        assert_eq!(back.battery_limit, c.battery_limit);
+        assert_eq!(back.gestures, c.gestures);
+        // In the registry (enabled, global ones only).
+        let uses = hotkey_uses(&back);
+        assert_eq!(uses.iter().filter(|u| u.page == Page::Automation).count(), 1);
+        // The same shortcut as Paste as plain text is a conflict.
+        d.hotkeys[0].from = d.paste_hotkey.clone();
+        let errs = d.build(now()).unwrap_err();
+        assert!(errs.iter().any(|e| e.page == Page::Automation && e.message.contains("already used")), "{errs:?}");
+        // A blank row isn't saved; a bad one blocks saving.
+        d.hotkeys[0].from = String::new();
+        assert_eq!(d.build(now()).unwrap().keyboard_manager.hotkeys.len(), 1);
+        d.hotkeys[0].from = "Ctrl+Nope".into();
+        assert!(d.build(now()).unwrap_err().iter().any(|e| e.page == Page::Automation));
+        // Single keys can't be limited to an app.
+        d.hotkeys[0].from = "F14".into();
+        d.hotkeys[0].app = "com.apple.Terminal".into();
+        assert!(d.build(now()).is_err());
     }
 
     #[test]

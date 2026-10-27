@@ -20,11 +20,13 @@
 | `scroll-reverser` | Device classification, wheel reversal, smooth scrolling |
 | `mouse-tuning` | Pointer acceleration / speed, button remapping |
 | `mouse-utils` | Find My Mouse, highlighter, crosshairs |
-| `keyboard-manager` | Remap state machine, paste as plain text, Windows-style keys, Hyper key, PowerToys importer |
+| `keyboard-manager` | Remap state machine, paste as plain text, Windows-style keys, Hyper key, hotkeys, the shared automation actions (shell commands, …), PowerToys importer |
 | `text-expander` | Snippet expansion, variables, espanso import |
 | `display-control` | DDC/CI, native and gamma brightness, media-key takeover, OSD |
 | `display-scaling` | Display modes, virtual HiDPI displays, override plists |
-| `audio-control` | Default-device rules, device levels, per-app volume, installing and configuring the virtual audio driver |
+| `audio-control` | Default-device rules, device levels, per-app volume, per-app routing and the mixer matrix (gain/mute/solo, EQ, limiter, meters), installing and configuring the virtual audio driver |
+| `battery-limit` | Battery status, the charge-limit policy and strategies (inhibit, firmware range, limit via discharge), the privileged SMC helper and its installer |
+| `gestures` | Multi-finger trackpad gestures (MultitouchSupport reader, recognizer) that run automation actions |
 | `pm-audio-driver` | PowerMac Audio: Core Audio HAL plug-in (cdylib in `PowerMac Audio.driver`) with loopback virtual devices |
 | `clipboard-history` | Clipboard watcher, history store, picker |
 | `color-picker` | Screen color sampling, PowerToys color formats, editor |

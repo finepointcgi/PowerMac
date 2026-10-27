@@ -209,7 +209,41 @@ fn module_rows(c: &AppConfig, r: &Running, ws_count: usize) -> Vec<ModuleRow> {
             &[],
             r.display.as_ref().map(|d| plural(d.displays().len(), "display")).unwrap_or_default(),
         ),
-        row("sound", "Sound", c.audio.enabled, r.audio.is_some(), &[], String::new()),
+        row(
+            "sound",
+            "Sound",
+            c.audio.enabled,
+            r.audio.is_some(),
+            &[],
+            r.audio
+                .as_ref()
+                .map(|a| {
+                    let st = a.mixer_state();
+                    let routes = st.routes.iter().filter(|r| r.active).count();
+                    match (st.running, routes) {
+                        (true, 0) => "mixer running".to_string(),
+                        (true, n) => format!("mixer running, {}", plural(n, "app route")),
+                        _ => String::new(),
+                    }
+                })
+                .unwrap_or_default(),
+        ),
+        row(
+            "battery",
+            "Battery charge limit",
+            c.battery_limit.enabled,
+            r.battery.is_some(),
+            &[],
+            r.battery.as_ref().map(|b| crate::battery_glue::status_line(&b.status())).unwrap_or_default(),
+        ),
+        row(
+            "automation",
+            "Trackpad gestures",
+            c.gestures.enabled && !c.gestures.bindings.is_empty(),
+            r.gestures.as_ref().is_some_and(|g| !matches!(g.status(), gestures::Status::Unavailable(_))),
+            &[],
+            plural(c.gestures.bindings.iter().filter(|b| b.enabled).count(), "gesture"),
+        ),
         row("awake", "Awake", c.awake.enabled, r.awake.is_some(), &[], if awake_active { "keeping the Mac awake".into() } else { "idle".into() }),
         row("clipboard-history", "Clipboard History", c.clipboard_history.enabled, r.clipboard.is_some(), &[], String::new()),
         row("color-picker", "Color Picker", c.color_picker.enabled, r.color.is_some(), &[], String::new()),

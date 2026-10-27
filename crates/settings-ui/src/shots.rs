@@ -372,6 +372,7 @@ fn shots() {
         per_app_supported: true,
         capture_permission: audio_control::CapturePermission::Granted,
         error: None,
+        mixer: None,
     };
     let item = |id: &str, owner: &str, title: Option<&str>, sec: menubar_manager::Section, system: bool| menubar_manager::MenuBarItem {
         id: id.into(),
@@ -855,5 +856,351 @@ fn setup_shots() {
             }
         }
     }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Routing, mixer, battery, network and automation samples (shared by the
+/// page shots).
+fn int5_config(cfg: &mut pm_config::AppConfig) {
+    use audio_control::{AppRoute, DeviceMatch, EqConfig, Effects, LimiterConfig, MixOutput, MixSource, SourceKind};
+    use keyboard_manager::automation::{Action, NotifyWhen, ShellAction};
+    cfg.audio.enabled = true;
+    cfg.audio.app_routes.insert(
+        "com.spotify.client".into(),
+        AppRoute { name: "Spotify".into(), ..AppRoute::to(DeviceMatch::uid("airpods", "Ada's AirPods Pro")) },
+    );
+    cfg.audio.app_routes.insert(
+        "com.google.Chrome".into(),
+        AppRoute {
+            name: "Google Chrome".into(),
+            outputs: vec![DeviceMatch::uid("PowerMacAudio:mix1", "PowerMac Mix 1"), DeviceMatch::uid("studio-uid", "Studio Display Speakers")],
+            keep_default: true,
+            gain_db: -3.0,
+            enabled: true,
+        },
+    );
+    let mut eq = EqConfig::flat(5);
+    eq.bands[0].gain_db = -4.0;
+    eq.bands[2].gain_db = 3.5;
+    eq.bands[2].q = 1.4;
+    eq.bands[4].gain_db = 2.0;
+    cfg.audio.mixer = audio_control::Mixer {
+        enabled: true,
+        sources: vec![
+            MixSource { id: "music".into(), name: "Spotify".into(), kind: SourceKind::App { bundle_id: "com.spotify.client".into() }, gain_db: -6.0, ..Default::default() },
+            MixSource {
+                id: "mic".into(),
+                name: "Shure MV7".into(),
+                kind: SourceKind::Input { device: DeviceMatch::uid("mv7", "Shure MV7") },
+                mono: true,
+                solo: false,
+                gain_db: 2.5,
+                effects: Effects { gain_db: 4.0, eq, limiter: LimiterConfig { enabled: true, ceiling_db: -1.5, ..Default::default() } },
+                ..Default::default()
+            },
+            MixSource { id: "game".into(), name: "PowerMac Audio".into(), kind: SourceKind::Loopback { device: DeviceMatch::uid("PowerMacAudio:main", "PowerMac Audio") }, muted: true, ..Default::default() },
+        ],
+        outputs: vec![
+            MixOutput { id: "spk".into(), name: "Studio Display".into(), device: DeviceMatch::uid("studio-uid", "Studio Display Speakers"), ..Default::default() },
+            MixOutput { id: "stream".into(), name: "Stream mix".into(), device: DeviceMatch::uid("PowerMacAudio:mix1", "PowerMac Mix 1"), gain_db: -2.0, ..Default::default() },
+        ],
+        sends: Vec::new(),
+    };
+    let m = &mut cfg.audio.mixer;
+    m.set_send("music", "spk", 0.0, false);
+    m.set_send("music", "stream", -9.0, false);
+    m.set_send("mic", "stream", 0.0, false);
+    m.set_send("game", "spk", 0.0, true);
+    m.set_send("game", "stream", -3.0, false);
+    cfg.battery_limit.enabled = true;
+    cfg.battery_limit.limit_percent = 80;
+    cfg.keyboard_manager.enabled = true;
+    cfg.keyboard_manager.hotkeys = vec![
+        keyboard_manager::Hotkey {
+            from: "Ctrl+Alt+B".parse().unwrap(),
+            action: Action::Shell(ShellAction {
+                name: "Build app".into(),
+                command: "make -C ~/src/app".into(),
+                wait: true,
+                timeout_ms: Some(120_000),
+                notify: NotifyWhen::OnFailure,
+                env: [("PROFILE".to_string(), "release".to_string())].into_iter().collect(),
+                ..Default::default()
+            }),
+            app: None,
+            enabled: true,
+        },
+        keyboard_manager::Hotkey { from: "F13".parse().unwrap(), action: Action::OpenUri { uri: "https://github.com/notifications".into() }, app: None, enabled: true },
+        keyboard_manager::Hotkey {
+            from: "Cmd+Shift+L".parse().unwrap(),
+            action: Action::Text { text: "ls -la\n".into() },
+            app: Some("com.apple.Terminal".into()),
+            enabled: false,
+        },
+    ];
+    cfg.mouse_tuning.enabled = true;
+    cfg.mouse_tuning.buttons.mappings = vec![
+        mouse_tuning::ButtonMapping { button: mouse_tuning::button::MIDDLE, action: mouse_tuning::ButtonAction::MissionControl },
+        mouse_tuning::ButtonMapping {
+            button: mouse_tuning::button::BACK,
+            action: mouse_tuning::ButtonAction::Action(Action::Shell(ShellAction { command: "open -a Notes".into(), ..Default::default() })),
+        },
+    ];
+    cfg.gestures.bindings = vec![
+        gestures::GestureBinding::new("3-finger-tap".parse().unwrap(), Action::Shortcut { keys: "Cmd+W".into() }),
+        gestures::GestureBinding::new(
+            "4-finger-swipe-down".parse().unwrap(),
+            Action::Shell(ShellAction { name: "Sleep display".into(), command: "pmset displaysleepnow".into(), ..Default::default() }),
+        ),
+        gestures::GestureBinding { app: Some("com.google.Chrome".into()), ..gestures::GestureBinding::new("3-finger-click".parse().unwrap(), Action::Shortcut { keys: "Cmd+Shift+T".into() }) },
+    ];
+}
+
+fn int5_audio_status() -> pm_config::bridge::AudioStatus {
+    use audio_control::{MixerState, RouteStatus, RouteTarget, StripKind, StripState, StripStatus, Transport as T};
+    let dev = |uid: &str, name: &str, t: T, def: bool| audio_control::AudioDevice {
+        uid: uid.into(),
+        name: name.into(),
+        transport: t,
+        is_default: def,
+        is_default_system: def,
+        channels: 2,
+        volume: Some(0.5),
+        muted: Some(false),
+    };
+    let strip = |id: &str, name: &str, kind: StripKind, state: StripState| StripStatus { id: id.into(), name: name.into(), kind, state, device_uid: None, device_name: None };
+    pm_config::bridge::AudioStatus {
+        running: true,
+        outputs: vec![
+            dev("studio-uid", "Studio Display Speakers", T::Usb, true),
+            dev("builtin-out", "MacBook Pro Speakers", T::BuiltIn, false),
+            dev("airpods", "Ada's AirPods Pro", T::Bluetooth, false),
+            dev("PowerMacAudio:main", "PowerMac Audio", T::Virtual, false),
+            dev("PowerMacAudio:mix1", "PowerMac Mix 1", T::Virtual, false),
+        ],
+        inputs: vec![
+            dev("mv7", "Shure MV7", T::Usb, false),
+            dev("builtin-in", "MacBook Pro Microphone", T::BuiltIn, true),
+            dev("PowerMacAudio:main", "PowerMac Audio", T::Virtual, false),
+        ],
+        apps: vec![
+            audio_control::AudioApp { pid: 10, pids: vec![10], bundle_id: "com.spotify.client".into(), name: "Spotify".into(), volume: 1.0, muted: false, playing: true },
+            audio_control::AudioApp { pid: 11, pids: vec![11], bundle_id: "com.google.Chrome".into(), name: "Google Chrome".into(), volume: 1.0, muted: false, playing: true },
+            audio_control::AudioApp { pid: 12, pids: vec![12], bundle_id: "us.zoom.xos".into(), name: "zoom.us".into(), volume: 1.0, muted: false, playing: false },
+        ],
+        per_app_supported: true,
+        capture_permission: audio_control::CapturePermission::Granted,
+        error: None,
+        mixer: Some(MixerState {
+            supported: true,
+            app_sources_supported: true,
+            running: true,
+            sample_rate: Some(48_000.0),
+            clock_device: Some("studio-uid".into()),
+            capture_permission: audio_control::CapturePermission::Granted,
+            sources: vec![
+                strip("music", "Spotify", StripKind::App, StripState::Active),
+                strip("mic", "Shure MV7", StripKind::Input, StripState::Active),
+                strip("game", "PowerMac Audio", StripKind::Loopback, StripState::Active),
+            ],
+            outputs: vec![
+                strip("spk", "Studio Display", StripKind::Output, StripState::Active),
+                strip(
+                    "stream",
+                    "Stream mix",
+                    StripKind::Output,
+                    StripState::Unavailable { reason: "PowerMac Mix 1 runs at 44100 Hz and the mixer at 48000 Hz (set them to the same rate in Audio MIDI Setup)".into() },
+                ),
+            ],
+            routes: vec![
+                RouteStatus {
+                    bundle_id: "com.spotify.client".into(),
+                    name: "Spotify".into(),
+                    enabled: true,
+                    active: true,
+                    keep_default: false,
+                    targets: vec![RouteTarget { uid: Some("airpods".into()), name: "Ada's AirPods Pro".into(), available: true, reason: None }],
+                    state: StripState::Active,
+                    message: None,
+                },
+                RouteStatus {
+                    bundle_id: "com.google.Chrome".into(),
+                    name: "Google Chrome".into(),
+                    enabled: true,
+                    active: false,
+                    keep_default: true,
+                    targets: vec![
+                        RouteTarget { uid: Some("PowerMacAudio:mix1".into()), name: "PowerMac Mix 1".into(), available: false, reason: Some("runs at another sample rate".into()) },
+                        RouteTarget { uid: Some("studio-uid".into()), name: "Studio Display Speakers".into(), available: true, reason: None },
+                    ],
+                    state: StripState::Waiting { reason: "the target device runs at another sample rate".into() },
+                    message: None,
+                },
+            ],
+            errors: Vec::new(),
+            callbacks: 48_211,
+        }),
+    }
+}
+
+fn int5_meters() -> audio_control::Meters {
+    let m = |id: &str, peak: [f32; 2], rms: [f32; 2], lim: f32, clips: u32| audio_control::MeterReading { id: id.into(), peak, rms, limiter_reduction_db: lim, clips };
+    audio_control::Meters {
+        sources: vec![m("music", [0.62, 0.58], [0.31, 0.29], 0.0, 0), m("mic", [0.89, 0.89], [0.42, 0.42], 2.4, 0), m("game", [0.2, 0.18], [0.08, 0.07], 0.0, 0)],
+        outputs: vec![m("spk", [0.7, 0.66], [0.36, 0.34], 0.0, 0), m("stream", [1.0, 0.97], [0.55, 0.52], 0.0, 3)],
+    }
+}
+
+fn int5_battery(strategy: battery_limit::Strategy, native: Option<u8>) -> battery_limit::BatteryStatus {
+    battery_limit::BatteryStatus {
+        battery: battery_limit::BatteryReading {
+            has_battery: true,
+            percent: Some(78),
+            charging: false,
+            plugged: true,
+            adapter_watts: Some(96),
+            cycles: Some(312),
+            health_percent: Some(91.4),
+            design_capacity_mah: Some(8579),
+            max_capacity_mah: Some(7841),
+            temperature_c: Some(31.2),
+            time_remaining_min: None,
+            amperage_ma: Some(0),
+        },
+        inhibited: strategy != battery_limit::Strategy::LimitViaDischarge,
+        discharging: strategy == battery_limit::Strategy::LimitViaDischarge,
+        helper_installed: true,
+        helper_running: true,
+        scheme: Some(if strategy == battery_limit::Strategy::LimitViaDischarge { "CHIE".into() } else { "CHTE+CHIE".into() }),
+        charge_control: Some(strategy != battery_limit::Strategy::LimitViaDischarge),
+        strategy: Some(strategy),
+        strategy_label: strategy.label().into(),
+        strategy_note: strategy.note().into(),
+        native_limit_percent: native,
+        reason: "at limit (80 %)".into(),
+        supported: true,
+        ..Default::default()
+    }
+}
+
+fn int5_network() -> (net_monitor::Snapshot, net_monitor::RuleSet) {
+    use net_monitor::{Protocol, Socket, TcpState};
+    use std::net::SocketAddr;
+    let p = |pid: u32, name: &str, path: &str| net_monitor::ProcessInfo { pid, name: name.into(), path: Some(path.into()) };
+    let a = |s: &str| -> SocketAddr { s.parse().unwrap() };
+    let tcp = |pid: u32, l: &str, r: &str, st: TcpState| Socket { pid, protocol: Protocol::Tcp, local: a(l), remote: Some(a(r)), state: Some(st) };
+    let snap = net_monitor::Snapshot::new(
+        vec![
+            p(812, "Google Chrome Helper", "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper"),
+            p(901, "Spotify", "/Applications/Spotify.app/Contents/MacOS/Spotify"),
+            p(950, "curl", "/usr/bin/curl"),
+            p(990, "Dropbox", "/Applications/Dropbox.app/Contents/MacOS/Dropbox"),
+        ],
+        vec![
+            tcp(812, "192.168.1.5:50001", "142.250.72.14:443", TcpState::Established),
+            tcp(812, "192.168.1.5:50002", "151.101.1.69:443", TcpState::Established),
+            Socket { pid: 812, protocol: Protocol::Udp, local: a("192.168.1.5:61022"), remote: Some(a("142.250.72.14:443")), state: None },
+            tcp(901, "192.168.1.5:50110", "35.186.224.25:4070", TcpState::Established),
+            tcp(901, "192.168.1.5:50111", "192.168.1.20:57621", TcpState::Established),
+            tcp(950, "192.168.1.5:60131", "93.184.215.14:80", TcpState::SynSent),
+            tcp(990, "127.0.0.1:17600", "127.0.0.1:50999", TcpState::Established),
+            tcp(990, "192.168.1.5:50200", "162.125.19.131:443", TcpState::Established),
+            Socket { pid: 990, protocol: Protocol::Tcp, local: a("0.0.0.0:17500"), remote: None, state: Some(TcpState::Listen) },
+        ],
+        342,
+    );
+    let mut rules = net_monitor::RuleSet::default();
+    rules.add(net_monitor::Rule { created: 1, ..net_monitor::Rule::for_app(net_monitor::AppMatch::Name("curl".into()), net_monitor::Action::Deny) });
+    rules.add(net_monitor::Rule {
+        action: net_monitor::Action::Allow,
+        app: net_monitor::AppMatch::Bundle("/Applications/Spotify.app".into()),
+        remote: net_monitor::RemoteMatch::LocalNetwork,
+        direction: net_monitor::rules::DirectionMatch::Both,
+        note: "Spotify Connect".into(),
+        created: 1,
+        ..Default::default()
+    });
+    rules.add(net_monitor::Rule {
+        action: net_monitor::Action::Ask,
+        app: net_monitor::AppMatch::Bundle("/Applications/Dropbox.app".into()),
+        remote: net_monitor::RemoteMatch::Network { addr: "162.125.0.0".parse().unwrap(), prefix: 16 },
+        ports: net_monitor::rules::Ports::parse("443").unwrap(),
+        protocol: Some(net_monitor::Protocol::Tcp),
+        source: Some("Dropbox telemetry".into()),
+        created: 1,
+        ..Default::default()
+    });
+    (snap, rules)
+}
+
+/// The Sound page's App routing card, the Mixer, Battery, Automation and
+/// Network pages, light and dark.
+#[test]
+fn int5_shots() {
+    if std::env::var_os("PM_UI_SHOTS").is_none() && std::env::var_os("PM_UI_SHOTS_ALWAYS").is_none() {
+        return;
+    }
+    if !has_gpu() {
+        return;
+    }
+    let dir = out_dir();
+    let d = scratch("int5");
+    let path = d.join("config.json");
+    let mut cfg = pm_config::AppConfig::with_new_key();
+    int5_config(&mut cfg);
+    cfg.save(&path).unwrap();
+    let audio = int5_audio_status();
+    let gst = pm_config::bridge::GesturesStatus { state: "running".into(), detail: "1 trackpad".into(), devices: 1, ..Default::default() };
+    let app_status = pm_config::bridge::AppStatus { version: "1.0.0".into(), ..Default::default() };
+    let fresh = || {
+        pm_config::bridge::write(&path, pm_config::bridge::AUDIO_STATUS_FILE, &audio).unwrap();
+        pm_config::bridge::write(&path, pm_config::bridge::APP_STATUS_FILE, &app_status).unwrap();
+        pm_config::bridge::write(&path, pm_config::bridge::GESTURES_STATUS_FILE, &gst).unwrap();
+    };
+    let (snap, rules) = int5_network();
+    for (theme, tn) in [(egui::Theme::Light, "light"), (egui::Theme::Dark, "dark")] {
+        for (size, suffix) in [(win(1100.0, 780.0), ""), (win(1100.0, 2600.0), "-full")] {
+            fresh();
+            let app = SettingsApp::new(path.clone());
+            let mut h = Harness::builder()
+                .with_size(size)
+                .with_theme(theme)
+                .with_accessibility_check(false)
+                .wgpu()
+                .build_ui_state(|ui, app: &mut SettingsApp| app.draw(ui), app);
+            h.ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
+            h.state_mut().set_alt_tab_for_test(false, vec![]);
+            h.state_mut().set_meters_for_test(int5_meters());
+            h.state_mut().set_battery_for_test(Some(int5_battery(battery_limit::Strategy::Inhibit, None)));
+            h.state_mut().set_gestures_for_test(Some(gst.clone()), &[]);
+            let shot = |h: &mut Harness<'_, SettingsApp>, page: Page, name: &str| {
+                fresh();
+                h.state_mut().set_page(page);
+                h.state_mut().reload_status_for_test();
+                save(h, &dir, &format!("int5-{name}-{tn}{suffix}"));
+            };
+            shot(&mut h, Page::Sound, "sound");
+            shot(&mut h, Page::Mixer, "mixer");
+            h.state_mut().select_strip_for_test(Some("src:mic"));
+            shot(&mut h, Page::Mixer, "mixer-fx");
+            h.state_mut().select_strip_for_test(None);
+            shot(&mut h, Page::Battery, "battery");
+            h.state_mut().set_battery_for_test(Some(int5_battery(battery_limit::Strategy::LimitViaDischarge, Some(80))));
+            shot(&mut h, Page::Battery, "battery-discharge");
+            shot(&mut h, Page::Automation, "automation");
+            h.state_mut().set_gestures_for_test(Some(gst.clone()), &["hk:0", "g:1", &format!("btn:{}", mouse_tuning::button::BACK)]);
+            h.state_mut().set_test_result_for_test("hk:0", true, "exit 0: make: Nothing to be done for 'all'.", "make: Nothing to be done for 'all'.\n");
+            shot(&mut h, Page::Automation, "automation-edit");
+            for (view, name) in [(0u8, "network"), (1, "network-rules"), (2, "network-audit"), (3, "network-rule-edit")] {
+                h.state_mut().set_network_for_test(snap.clone(), rules.clone(), view);
+                shot(&mut h, Page::Network, name);
+            }
+        }
+    }
+    // Looking didn't change the config.
+    let back = pm_config::AppConfig::load_or_default(&path).unwrap();
+    assert_eq!(back.audio, cfg.audio);
+    assert_eq!(back.keyboard_manager.hotkeys, cfg.keyboard_manager.hotkeys);
+    assert_eq!(back.gestures, cfg.gestures);
     let _ = std::fs::remove_dir_all(&d);
 }

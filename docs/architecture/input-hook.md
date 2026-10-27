@@ -49,6 +49,7 @@ The order is what the separate taps did at a fresh start of the app (the only de
 | 850 | scroll-reverser | scroll | direction and smoothing before routing and before FancyZones' layout wheel |
 | 800 | mwb (`pm-input` capture) | keys, buttons, moves, scroll | swallows all input while controlling a remote machine |
 | 700 | mouse-tuning | other-mouse buttons | button actions are local; a remote machine gets the real button |
+| 650 | gestures (click watcher) | left button, left drags | tells trackpad taps from clicks and swallows the click of a bound N-finger click; only while a tap or click is bound or a gesture is being recorded |
 | 600 | text-expander | key down, clicks | sees the remapped keys; its typed replacement reaches the subscribers below |
 | 550 | dock-previews | moves, buttons, scroll, key down | its panel's clicks and keys |
 | 500 | window-switcher | keys, flagsChanged, moves, left button | Option+Tab, Cmd+Tab take-over |

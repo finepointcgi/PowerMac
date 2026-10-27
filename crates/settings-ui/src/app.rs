@@ -19,11 +19,39 @@ use crate::widgets::*;
 use crate::mu_color::color_edit;
 use crate::zone_style;
 
+mod automation;
+mod battery;
+mod mixer;
+mod network;
 mod notch_widgets;
 mod pages;
 mod pages2;
 mod pages3;
 mod setup;
+
+/// Phosphor glyphs the shared icon set (`pm_ui::theme::icon`) doesn't name.
+#[allow(dead_code)]
+mod glyph5 {
+    pub const BATTERY_CHARGING: &str = "\u{E0BA}";
+    pub const BATTERY_HIGH: &str = "\u{E0C2}";
+    pub const BROADCAST: &str = "\u{E0F2}";
+    pub const CODE: &str = "\u{E1BC}";
+    pub const EQUALIZER: &str = "\u{EBBC}";
+    pub const FADERS: &str = "\u{E228}";
+    pub const FLOW_ARROW: &str = "\u{E6EC}";
+    pub const FUNNEL: &str = "\u{E266}";
+    pub const GAUGE: &str = "\u{E628}";
+    pub const GLOBE: &str = "\u{E288}";
+    pub const HAND_SWIPE_LEFT: &str = "\u{EC94}";
+    pub const HAND_TAP: &str = "\u{EC90}";
+    pub const MICROPHONE: &str = "\u{E326}";
+    pub const PLAY_CIRCLE: &str = "\u{E3D2}";
+    pub const PLUG: &str = "\u{E946}";
+    pub const SHIELD_WARNING: &str = "\u{E412}";
+    pub const STOP_CIRCLE: &str = "\u{E46E}";
+    pub const TERMINAL: &str = "\u{E47E}";
+    pub const WAVEFORM: &str = "\u{E802}";
+}
 
 /// Wait this long after the last change before writing the file.
 const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -191,6 +219,26 @@ fn meta(p: Page) -> Meta {
             Color32::from_rgb(0x30, 0xB0, 0xC7),
             "Save the apps and windows on your screens as a workspace, and bring them all back with one click.",
         ),
+        Page::Mixer => (
+            glyph5::FADERS,
+            Color32::from_rgb(0xFF, 0x2D, 0x55),
+            "Mix apps, microphones and virtual devices into any output, with gain, mute, solo, EQ, a limiter and live meters.",
+        ),
+        Page::Battery => (
+            icon::LIGHTNING,
+            Color32::from_rgb(0x30, 0xB0, 0x50),
+            "Battery health at a glance, and a charge limit that keeps it from sitting at 100 %.",
+        ),
+        Page::Automation => (
+            icon::MAGIC_WAND,
+            Color32::from_rgb(0x7D, 0x5B, 0xF6),
+            "Hotkeys, mouse buttons and trackpad gestures that run shell commands, open apps and URLs, type text or press shortcuts.",
+        ),
+        Page::Network => (
+            glyph5::GLOBE,
+            Color32::from_rgb(0x00, 0x8C, 0xA8),
+            "See which apps talk to the network right now, and write per-app firewall rules for them.",
+        ),
         Page::Welcome => (
             icon::SPARKLE,
             Color32::from_rgb(0x0A, 0x7A, 0xF5),
@@ -334,6 +382,12 @@ pub struct SettingsApp {
     // Workspaces and MWB pairing (app/pages3.rs)
     ws: pages3::WorkspacesUi,
     pairing: pages3::PairingUi,
+    // Routing, mixer, battery, network, automation (app/mixer.rs, battery.rs,
+    // network.rs, automation.rs)
+    mixer_ui: mixer::MixerUi,
+    battery_ui: battery::BatteryUi,
+    net: network::NetUi,
+    auto: automation::AutomationUi,
 }
 
 impl SettingsApp {
@@ -411,6 +465,10 @@ impl SettingsApp {
             update_state: pm_config::bridge::read(&config_path, pm_config::bridge::UPDATE_STATUS_FILE).map(|s| s.data),
             ws: Default::default(),
             pairing: Default::default(),
+            mixer_ui: Default::default(),
+            battery_ui: Default::default(),
+            net: Default::default(),
+            auto: Default::default(),
             config_path,
         };
         if !s.config_path.exists() {
@@ -603,6 +661,7 @@ impl SettingsApp {
         self.flush_display_request(false);
         self.flush_audio_request(false);
         self.collect_background(ctx);
+        self.tick_int5(ctx);
         if now - self.last_poll >= POLL {
             self.last_poll = now;
             if mtime(&self.config_path) != self.app_file.mtime && self.app_file.clean() {
@@ -620,6 +679,7 @@ impl SettingsApp {
             self.poll_new_modules();
             self.poll_setup();
             self.poll_pages3();
+            self.poll_int5();
             if let Some(pm_config::bridge::SettingsRequest::ShowPage { page }) =
                 self.settings_requests.poll::<pm_config::bridge::SettingsRequest>(&self.config_path, pm_config::bridge::SETTINGS_REQUEST_FILE)
             {
@@ -690,6 +750,8 @@ impl SettingsApp {
             Page::TextExpander => Some(c.text_expander.enabled),
             Page::MenuBar => Some(c.menu_bar.enabled),
             Page::Workspaces => Some(c.workspaces.enabled),
+            Page::Mixer => Some(c.audio.mixer.enabled),
+            Page::Battery | Page::Automation | Page::Network => None,
             Page::Welcome => None,
         }
     }
@@ -720,7 +782,8 @@ impl SettingsApp {
             Page::TextExpander => c.text_expander.enabled = on,
             Page::MenuBar => c.menu_bar.enabled = on,
             Page::Workspaces => c.workspaces.enabled = on,
-            Page::General | Page::FileTools | Page::NotchWidgets | Page::Welcome => {}
+            Page::Mixer => c.audio.mixer.enabled = on,
+            Page::General | Page::FileTools | Page::NotchWidgets | Page::Welcome | Page::Battery | Page::Automation | Page::Network => {}
         }
     }
 
@@ -1174,7 +1237,10 @@ impl SettingsApp {
         let m = meta(page);
         let p = pal(ui);
         ui.add_space(30.0);
-        let master = !matches!(page, Page::General | Page::MouseUtils | Page::FileTools | Page::NotchWidgets | Page::Welcome);
+        let master = !matches!(
+            page,
+            Page::General | Page::MouseUtils | Page::FileTools | Page::NotchWidgets | Page::Welcome | Page::Battery | Page::Automation | Page::Network
+        );
         let mut on = self.module_on(page).unwrap_or(false);
         card_frame(&p)
             .inner_margin(egui::Margin::same(20))
@@ -1244,6 +1310,10 @@ impl SettingsApp {
             Page::TextExpander => self.text_expander(ui),
             Page::MenuBar => self.menu_bar(ui),
             Page::Workspaces => self.workspaces_page(ui),
+            Page::Mixer => self.mixer_page(ui),
+            Page::Battery => self.battery_page(ui),
+            Page::Automation => self.automation_page(ui),
+            Page::Network => self.network_page(ui),
             Page::Welcome => self.general(ui),
         }
     }
@@ -3144,6 +3214,7 @@ impl SettingsApp {
         self.mwb_status = pm_config::MwbStatus::load_for(&self.config_path);
         self.poll_new_modules();
         self.poll_pages3();
+        self.poll_int5();
     }
     pub fn set_devices_for_test(&mut self, d: Vec<mouse_tuning::DeviceInfo>) {
         self.devices = Some(d);

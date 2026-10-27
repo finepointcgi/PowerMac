@@ -39,7 +39,7 @@ All settings are plain JSON files that you can edit with the settings window, th
 | `awake` | [Awake](../features/awake.md) | off |
 | `scrollReverser` | [Scrolling](../features/scrolling.md) | on (macOS) |
 | `mouseUtils` | [Mouse Utilities](../features/mouse-utils.md) | per tool |
-| `keyboardManager` | [Keyboard Manager](../features/keyboard-manager.md) | on |
+| `keyboardManager` | [Keyboard Manager](../features/keyboard-manager.md), [hotkeys](../features/automation.md#hotkeys) (`hotkeys`) | on |
 | `mouseTuning` | [Mouse tuning](../features/mouse-tuning.md) | changes nothing until set |
 | `displayControl` | [Displays](../features/displays.md) | on |
 | `clipboardHistory` | [Clipboard History](../features/clipboard-history.md) | off |
@@ -48,7 +48,9 @@ All settings are plain JSON files that you can edit with the settings window, th
 | `textExtractor` | [Text Extractor](../features/text-extractor.md) | on |
 | `windowSwitcher` | [Window Switcher](../features/window-switcher.md) | on |
 | `displayScaling` | [Display Scaling](../features/display-scaling.md) | off |
-| `audio` | [Sound](../features/sound.md) | on |
+| `audio` | [Sound](../features/sound.md), [app routing and the mixer](../features/audio-routing-mixer.md) (`appRoutes`, `mixer`) | on; no routes, mixer off |
+| `batteryLimit` | [Battery](../features/battery.md) charge limit | off |
+| `gestures` | [Trackpad gestures](../features/automation.md#trackpad-gestures) | on, nothing bound |
 | `dockPreviews` | [Dock Previews](../features/dock-previews.md) | on |
 | `textExpander` | [Text Expander](../features/text-expander.md) | off |
 | `menuBar` | [Menu Bar Manager](../features/menu-bar.md) | off |

@@ -41,15 +41,25 @@ else
   SUFFIX=
 fi
 
+# The PowerMac Audio virtual device (HAL plug-in). It is only shipped in
+# Contents/Resources (audio_control::driver::find_bundled_driver looks
+# there); installing it is a separate, confirmed step in Settings → Sound.
+# build-audio-driver.sh honors UNIVERSAL / SIGN_IDENTITY / CARGO_TARGET_DIR
+# and signs the driver bundle itself.
+DRIVER="PowerMac Audio.driver"
+sh scripts/build-audio-driver.sh
+
 APP="$OUT/PowerMac.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 for B in $BINS; do
   cp "$OUT/$B$SUFFIX" "$APP/Contents/MacOS/$B"
 done
 for L in $LIBS; do
   cp "$OUT/$L$SUFFIX" "$APP/Contents/Frameworks/$L"
 done
+# ditto keeps the driver's own signature intact.
+ditto "$OUT/$DRIVER" "$APP/Contents/Resources/$DRIVER"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -66,7 +76,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSAudioCaptureUsageDescription</key><string>PowerMac sets a volume for each app (Sound → Per-app volume). Nothing is recorded.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>PowerMac sets a volume for each app and routes or mixes app audio (Sound → Per-app volume, App routing, Mixer). Nothing is recorded.</string>
+  <key>NSMicrophoneUsageDescription</key><string>The Sound mixer plays microphones and audio interfaces you add as sources into the outputs you choose. Nothing is recorded or sent anywhere.</string>
   <key>NSCalendarsFullAccessUsageDescription</key><string>The Notch Shelf's Calendar widget shows your next events.</string>
   <key>NSCalendarsUsageDescription</key><string>The Notch Shelf's Calendar widget shows your next events.</string>
   <key>NSRemindersFullAccessUsageDescription</key><string>The Notch Shelf's Reminders widget shows your open reminders and lets you tick them off.</string>
@@ -84,6 +95,7 @@ if [ -n "$SIGN_IDENTITY" ]; then
     codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/Frameworks/$L"
   done
   codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
+  codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP/Contents/Resources/$DRIVER"
   codesign --force --options runtime --timestamp --entitlements "$ENT" -s "$SIGN_IDENTITY" "$APP"
   codesign --verify --strict --verbose=2 "$APP"
   echo "built $APP (signed with $SIGN_IDENTITY)"
@@ -96,10 +108,12 @@ fi
 IDENTITY="PowerMac Local Signing"
 if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
   codesign --force -s "$IDENTITY" "$APP/Contents/MacOS/powermac-battery-helper"
+  codesign --force -s "$IDENTITY" "$APP/Contents/Resources/$DRIVER"
   codesign --force --deep -s "$IDENTITY" "$APP"
 else
   echo "note: ad-hoc signing; run scripts/create-signing-cert.sh once to keep permissions across rebuilds"
   codesign --force -s - "$APP/Contents/MacOS/powermac-battery-helper"
+  codesign --force -s - "$APP/Contents/Resources/$DRIVER"
   codesign --force --deep -s - "$APP"
 fi
 echo "built $APP — move it to /Applications and open it"

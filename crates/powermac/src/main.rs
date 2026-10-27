@@ -3,9 +3,11 @@
 
 mod app_glue;
 mod audio_glue;
+mod battery_glue;
 mod children;
 mod clipboard;
 mod display_glue;
+mod gestures_glue;
 mod menubar_glue;
 mod modules;
 mod mwb_glue;
@@ -219,6 +221,9 @@ pub(crate) struct Running {
     pub(crate) switcher: Option<window_switcher::Handle>,
     pub(crate) scaling: Option<display_scaling::Handle>,
     pub(crate) audio: Option<audio_control::Handle>,
+    /// Always running (status only while the limit is off).
+    pub(crate) battery: Option<battery_limit::Handle>,
+    pub(crate) gestures: Option<gestures::Handle>,
     pub(crate) dock: Option<dock_previews::Handle>,
     pub(crate) expander: Option<text_expander::Handle>,
     /// Shared so that listing / moving items (which wait for the main
@@ -245,6 +250,7 @@ impl Running {
             || self.switcher.is_some()
             || self.scaling.is_some()
             || self.audio.is_some()
+            || self.gestures.is_some()
             || self.dock.is_some()
             || self.expander.is_some()
             || self.menubar.is_some()
@@ -319,8 +325,15 @@ pub(crate) fn shutdown() {
             scaling_glue::write_stopped();
         }
         if let Some(a) = r.audio.take() {
-            a.stop(); // removes the per-app volume taps
+            a.stop(); // removes the per-app volume taps and the mixer
             audio_glue::write_stopped();
+        }
+        if let Some(g) = r.gestures.take() {
+            g.stop(); // stops reading the trackpad
+            gestures_glue::write_stopped();
+        }
+        if let Some(b) = r.battery.take() {
+            b.stop(); // gives charging back to the firmware
         }
         drop(r.color.take());
         drop(r.ocr.take());
@@ -617,6 +630,10 @@ fn run(path: &std::path::Path, tray: bool, open_settings: Option<String>) -> Res
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
     }
+    // Shell actions (hotkeys, mouse buttons, gestures): per-action logs in
+    // the app's log folder, finish notifications through the app.
+    keyboard_manager::automation::set_log_dir(log_path().and_then(|p| p.parent().map(|d| d.to_path_buf())));
+    keyboard_manager::automation::set_notifier(Some(std::sync::Arc::new(|title: &str, body: &str| tray::notify(title, body))));
     let mut running = Running::default();
     modules::apply(&mut running, None, &cfg);
     modules::watch(path, cfg.clone());
@@ -697,12 +714,13 @@ fn doctor(path: &std::path::Path, prompt: bool) -> Result<()> {
     let cfg = AppConfig::load_or_default(path)?;
     println!("modules: mwb={} fancyzones={} awake={} scroll={} mouse-tuning={} keyboard={} displays={} \
               clipboard={} shelf={} color-picker={} text-extractor={} window-switcher={} display-scaling={} \
-              sound={} dock-previews={} text-expander={} menu-bar={}",
+              sound={} battery-limit={} gestures={} hotkeys={} dock-previews={} text-expander={} menu-bar={}",
         cfg.mwb.enabled, cfg.fancyzones.enabled, cfg.awake.enabled, cfg.scroll_reverser.enabled,
         cfg.mouse_tuning.enabled, cfg.keyboard_manager.enabled, cfg.display_control.enabled,
         cfg.clipboard_history.enabled, cfg.notch_shelf.enabled, cfg.color_picker.enabled,
         cfg.text_extractor.enabled, cfg.window_switcher.enabled, cfg.display_scaling.enabled,
-        cfg.audio.enabled, cfg.dock_previews.enabled, cfg.text_expander.enabled, cfg.menu_bar.enabled);
+        cfg.audio.enabled, cfg.battery_limit.enabled, cfg.gestures.bindings.len(), cfg.keyboard_manager.hotkeys.len(),
+        cfg.dock_previews.enabled, cfg.text_expander.enabled, cfg.menu_bar.enabled);
     println!("caps lock: {:?}", cfg.keyboard_manager.hyper_key.mode);
     println!("machine name: {}", cfg.mwb.settings.effective_machine_name());
     println!("mwb key valid: {}", mwb::crypto::is_key_valid(&cfg.mwb.settings.key));
@@ -714,6 +732,17 @@ fn doctor(path: &std::path::Path, prompt: bool) -> Result<()> {
     println!("hidpi (virtual displays) supported: {}", display_scaling::hidpi_supported());
     println!("per-app volume supported: {} (audio capture permission: {:?})",
         audio_control::per_app_volume_supported(), audio_control::capture_permission());
+    println!("audio driver: {:?} (bundled: {})", audio_control::driver::status(audio_control::driver::find_bundled_driver().as_deref()),
+        audio_control::driver::find_bundled_driver().map(|p| p.display().to_string()).unwrap_or_else(|| "no".into()));
+    let b = battery_limit::read_battery();
+    if b.has_battery {
+        println!("battery: {}% (helper installed: {}, bundled helper: {})", b.percent.unwrap_or(0), battery_limit::helper_installed(),
+            battery_limit::bundled_helper_path().is_some());
+    }
+    println!("trackpad gestures: {}", match gestures::availability() {
+        Ok(d) => format!("available ({} trackpad{})", d.len(), if d.len() == 1 { "" } else { "s" }),
+        Err(e) => e,
+    });
     for (i, s) in backend.screens()?.iter().enumerate() {
         println!("screen {i}: {}x{} at ({}, {})", s.width(), s.height(), s.left, s.top);
     }

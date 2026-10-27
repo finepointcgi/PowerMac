@@ -1,6 +1,6 @@
 //! Status and request files between the running app and the settings
 //! window, which is a separate process and never drives Display Scaling,
-//! audio taps or the battery helper itself (same pattern as
+//! audio taps, the mixer, the trackpad reader or the battery helper itself (same pattern as
 //! `display-status.json` / `display-set.json`).
 //!
 //! The app rewrites each status file every couple of seconds while the
@@ -20,8 +20,29 @@ pub const SCALING_STATUS_FILE: &str = "display-scaling-status.json";
 pub const SCALING_REQUEST_FILE: &str = "display-scaling-request.json";
 /// Sound: devices, apps, permission (written by the app).
 pub const AUDIO_STATUS_FILE: &str = "audio-status.json";
-/// Sound: default device, device and app levels (written by the settings window).
+/// Sound: default device, device and app levels, routes and the mixer
+/// (written by the settings window).
 pub const AUDIO_REQUEST_FILE: &str = "audio-request.json";
+/// Sound: "the Sound or Mixer page is open" ([`AudioWatch`], rewritten by the
+/// settings window every second while it is). While it is fresh the app
+/// lists the apps playing audio, and with `meters` writes
+/// [`AUDIO_METERS_FILE`] about 20 times a second.
+pub const AUDIO_WATCH_FILE: &str = "audio-watch.json";
+/// Sound: the mixer's live meters (`audio_control::Meters`, written by the
+/// app at ~20 Hz only while [`AUDIO_WATCH_FILE`] asks for them).
+pub const AUDIO_METERS_FILE: &str = "audio-meters.json";
+/// An [`AudioWatch`] older than this is ignored (the page was closed).
+pub const AUDIO_WATCH_FRESH_MS: u64 = 3_000;
+/// Battery: `battery_limit::BatteryStatus` (written by the app every 5 s).
+pub const BATTERY_STATUS_FILE: &str = "battery-status.json";
+/// Battery: charge to 100 % now / refresh (written by the settings window).
+pub const BATTERY_REQUEST_FILE: &str = "battery-request.json";
+/// Gestures: engine state and recorded gestures (written by the app).
+pub const GESTURES_STATUS_FILE: &str = "gestures-status.json";
+/// Gestures: start / keep / stop recording (written by the settings window).
+pub const GESTURES_REQUEST_FILE: &str = "gestures-request.json";
+/// Recording stops when the settings window hasn't renewed it for this long.
+pub const GESTURES_RECORD_KEEPALIVE_MS: u64 = 6_000;
 
 /// Menu bar: items and their sections (written by the app).
 pub const MENUBAR_STATUS_FILE: &str = "menubar-status.json";
@@ -188,6 +209,8 @@ pub struct AudioStatus {
     pub per_app_supported: bool,
     pub capture_permission: audio_control::CapturePermission,
     pub error: Option<String>,
+    /// Routes and mixer strips as they run (`Handle::mixer_state`).
+    pub mixer: Option<audio_control::MixerState>,
 }
 
 impl Default for AudioStatus {
@@ -200,8 +223,17 @@ impl Default for AudioStatus {
             per_app_supported: false,
             capture_permission: audio_control::CapturePermission::NotApplicable,
             error: None,
+            mixer: None,
         }
     }
+}
+
+/// What the settings window shows of Sound right now (see [`AUDIO_WATCH_FILE`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AudioWatch {
+    /// The mixer's strips are on screen: write the meters.
+    pub meters: bool,
 }
 
 /// A change the settings window asks the app to make.
@@ -216,6 +248,63 @@ pub enum AudioRequest {
     /// Show the macOS audio-capture permission prompt (from the app, which
     /// owns the permission).
     RequestPermission,
+    /// Replace the mixer (`Handle::set_mixer`: gains, mutes, solo, sends, EQ
+    /// and limiter apply without a rebuild). The app also saves it.
+    SetMixer { mixer: audio_control::Mixer },
+    /// Add / replace (`Some`) or remove (`None`) one app's route.
+    SetRoute { bundle_id: String, route: Option<audio_control::AppRoute> },
+}
+
+// ---------------------------------------------------------------------------
+// Battery
+
+/// A change the settings window asks the app to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum BatteryRequest {
+    /// Charge to 100 % until the adapter is unplugged.
+    ChargeToFull,
+    /// Re-read the battery and the helper now (e.g. after installing it).
+    Refresh,
+}
+
+// ---------------------------------------------------------------------------
+// Gestures
+
+/// One gesture performed while recording.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RecordedGesture {
+    /// Milliseconds since the Unix epoch.
+    pub at: u64,
+    /// `gestures::Gesture` as text ("3-finger-swipe-left").
+    pub gesture: String,
+}
+
+/// What the running gesture engine reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GesturesStatus {
+    /// "off", "running" or "unavailable".
+    pub state: String,
+    /// Why it is unavailable, or what runs ("1 trackpad").
+    pub detail: String,
+    pub devices: usize,
+    /// The click watcher (taps and clicks) couldn't start.
+    pub clicks_error: Option<String>,
+    pub recording: bool,
+    /// The latest gestures seen while recording (newest last, at most 8).
+    pub recorded: Vec<RecordedGesture>,
+}
+
+/// A request from the settings window to the running gesture engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum GesturesRequest {
+    /// Start (or keep) recording: the trackpad is read, gestures are
+    /// reported in the status and no action runs. Renew it at least every
+    /// [`GESTURES_RECORD_KEEPALIVE_MS`]; `on: false` stops at once.
+    Record { on: bool },
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +606,40 @@ mod tests {
         write(&cfg, APP_STATUS_FILE, &st).unwrap();
         assert_eq!(read_fresh::<AppStatus>(&cfg, APP_STATUS_FILE, STATUS_FRESH_MS), Some(st));
         assert!(std::fs::read_to_string(dir.join(APP_STATUS_FILE)).unwrap().contains("\"waitingForPermission\""));
+
+        write(&cfg, BATTERY_REQUEST_FILE, &BatteryRequest::ChargeToFull).unwrap();
+        assert_eq!(read_fresh::<BatteryRequest>(&cfg, BATTERY_REQUEST_FILE, REQUEST_FRESH_MS), Some(BatteryRequest::ChargeToFull));
+        assert!(std::fs::read_to_string(dir.join(BATTERY_REQUEST_FILE)).unwrap().contains("\"chargeToFull\""));
+
+        let mut mixer = audio_control::Mixer { enabled: true, ..Default::default() };
+        mixer.set_send("a", "b", -3.0, false);
+        let req = AudioRequest::SetMixer { mixer };
+        write(&cfg, AUDIO_REQUEST_FILE, &req).unwrap();
+        assert_eq!(read::<AudioRequest>(&cfg, AUDIO_REQUEST_FILE).unwrap().data, req);
+        let req = AudioRequest::SetRoute { bundle_id: "com.spotify.client".into(), route: None };
+        write(&cfg, AUDIO_REQUEST_FILE, &req).unwrap();
+        assert!(std::fs::read_to_string(dir.join(AUDIO_REQUEST_FILE)).unwrap().contains("\"setRoute\""));
+        assert_eq!(read::<AudioRequest>(&cfg, AUDIO_REQUEST_FILE).unwrap().data, req);
+        // Status files from before the mixer existed still load.
+        let old: AudioStatus = serde_json::from_str(r#"{"running": true, "capturePermission": "granted"}"#).unwrap();
+        assert!(old.running && old.mixer.is_none());
+        write(&cfg, AUDIO_WATCH_FILE, &AudioWatch { meters: true }).unwrap();
+        assert_eq!(read_fresh::<AudioWatch>(&cfg, AUDIO_WATCH_FILE, AUDIO_WATCH_FRESH_MS), Some(AudioWatch { meters: true }));
+        write(&cfg, AUDIO_METERS_FILE, &audio_control::Meters::default()).unwrap();
+        assert!(read_fresh::<audio_control::Meters>(&cfg, AUDIO_METERS_FILE, 1_000).is_some());
+
+        let g = GesturesStatus {
+            state: "running".into(),
+            devices: 1,
+            recording: true,
+            recorded: vec![RecordedGesture { at: 5, gesture: "3-finger-tap".into() }],
+            ..Default::default()
+        };
+        write(&cfg, GESTURES_STATUS_FILE, &g).unwrap();
+        assert_eq!(read_fresh::<GesturesStatus>(&cfg, GESTURES_STATUS_FILE, STATUS_FRESH_MS), Some(g));
+        write(&cfg, GESTURES_REQUEST_FILE, &GesturesRequest::Record { on: true }).unwrap();
+        assert!(std::fs::read_to_string(dir.join(GESTURES_REQUEST_FILE)).unwrap().contains("\"record\""));
+        assert_eq!(read::<GesturesRequest>(&cfg, GESTURES_REQUEST_FILE).unwrap().data, GesturesRequest::Record { on: true });
 
         let old = Stamped { at: 1, data: MenuBarRequest::List };
         assert!(!old.is_fresh(REQUEST_FRESH_MS));

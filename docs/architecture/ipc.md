@@ -29,8 +29,14 @@ All files live next to `config.json` and are written atomically (temp file + ren
 | `display-set.json` | settings → app | brightness / contrast / volume / mute | polled every 150 ms, ignored if > 3 s old |
 | `display-scaling-status.json` | app → settings | displays, modes, pending confirmations | 2 s (0.5 s while pending) |
 | `display-scaling-request.json` | settings → app | apply / confirm / revert | polled |
-| `audio-status.json` | app → settings | devices, apps playing, permission | every 2 s |
-| `audio-request.json` | settings → app | default device, levels | polled every 150 ms |
+| `audio-status.json` | app → settings | devices, apps playing, permission, route and mixer strip states | every 2 s |
+| `audio-request.json` | settings → app | default device, levels, the mixer (`setMixer`), a route (`setRoute`) | polled every 150 ms |
+| `audio-watch.json` | settings → app | "the Sound / Mixer page is open" (`meters: true` on the Mixer page) | renewed every second, stale after 3 s |
+| `audio-meters.json` | app → settings | mixer meters (`audio_control::Meters`) | every 50 ms, only while `audio-watch.json` asks for meters |
+| `battery-status.json` | app → settings | `battery_limit::BatteryStatus` (strategy, helper, native limit) | every 5 s |
+| `battery-request.json` | settings → app | charge to 100 % now, refresh | polled every 250 ms |
+| `gestures-status.json` | app → settings | gesture engine state, recorded gestures | every 2 s, and right after a recorded gesture |
+| `gestures-request.json` | settings → app | start / renew / stop recording | polled every 150 ms; recording ends 6 s after the last renewal |
 | `menubar-status.json` | app → settings | permissions, items and their sections | on request |
 | `menubar-request.json` | settings → app | list / move / show / hide | polled |
 | `notch-status.json` | app → settings | Script / xbar / Web widget results, reminder lists, widget permission states | every 2 s while the shelf runs |

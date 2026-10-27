@@ -7,6 +7,21 @@ Crate: `crates/net-monitor` · Command line: `powermac net …` · Rules: `net-r
 !!! warning "The rules aren't enforced yet"
     The monitor is read-only and the rules are a **model**: PowerMac stores them, checks them against live traffic (`powermac net audit`) and tells you what they *would* do, but it blocks nothing. Blocking needs a Network Extension content filter on macOS, which requires an entitlement only Apple's paid developer program can grant, or a WFP callout driver on Windows.
 
+## Settings → Network
+
+The **Network** page (Security & Network; tray → **Network activity…**; `powermac settings --page network`) shows the same data live, refreshed every 1.5 s while the page is open. The settings window takes the snapshots itself (the monitor is read-only), so it works without the app.
+
+- **Connections**: apps with their connections, expandable, with scope badges (internet, local network, loopback), a filter for apps, addresses and ports, and *Rule…* to write a rule for an app.
+- **Rules**: the default action, every rule with an on/off switch, edit and remove, an editor (action, app, remote, ports, protocol, direction, high priority, note) and Little Snitch `.lsrules` import.
+- **Audit**: what the rules would deny or ask about among the connections open right now.
+
+A banner on the page says plainly that nothing is blocked. No system firewall setting is ever changed.
+
+<figure markdown="span">
+  ![The Network settings page](../assets/screenshots/settings-network.png){ loading=lazy }
+  <figcaption>Live connections grouped by app.</figcaption>
+</figure>
+
 ## Monitor
 
 ```bash

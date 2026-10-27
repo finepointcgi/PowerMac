@@ -90,7 +90,7 @@ impl SettingsApp {
         }
     }
 
-    fn note(&self, ui: &mut Ui, what: &str) {
+    pub(super) fn note(&self, ui: &mut Ui, what: &str) {
         match self.notes.get(what) {
             Some(Ok(m)) if !m.is_empty() => {
                 ok_label(ui, m);
@@ -488,7 +488,29 @@ impl SettingsApp {
         if let Some(e) = status.as_ref().and_then(|s| s.error.clone()) {
             warn_label(ui, &e);
         }
+        self.routing_card(ui);
         if mac {
+            let mixer_on = self.app.cfg.audio.mixer.enabled;
+            let n = self.app.cfg.audio.mixer.sources.len();
+            let mut open = false;
+            card(ui, "Mixer", |ui| {
+                let desc = if mixer_on {
+                    format!("On · {n} source{}", if n == 1 { "" } else { "s" })
+                } else {
+                    "Mix apps, microphones and virtual devices into any output, with EQ, a limiter and meters.".to_string()
+                };
+                let (_, label) = icon_row(ui, super::glyph5::FADERS, SOUND_TINT, "Mixer", Some(&desc), |ui| {
+                    if icon_text_button(ui, icon::CARET_RIGHT, "Open").clicked() {
+                        open = true;
+                    }
+                });
+                if label.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    open = true;
+                }
+            });
+            if open {
+                self.set_page(Page::Mixer);
+            }
             self.sound_driver_card(ui);
         }
         for r in level_req {
@@ -617,11 +639,12 @@ impl SettingsApp {
     fn queue_audio_request(&mut self, r: AudioRequest) {
         // Slider drags replace each other; anything else goes out at once.
         let same = matches!((&self.audio_pending, &r),
-            (Some(AudioRequest::AppVolume { bundle_id: a, .. }), AudioRequest::AppVolume { bundle_id: b, .. }) if a == b);
+            (Some(AudioRequest::AppVolume { bundle_id: a, .. }), AudioRequest::AppVolume { bundle_id: b, .. }) if a == b)
+            || matches!((&self.audio_pending, &r), (Some(AudioRequest::SetMixer { .. }), AudioRequest::SetMixer { .. }));
         if !same {
             self.flush_audio_request(true);
         }
-        let urgent = !matches!(r, AudioRequest::AppVolume { .. });
+        let urgent = !matches!(r, AudioRequest::AppVolume { .. } | AudioRequest::SetMixer { .. });
         self.audio_pending = Some(r);
         if urgent {
             self.flush_audio_request(true);

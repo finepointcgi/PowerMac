@@ -84,9 +84,9 @@ mod engine;
 pub use engine::{GestureEvent, Gestures, Handle, Listener};
 
 /// Where the click subscriber sits in the shared input hook: after mouse
-/// tuning (700) and before the text expander (600). (Not yet in
-/// `pm_hook::priority`; see docs/architecture/input-hook.md.)
-pub const PRIORITY: i32 = 650;
+/// tuning (700) and before the text expander (600); see
+/// docs/architecture/input-hook.md.
+pub const PRIORITY: i32 = pm_hook::priority::GESTURES;
 
 // ---------------------------------------------------------------------------
 // Gestures

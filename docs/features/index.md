@@ -16,16 +16,19 @@ Every module can be turned on or off on its own in **Settings** or in `config.js
 | [Scrolling](scrolling.md) | on (macOS) | — | Accessibility | yes |
 | [Mouse Utilities](mouse-utils.md) | per tool | double Left Ctrl, Cmd+Shift+H, Cmd+Option+P | Accessibility, Input Monitoring | yes |
 | [Keyboard Manager](keyboard-manager.md) | on | Cmd+Option+Shift+V (paste plain) | Accessibility, Input Monitoring | yes |
+| [Automation](automation.md): hotkeys, mouse buttons, gestures | nothing bound | your own | Accessibility | hotkeys and buttons |
 | [Text Expander](text-expander.md) | off | type a trigger | Accessibility | yes |
 | [Displays](displays.md) | on | brightness / volume keys | Accessibility (keys only) | yes |
 | [Display Scaling](display-scaling.md) | off | — | none (admin for override plists) | modes only |
 | [Sound](sound.md) | on | — | Audio capture (per-app volume) | yes |
+| [App routing and Mixer](audio-routing-mixer.md) | no routes, mixer off | — | System Audio Recording (apps), Microphone (inputs) | routes only |
+| [Battery](battery.md) | status; limit off | tray battery line | admin password once (helper, on request) | status only |
 | [Awake](awake.md) | off | tray menu | none | yes |
 | [Clipboard History](clipboard-history.md) | off | Cmd+Shift+V | Accessibility (hotkey) | Win+Shift+V |
 | [Color Picker](color-picker.md) | on | Ctrl+Option+C | none | Win+Shift+C |
 | [Text Extractor](text-extractor.md) | on | Ctrl+Option+T | Screen Recording | Win+Shift+T |
 | [File Tools](file-tools.md) | Quick Actions installed on request | Finder right-click | none | Explorer verbs |
-| [Network Monitor](network-monitor.md) | command line (`powermac net`) | — | none (root to see other users' processes) | yes (UDP without peers) |
+| [Network Monitor](network-monitor.md) | Settings → Network, `powermac net` | tray → Network activity… | none (root to see other users' processes) | yes (UDP without peers) |
 
 ## Common behaviour
 

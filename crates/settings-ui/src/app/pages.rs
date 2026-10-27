@@ -35,6 +35,7 @@ impl SettingsApp {
         let ax = self.perms.map(|p| p.0);
         let devices = self.devices.get_or_insert_with(list_devices_deduped).clone();
         let mut refresh = false;
+        let mut go_automation = false;
         let rec = &mut self.recording;
         let m = &mut self.app.cfg.mouse_tuning;
 
@@ -180,6 +181,14 @@ impl SettingsApp {
                         }
                     }
                 }
+                if row(
+                    ui,
+                    "More actions",
+                    Some("Shell commands, apps, URLs and typed text for these buttons are on the Automation page."),
+                    |ui| icon_text_button(ui, icon::MAGIC_WAND, "Automation").clicked(),
+                ) {
+                    go_automation = true;
+                }
                 if mac {
                     if let Some(ok) = ax {
                         row(
@@ -194,6 +203,9 @@ impl SettingsApp {
         );
         if refresh {
             self.devices = None;
+        }
+        if go_automation {
+            self.set_page(Page::Automation);
         }
     }
 

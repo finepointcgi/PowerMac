@@ -77,7 +77,7 @@ impl Perm {
             Perm::Accessibility => "Move and resize other apps' windows, react to shortcuts and type for you.",
             Perm::InputMonitoring => "See the keyboard and mouse to share them with another computer and for hotkeys.",
             Perm::ScreenRecording => "Read text on screen and show live window thumbnails. Nothing is recorded or sent anywhere.",
-            Perm::AudioCapture => "Set a separate volume for each app. Nothing is recorded.",
+            Perm::AudioCapture => "Set a volume for each app, and route or mix app audio. Nothing is recorded.",
             Perm::Calendars => "Show your next events in the notch.",
             Perm::Reminders => "Show and tick off reminders in the notch.",
             Perm::Camera => "Show the camera when you click the notch mirror.",
@@ -364,8 +364,21 @@ pub fn needs(c: &AppConfig) -> Vec<Need> {
     if c.text_extractor.enabled {
         screen.push("Text Extractor");
     }
+    let mut capture = Vec::new();
     if c.audio.enabled && c.audio.per_app_volume {
-        other.push(Need { perm: Perm::AudioCapture, features: vec!["Per-app volume"] });
+        capture.push("Per-app volume");
+    }
+    if c.audio.enabled && c.audio.app_routes.values().any(|r| r.enabled) {
+        capture.push("App routing");
+    }
+    if c.audio.enabled && c.audio.mixer.enabled && c.audio.mixer.sources.iter().any(|s| matches!(s.kind, audio_control::SourceKind::App { .. })) {
+        capture.push("Mixer app sources");
+    }
+    if !capture.is_empty() {
+        other.push(Need { perm: Perm::AudioCapture, features: capture });
+    }
+    if c.gestures.enabled && c.gestures.swallow_clicks && c.gestures.needs_click_hook() {
+        ax.push("Trackpad taps and clicks");
     }
     let n = &c.notch_shelf;
     if n.enabled {
@@ -490,6 +503,10 @@ mod tests {
         c.workspaces.capture.browser_urls = true;
         let n = needs(&c);
         assert!(n.iter().any(|n| n.perm == Perm::AudioCapture));
+        let mut r = c.clone();
+        r.audio.per_app_volume = false;
+        r.audio.app_routes.insert("com.spotify.client".into(), audio_control::AppRoute::to(audio_control::DeviceMatch::name("AirPods")));
+        assert!(needs(&r).iter().any(|n| n.perm == Perm::AudioCapture && n.features == ["App routing"]));
         assert!(n.iter().any(|n| n.perm == Perm::Automation && n.features == ["Workspaces browser tabs"]));
         // Nothing on: core permissions listed without features, none missing.
         let mut off = AppConfig::default();
