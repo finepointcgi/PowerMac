@@ -379,11 +379,31 @@ fn observer_loop(stop: Arc<AtomicBool>, tx: Sender<Msg>, shared: Arc<Shared>) {
 
 // ----------------------------------------------------------------- worker
 
+/// The window's frame as the window server has it right now, falling back
+/// to Accessibility. During a drag the Accessibility position can stay at
+/// the old place until the mouse is released.
+fn live_frame(w: &MacWindow, wid: Option<u32>) -> Option<Rect> {
+    if let Some(r) = wid.and_then(window_server_bounds) {
+        return Some(Rect::from_xywh(
+            r.origin.x.round() as i32,
+            r.origin.y.round() as i32,
+            r.size.width.round() as i32,
+            r.size.height.round() as i32,
+        ));
+    }
+    w.element.frame().ok()
+}
+
 struct Pending {
     window: MacWindow,
     rect: Rect,
     down: Point,
     checks: u32,
+    /// Window server id, to follow the window while it's dragged.
+    wid: Option<u32>,
+    /// Where the window server had it at mouse-down (compared against
+    /// [`live_frame`]; `rect` is the Accessibility frame).
+    start: Rect,
     /// Mouse went down on the title bar (away from the resize edges), so any
     /// frame change is a move. macOS itself resizes tiled windows when a drag
     /// starts, which would otherwise look like a resize.
@@ -481,11 +501,18 @@ fn worker_loop(rx: Receiver<Msg>, shared: Arc<Shared>) {
                 shared.zones_shown.store(false, Ordering::Relaxed);
                 pending = MacWindow::at_point(p).and_then(|w| {
                     if w.is_fullscreen() {
+                        log::debug!("fancyzones: mouse down at {p:?} on a full-screen window; ignored");
                         return None;
                     }
                     let rect = w.element.frame().ok()?;
-                    Some(Pending { window: w, rect, down: p, checks: 0, in_title_bar: in_title_bar(&rect, p) })
+                    let wid = w.element.window_id();
+                    let start = live_frame(&w, wid)?;
+                    Some(Pending { window: w, rect, down: p, checks: 0, wid, start, in_title_bar: in_title_bar(&rect, p) })
                 });
+                match &pending {
+                    Some(pd) => log::debug!("fancyzones: mouse down at {p:?} on window {:?} (title bar: {})", pd.rect, pd.in_title_bar),
+                    None => log::debug!("fancyzones: mouse down at {p:?}: no window found there"),
+                }
             }
             Some(Msg::MouseDragged(p, flags)) => {
                 if let Some(a) = &mut active {
@@ -499,18 +526,20 @@ fn worker_loop(rx: Receiver<Msg>, shared: Arc<Shared>) {
                     continue;
                 }
                 pd.checks += 1;
-                let Ok(now) = pd.window.element.frame() else {
+                let Some(now) = live_frame(&pd.window, pd.wid) else {
                     pending = None;
                     continue;
                 };
-                let resized = now.width() != pd.rect.width() || now.height() != pd.rect.height();
-                let moved = now.left != pd.rect.left || now.top != pd.rect.top;
+                let resized = now.width() != pd.start.width() || now.height() != pd.start.height();
+                let moved = now.left != pd.start.left || now.top != pd.start.top;
                 if resized && !pd.in_title_bar {
+                    log::debug!("fancyzones: window resized, not moved; no zones");
                     pending = None; // resizing, not moving
                 } else if moved || resized {
                     let pd = pending.take().unwrap();
                     let mut e = shared.engine();
                     if !e.is_processable(&ws, &pd.window) {
+                        log::debug!("fancyzones: window can't be snapped (excluded app, dialog or panel)");
                         continue; // excluded app / dialog / panel
                     }
                     let areas = match e.areas(&ws) {
@@ -520,6 +549,7 @@ fn worker_loop(rx: Receiver<Msg>, shared: Arc<Shared>) {
                             continue;
                         }
                     };
+                    log::debug!("fancyzones: drag started at {p:?}; work areas {:?}", areas.iter().map(|a| (&a.monitor.id, a.monitor.frame, a.layout.zones.len())).collect::<Vec<_>>());
                     e.drag_start(pd.window.key(), pd.rect);
                     if e.config.settings.make_dragged_window_transparent && !warned_transparency {
                         warned_transparency = true;
@@ -529,6 +559,7 @@ fn worker_loop(rx: Receiver<Msg>, shared: Arc<Shared>) {
                     update_drag(&shared, &mut e, &a);
                     active = Some(a);
                 } else if pd.checks > 40 {
+                    log::debug!("fancyzones: the window didn't move; treating it as a drag inside the window");
                     pending = None; // drag inside content, not a window move
                 }
             }

@@ -1311,8 +1311,25 @@ impl FzEdit {
 
 /// Write the edited parts into `path`, keeping what the running FancyZones
 /// keeps there itself (window history, custom layouts) as it is on disk now.
+///
+/// A monitor whose layout changed here gets it on every Space: its per-Space
+/// copies (`virtual_desktop_layouts`, used first when layouts per Space are
+/// on) are dropped, or they would keep overriding what was picked here.
 pub fn save_fancyzones(path: &Path, edit: &FzEdit) -> Result<()> {
     let mut c = load_fancyzones(path).unwrap_or_default();
+    let changed: Vec<String> = c
+        .applied_layouts
+        .keys()
+        .chain(edit.applied_layouts.keys())
+        .filter(|id| c.applied_layouts.get(*id) != edit.applied_layouts.get(*id))
+        .cloned()
+        .collect();
+    for per_space in c.virtual_desktop_layouts.values_mut() {
+        for id in &changed {
+            per_space.remove(id);
+        }
+    }
+    c.virtual_desktop_layouts.retain(|_, m| !m.is_empty());
     c.settings = edit.settings.clone();
     c.applied_layouts = edit.applied_layouts.clone();
     c.save_to(path)
@@ -1406,6 +1423,31 @@ pub fn validate_fancyzones(c: &fancyzones::Config) -> Vec<Problem> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fancyzones_layout_picked_in_settings_beats_per_space_copy() {
+        use fancyzones::{AppliedLayout, LayoutType};
+        let dir = std::env::temp_dir().join(format!("pm-fz-vd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fancyzones.json");
+        let grid = AppliedLayout::template(LayoutType::PriorityGrid, 3);
+        let cols = AppliedLayout::template(LayoutType::Columns, 2);
+        let mut disk = fancyzones::Config::default();
+        disk.settings.layouts_per_virtual_desktop = true;
+        for id in ["wide", "laptop"] {
+            disk.set_layout(id, Some("space-1"), grid.clone());
+        }
+        disk.save_to(&path).unwrap();
+
+        let mut edit = FzEdit::of(&disk);
+        edit.applied_layouts.insert("wide".into(), cols.clone());
+        save_fancyzones(&path, &edit).unwrap();
+
+        let c = fancyzones::Config::load_from(&path).unwrap();
+        assert_eq!(c.layout_for_desktop("wide", Some("space-1")), cols, "Settings' pick is used on the Space");
+        assert_eq!(c.layout_for_desktop("laptop", Some("space-1")), grid, "other monitors keep theirs");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn page_names() {
         use super::Page;
